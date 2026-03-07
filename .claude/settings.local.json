@@ -4,7 +4,9 @@
       "WebFetch(domain:nicksaraev.com)",
       "WebFetch(domain:github.com)",
       "Bash(where handy:*)",
-      "Bash(winget search:*)"
+      "Bash(winget search:*)",
+      "Bash(ls:*)",
+      "Bash(powershell.exe:*)"
     ]
   }
 }
