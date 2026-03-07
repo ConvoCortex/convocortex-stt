@@ -1,0 +1,10 @@
+{
+  "permissions": {
+    "allow": [
+      "WebFetch(domain:nicksaraev.com)",
+      "WebFetch(domain:github.com)",
+      "Bash(where handy:*)",
+      "Bash(winget search:*)"
+    ]
+  }
+}
