@@ -60,28 +60,11 @@ logging.getLogger("ctranslate2").setLevel(logging.WARNING)
 # ----------------------------
 # Pipe helpers
 # ----------------------------
-def get_pipe(name):
-    try:
-        return win32file.CreateFile(
-            PIPE_NAMES[name],
-            win32file.GENERIC_WRITE,
-            0, None,
-            win32file.OPEN_EXISTING,
-            0, None
-        )
-    except Exception:
-        return None
-
 def send_to_pipe(name, text):
     if not text: return
-    pipe = get_pipe(name)
-    if pipe:
-        try:
-            encoded = text.encode('utf-8')[:MESSAGE_SIZE]
-            padded = encoded + b'\x00' * (MESSAGE_SIZE - len(encoded))
-            win32file.WriteFile(pipe, struct.pack(f'{MESSAGE_SIZE}s', padded))
-        except Exception:
-            pass
+    with open(OUTPUT_FILE, 'a', encoding='utf-8') as f:
+        f.write(f"[{name}] {text}\n")
+        f.flush()
 
 # ----------------------------
 # Silero VAD Wrapper
