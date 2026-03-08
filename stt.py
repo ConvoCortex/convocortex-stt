@@ -13,8 +13,9 @@ from collections import deque
 
 import numpy as np
 import pyaudio
-import win32file
 from faster_whisper import WhisperModel
+
+OUTPUT_FILE = r"E:\Projects\STT\output.txt"
 
 # ----------------------------
 # Configuration
