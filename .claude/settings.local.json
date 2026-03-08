@@ -6,7 +6,9 @@
       "Bash(where handy:*)",
       "Bash(winget search:*)",
       "Bash(ls:*)",
-      "Bash(powershell.exe:*)"
+      "Bash(powershell.exe:*)",
+      "Bash(rustc:*)",
+      "Bash(grep:*)"
     ]
   }
 }
