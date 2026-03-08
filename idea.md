@@ -1,0 +1,1 @@
+first pass my thoughts to a tiniest weakest llm to clear out all the stt "uhm" and only then pass to actual llm

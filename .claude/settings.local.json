@@ -1,14 +1,12 @@
 {
   "permissions": {
     "allow": [
-      "WebFetch(domain:nicksaraev.com)",
       "WebFetch(domain:github.com)",
       "Bash(where handy:*)",
       "Bash(winget search:*)",
       "Bash(ls:*)",
-      "Bash(powershell.exe:*)",
-      "Bash(rustc:*)",
-      "Bash(grep:*)"
+      "WebFetch(domain:rust-lang.github.io)",
+      "WebFetch(domain:tauri.app)"
     ]
   }
 }
