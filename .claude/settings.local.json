@@ -1,12 +1,9 @@
 {
   "permissions": {
     "allow": [
-      "WebFetch(domain:github.com)",
       "Bash(where handy:*)",
       "Bash(winget search:*)",
-      "Bash(ls:*)",
-      "WebFetch(domain:rust-lang.github.io)",
-      "WebFetch(domain:tauri.app)"
+      "Bash(ls:*)"
     ]
   }
 }
