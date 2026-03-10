@@ -221,3 +221,9 @@ def register_all(cfg: dict, register):
         if fn:
             register(fn)
             logger.info("[handler] type_at_cursor")
+
+    if cfg["nats"]["enabled"]:
+        fn = make_nats_publisher(cfg)
+        if fn:
+            register(fn)
+            logger.info(f"[handler] nats_publisher -> {cfg['nats']['url']}")
