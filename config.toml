@@ -1,0 +1,78 @@
+[models]
+final          = "large-v3-turbo"
+final_device   = "cuda"
+final_compute  = "float16"
+realtime       = "tiny.en"
+realtime_device = "cpu"
+language       = "en"
+
+[audio]
+rate            = 16000
+chunk           = 512
+vad_threshold   = 0.4
+buffer_seconds  = 1.0
+silence_timeout = 0.8
+
+[realtime]
+check_interval   = 0.1
+min_chunks       = 40
+max_chunks       = 100
+queue_size       = 10
+
+# ── Output handlers ─────────────────────────────────────────────────────────
+# All default-on. Disable when a NATS consumer replaces them.
+
+[output.file_append]
+enabled = true
+path    = "output.txt"
+
+[output.file_overwrite]
+enabled = false
+path    = "watched.txt"
+
+[output.clipboard_replace]
+enabled = false
+
+[output.clipboard_accumulate]
+enabled   = false
+separator = " "
+
+[output.type_at_cursor]
+enabled = false
+
+[output.trailing_char]
+enabled = false
+char    = " "
+
+# ── Emission gate ────────────────────────────────────────────────────────────
+# Trigger words gate whether output is forwarded. Not a voice command engine.
+# String match on final transcriptions only.
+
+[emission_gate]
+enabled      = false
+default_open = true      # true = forwarding on at startup
+start_words  = ["listen", "start"]
+stop_words   = ["stop", "pause"]
+
+# ── Hotkeys ──────────────────────────────────────────────────────────────────
+# Empty string = disabled. Max four hotkeys.
+
+[hotkeys]
+emission_gate_toggle = "ctrl+shift+space"
+push_to_talk         = ""
+mute_toggle          = ""
+device_cycle         = ""
+
+# ── NATS ─────────────────────────────────────────────────────────────────────
+# Requires nats-py installed. STT works fully without NATS.
+
+[nats]
+enabled         = false
+url             = "nats://localhost:4222"
+subject_emit    = "stt"
+subject_control = "stt.control"
+
+# ── State ────────────────────────────────────────────────────────────────────
+
+[state]
+file = "state.json"
