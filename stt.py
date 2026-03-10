@@ -397,12 +397,6 @@ def main():
                     with control_lock: control_state['is_muted'] = False
                     dispatch({"type": "status", "value": "unmuted"})
                     persist()
-                elif cmd == "push_to_talk_start":
-                    with control_lock: control_state['is_muted'] = False
-                    dispatch({"type": "status", "value": "unmuted"})
-                elif cmd == "push_to_talk_end":
-                    with control_lock: control_state['is_muted'] = True
-                    dispatch({"type": "status", "value": "muted"})
                 elif cmd == "open_emission_gate":
                     gate.open_gate()
                     persist()
