@@ -1,9 +1,25 @@
 [models]
+# faster-whisper models:
+#   tiny, tiny.en, base, base.en, small, small.en, medium, medium.en
+#   large-v1, large-v2, large-v3, large-v3-turbo
+#   distil-large-v2, distil-large-v3, distil-medium.en, distil-small.en
+# ".en" variants are English-only but faster. Use non-.en for multilingual.
 final          = "large-v3-turbo"
-final_device   = "cuda"
-final_compute  = "float16"
 realtime       = "tiny.en"
+
+# device: "cuda" or "cpu"
+final_device    = "cuda"
 realtime_device = "cpu"
+
+# compute_type (faster-whisper / ctranslate2):
+#   float16       — GPU only, fastest, recommended for cuda
+#   int8_float16  — GPU, quantized weights, less VRAM
+#   int8          — CPU or GPU, lowest memory
+#   float32       — CPU fallback (used automatically if GPU doesn't support float16)
+#   default       — let ctranslate2 decide (recommended for cpu)
+final_compute  = "float16"
+
+# language: BCP-47 code e.g. "en", "fr", "de", "ja" — or "" for auto-detect (slower)
 language       = "en"
 
 [audio]
