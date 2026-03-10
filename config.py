@@ -42,9 +42,10 @@ _DEFAULTS = {
     },
     "hotkeys": {
         "mute_toggle": "`",
-        "emission_gate_open": "shift+f5",
-        "emission_gate_close": "shift+f6",
-        "device_cycle": "shift+f8",
+        "clipboard_accumulate_cycle": "shift+f1",
+        "emission_gate_open": "shift+f2",
+        "emission_gate_close": "shift+f3",
+        "device_cycle": "shift+f4",
     },
     "nats": {
         "enabled": False,
