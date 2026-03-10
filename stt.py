@@ -315,8 +315,9 @@ def main():
                 try: rt_queue.task_done()
                 except: pass
 
-    threading.Thread(target=final_worker,   daemon=True).start()
-    threading.Thread(target=realtime_worker, daemon=True).start()
+    threading.Thread(target=final_worker, daemon=True).start()
+    if rt_model:
+        threading.Thread(target=realtime_worker, daemon=True).start()
 
     # ── State persistence helper ──────────────────────────────────────────────
 
