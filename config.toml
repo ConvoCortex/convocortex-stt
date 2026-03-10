@@ -49,22 +49,22 @@ enabled = true
 path    = "output.txt"
 
 [output.file_overwrite]
-enabled = false
+enabled = True
 path    = "watched.txt"
 
 [output.clipboard_replace]
-enabled = false
+enabled = True
 
 [output.clipboard_accumulate]
-enabled   = false
+enabled   = True
 separator = " "
 
 [output.type_at_cursor]
-enabled = false
+enabled = True
 
 [output.trailing_char]
-enabled = false
-char    = " "
+enabled = True
+char    = "a"
 
 # ── Emission gate ────────────────────────────────────────────────────────────
 # Trigger words gate whether output is forwarded. Not a voice command engine.
@@ -80,10 +80,10 @@ stop_words   = ["stop", "pause"]
 # Empty string = disabled. Max four hotkeys.
 
 [hotkeys]
+mute_toggle          = "`"
 emission_gate_open   = "shift+f5"
 emission_gate_close  = "shift+f6"
-push_to_talk         = ""
-mute_toggle          = "shift+f7"
+push_to_talk         = "shift+f7"
 device_cycle         = "shift+f8"
 
 # ── NATS ─────────────────────────────────────────────────────────────────────
