@@ -27,11 +27,11 @@ _DEFAULTS = {
         "queue_size": 10,
     },
     "output": {
-        "file_append":         {"enabled": True,  "path": "output.txt"},
+        "file_append":         {"enabled": False, "path": "output.txt"},
         "file_overwrite":      {"enabled": False, "path": "watched.txt"},
-        "clipboard_replace":   {"enabled": False},
+        "clipboard_replace":   {"enabled": True},
         "clipboard_accumulate":{"enabled": False, "separator": " "},
-        "type_at_cursor":      {"enabled": False},
+        "type_at_cursor":      {"enabled": True},
         "trailing_char":       {"enabled": False, "char": " "},
     },
     "emission_gate": {

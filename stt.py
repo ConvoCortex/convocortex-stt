@@ -444,8 +444,6 @@ def main():
     # ── Stdin control ─────────────────────────────────────────────────────────
 
     def input_listener():
-        if sys.stdin is None:
-            return
         while True:
             try:
                 line = sys.stdin.readline()
