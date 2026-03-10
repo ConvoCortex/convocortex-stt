@@ -1,21 +1,26 @@
 # convocortex-stt
 
-Headless speech-to-text engine. Self-sufficient standalone, NATS participant when available.
+Headless speech-to-text engine designed for hands-free prolonged engagement. Intended to run in the background and stay out of your way — VAD triggers transcription automatically on pause, so you never need to press anything. Say a stop word to gate output off, say a start word to bring it back. No hands required.
 
-Dual-model pipeline: a fast CPU model produces **partial** results during speech, an accurate GPU model produces **final** results after silence. Silero VAD gates all inference so nothing runs in silence.
+Self-sufficient standalone. Participates in NATS as a peer when available.
 
-**Partial** results are low-accuracy transcriptions fired every ~100ms while you are still speaking. They are useful for detecting short voice commands before the utterance ends, or for displaying live feedback. They are not intended as reliable text output — use **final** results for that.
+## How it works
 
-**Final** results are high-accuracy transcriptions produced once silence is detected after speech ends.
+Dual-model pipeline: a fast CPU model produces **partial** results during speech, an accurate GPU model produces **final** results after silence. Silero VAD gates all inference so nothing runs while you are not speaking.
+
+**Final** results are high-accuracy transcriptions produced once a pause in speech is detected. This is the primary output — written to file, clipboard, typed at cursor, or published over NATS.
+
+**Partial** results are low-accuracy transcriptions fired every ~100ms while you are still speaking. Useful for detecting start/stop words before the utterance ends, or for live feedback displays. Not intended as reliable text output.
 
 ## Features
 
 - Headless always — no GUI, no TUI
-- Realtime partial transcriptions while you speak
-- High-accuracy final transcriptions after silence
+- VAD-triggered — silence ends an utterance, no push-to-talk required
+- Start/stop words gate output on and off hands-free
+- High-accuracy final transcriptions after each pause
+- Realtime partial transcriptions during speech
 - Local output handlers: file append, file overwrite, clipboard, type at cursor
-- Emission gate: trigger words toggle whether output is forwarded
-- Hotkeys: emission gate toggle, push-to-talk, mute toggle
+- Hotkeys available but not required for normal use
 - NATS event emit and control surface (optional — works fully without NATS)
 - State persistence across restarts (mute state, gate state)
 - Device reconnect on audio loss
