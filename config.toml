@@ -24,7 +24,8 @@ realtime_device = "cpu"
 #   default       — let ctranslate2 decide (recommended for cpu)
 final_compute  = "float16"
 
-# language: BCP-47 code e.g. "en", "fr", "de", "ja" — or "" for auto-detect (slower)
+# language: BCP-47 code e.g. "en", "fr", "de", "ja" — or remove/set to "" for auto-detect (slower)
+# auto-detect analyzes first 30s of audio. English-only models always use "en" regardless.
 language       = "en"
 
 [audio]
