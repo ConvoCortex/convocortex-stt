@@ -31,18 +31,12 @@ def make_file_append(cfg: dict):
     lock = threading.Lock()
 
     def file_append(event: dict):
-        if event["type"] == "status":
-            line = f"[status:{event['value']}]\n"
-        elif event["type"] in ("final", "partial"):
-            text = event.get("text", "").strip()
-            if not text:
-                return
-            line = f"[{event['type']}] {text}\n"
-        else:
+        text = _final_text(event, cfg)
+        if text is None:
             return
         with lock:
             with open(path, 'a', encoding='utf-8') as f:
-                f.write(line)
+                f.write(text + "\n")
                 f.flush()
 
     file_append.__name__ = "file_append"
