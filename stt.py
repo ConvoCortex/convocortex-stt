@@ -345,6 +345,10 @@ def main():
             kb.add_hotkey(hk["emission_gate_close"], lambda: (gate.close_gate(), persist()))
             logger.info(f"[hotkey] emission_gate_close = {hk['emission_gate_close']}")
 
+        if hk.get("clipboard_accumulate_cycle") and "clipboard_accumulate_reset" in handler_extras:
+            kb.add_hotkey(hk["clipboard_accumulate_cycle"], handler_extras["clipboard_accumulate_reset"])
+            logger.info(f"[hotkey] clipboard_accumulate_cycle = {hk['clipboard_accumulate_cycle']}")
+
         if hk["mute_toggle"]:
             def _mute_toggle():
                 with control_lock:
