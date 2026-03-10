@@ -89,7 +89,7 @@ class EmissionGate:
         """Return True if event should be forwarded to handlers."""
         if not self.enabled or event.get("type") != "final":
             return True
-        text = event.get("text", "").strip().lower()
+        text = event.get("text", "").strip().lower().strip(".,!?;:")
         with self._lock:
             if text in self.stop_words:
                 self.open = False
