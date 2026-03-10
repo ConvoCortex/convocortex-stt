@@ -143,6 +143,54 @@ def make_type_at_cursor(cfg: dict):
     return type_at_cursor
 
 
+# ── NATS emit ─────────────────────────────────────────────────────────────────
+
+def make_nats_publisher(cfg: dict):
+    try:
+        import nats
+    except ImportError:
+        logger.warning("[nats] nats-py not installed, NATS disabled.")
+        return None
+
+    import asyncio
+    import json
+
+    ncfg    = cfg["nats"]
+    url     = ncfg["url"]
+    subject = ncfg["subject_emit"]
+
+    loop   = asyncio.new_event_loop()
+    nc_ref = [None]
+
+    async def _connect():
+        try:
+            nc_ref[0] = await nats.connect(url)
+            logger.info(f"[nats] Connected to {url}")
+        except Exception as e:
+            logger.warning(f"[nats] Could not connect to {url}: {e}")
+
+    async def _publish(subj: str, data: bytes):
+        if nc_ref[0] and nc_ref[0].is_connected:
+            await nc_ref[0].publish(subj, data)
+
+    def _run_loop():
+        asyncio.set_event_loop(loop)
+        loop.run_until_complete(_connect())
+        loop.run_forever()
+
+    t = threading.Thread(target=_run_loop, daemon=True, name="nats-loop")
+    t.start()
+
+    def nats_publisher(event: dict):
+        etype = event.get("type", "system")
+        subj  = f"{subject}.{etype}"
+        data  = json.dumps(event).encode()
+        asyncio.run_coroutine_threadsafe(_publish(subj, data), loop)
+
+    nats_publisher.__name__ = "nats_publisher"
+    return nats_publisher
+
+
 # ── Registration ──────────────────────────────────────────────────────────────
 
 def register_all(cfg: dict, register):
