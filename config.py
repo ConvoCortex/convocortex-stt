@@ -35,7 +35,7 @@ _DEFAULTS = {
         "trailing_char":       {"enabled": False, "char": " "},
     },
     "emission_gate": {
-        "enabled": False,
+        "enabled": True,
         "default_open": True,
         "start_words": ["listen", "start"],
         "stop_words": ["stop", "pause"],

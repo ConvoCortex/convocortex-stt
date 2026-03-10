@@ -49,7 +49,7 @@ char    = " "
 # String match on final transcriptions only.
 
 [emission_gate]
-enabled      = false
+enabled      = true
 default_open = true      # true = forwarding on at startup
 start_words  = ["listen", "start"]
 stop_words   = ["stop", "pause"]
