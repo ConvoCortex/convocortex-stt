@@ -315,8 +315,12 @@ def main():
 
         hk = cfg["hotkeys"]
 
+        def _gate_toggle_and_persist():
+            gate.toggle()
+            persist()
+
         if hk["emission_gate_toggle"]:
-            kb.add_hotkey(hk["emission_gate_toggle"], gate.toggle)
+            kb.add_hotkey(hk["emission_gate_toggle"], _gate_toggle_and_persist)
             logger.info(f"[hotkey] emission_gate_toggle = {hk['emission_gate_toggle']}")
 
         if hk["mute_toggle"]:
