@@ -352,6 +352,7 @@ def main():
                     muted = control_state['is_muted']
                 logger.info(f"[hotkey] {'Muted' if muted else 'Unmuted'}")
                 dispatch({"type": "status", "value": "muted" if muted else "unmuted"})
+                persist()
             kb.add_hotkey(hk["mute_toggle"], _mute_toggle)
             logger.info(f"[hotkey] mute_toggle = {hk['mute_toggle']}")
 
