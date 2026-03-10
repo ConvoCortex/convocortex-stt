@@ -85,6 +85,7 @@ stop_words   = ["stop", "pause"]
 # Empty string = disabled. Max four hotkeys.
 
 [hotkeys]
+clipboard_accumulate_cycle = ""   # clears clipboard and starts fresh accumulation
 mute_toggle          = "`"
 emission_gate_open   = "shift+f5"
 emission_gate_close  = "shift+f6"
