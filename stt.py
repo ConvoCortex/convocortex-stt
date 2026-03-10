@@ -228,8 +228,10 @@ def main():
 
                 if text:
                     logger.info(f"[FINAL +{t:.2f}s] '{text}' ({inf_ms}ms)")
-                    dispatch({"type": "final", "text": text, "epoch": epoch,
-                              "t": round(t, 3), "inference_ms": inf_ms})
+                    ev = {"type": "final", "text": text, "epoch": epoch,
+                          "t": round(t, 3), "inference_ms": inf_ms}
+                    if gate.process(ev):
+                        dispatch(ev)
                 else:
                     logger.info(f"[FINAL +{t:.2f}s] <empty> ({inf_ms}ms)")
 
