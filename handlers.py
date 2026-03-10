@@ -194,8 +194,10 @@ def make_nats_publisher(cfg: dict):
 
 # ── Registration ──────────────────────────────────────────────────────────────
 
-def register_all(cfg: dict, register):
+def register_all(cfg: dict, register) -> dict:
+    """Register handlers and return extras dict with optional callables (e.g. resets)."""
     out = cfg["output"]
+    extras = {}
 
     if out["file_append"]["enabled"]:
         register(make_file_append(cfg))
@@ -212,9 +214,11 @@ def register_all(cfg: dict, register):
             logger.info("[handler] clipboard_replace")
 
     if out["clipboard_accumulate"]["enabled"]:
-        fn = make_clipboard_accumulate(cfg)
-        if fn:
+        result = make_clipboard_accumulate(cfg)
+        if result:
+            fn, reset = result
             register(fn)
+            extras["clipboard_accumulate_reset"] = reset
             logger.info("[handler] clipboard_accumulate")
 
     if out["type_at_cursor"]["enabled"]:
