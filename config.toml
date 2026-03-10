@@ -29,11 +29,11 @@ final_compute  = "float16"
 language       = "en"
 
 [audio]
-rate            = 16000
-chunk           = 512
-vad_threshold   = 0.4
-buffer_seconds  = 1.0
-silence_timeout = 0.8
+rate            = 16000  # sample rate — Whisper requires 16000, do not change
+chunk           = 512    # audio frames per VAD check — lower = more responsive, higher = more stable
+vad_threshold   = 0.4   # Silero VAD sensitivity 0–1 (lower = more sensitive, picks up more speech)
+buffer_seconds  = 1.0   # ring buffer before speech start — captures audio before VAD triggers
+silence_timeout = 0.8   # seconds of silence before ending an utterance and firing final transcription
 
 [realtime]
 # check_interval: how often (seconds) a partial transcription is triggered during speech
