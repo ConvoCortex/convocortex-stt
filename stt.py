@@ -240,10 +240,10 @@ def main():
                     ev = {"type": "final", "text": text, "epoch": epoch,
                           "t": round(t, 3), "inference_ms": inf_ms}
                     if gate.process(ev):
-                        logger.info(f"[FINAL +{t:.2f}s] '{text}' ({inf_ms}ms)")
+                        logger.info(f"[FINAL +{t:.2f}s] → OUT  '{text}' ({inf_ms}ms)")
                         dispatch(ev)
                     else:
-                        logger.info(f"[FINAL +{t:.2f}s] '{text}' ({inf_ms}ms) [gated]")
+                        logger.info(f"[FINAL +{t:.2f}s] → GATED '{text}' ({inf_ms}ms)")
                 else:
                     logger.info(f"[FINAL +{t:.2f}s] <empty> ({inf_ms}ms)")
 
