@@ -362,6 +362,7 @@ def main():
                 with control_lock:
                     _ptt_prev_muted[0] = control_state['is_muted']
                     control_state['is_muted'] = False
+                logger.info("[PTT] pressed")
                 dispatch({"type": "status", "value": "unmuted"})
             def _ptt_release(_=None):
                 with control_lock:
