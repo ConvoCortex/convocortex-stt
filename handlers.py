@@ -232,3 +232,5 @@ def register_all(cfg: dict, register) -> dict:
         if fn:
             register(fn)
             logger.info(f"[handler] nats_publisher -> {cfg['nats']['url']}")
+
+    return extras
