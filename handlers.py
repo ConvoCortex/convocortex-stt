@@ -113,8 +113,16 @@ def make_clipboard_accumulate(cfg: dict):
         finally:
             win32clipboard.CloseClipboard()
 
+    def clipboard_accumulate_reset():
+        try:
+            win32clipboard.OpenClipboard()
+            win32clipboard.EmptyClipboard()
+        finally:
+            win32clipboard.CloseClipboard()
+        logger.info("[clipboard_accumulate] reset")
+
     clipboard_accumulate.__name__ = "clipboard_accumulate"
-    return clipboard_accumulate
+    return clipboard_accumulate, clipboard_accumulate_reset
 
 
 # ── Type at cursor ────────────────────────────────────────────────────────────
