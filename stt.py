@@ -408,8 +408,11 @@ def main():
                 elif cmd == "push_to_talk_end":
                     with control_lock: control_state['is_muted'] = True
                     dispatch({"type": "status", "value": "muted"})
-                elif cmd == "toggle_emission_gate":
-                    gate.toggle()
+                elif cmd == "open_emission_gate":
+                    gate.open_gate()
+                    persist()
+                elif cmd == "close_emission_gate":
+                    gate.close_gate()
                     persist()
                 elif cmd == "status_query":
                     with control_lock: muted = control_state['is_muted']
