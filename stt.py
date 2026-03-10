@@ -18,8 +18,11 @@ import pyaudio
 from faster_whisper import WhisperModel
 
 import config
+import state as state_store
 
 cfg = config.load()
+state_store.init(cfg)
+_persisted = state_store.load()
 
 # ── Models ────────────────────────────────────────────────────────────────────
 FINAL_MODEL        = cfg["models"]["final"]
