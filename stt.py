@@ -293,9 +293,13 @@ def main():
                         continue
 
                 if text:
-                    logger.info(f"[PARTIAL +{t:.2f}s] '{text}' ({inf_ms}ms)")
-                    dispatch({"type": "partial", "text": text, "epoch": epoch,
-                              "t": round(t, 3), "inference_ms": inf_ms})
+                    ev = {"type": "partial", "text": text, "epoch": epoch,
+                          "t": round(t, 3), "inference_ms": inf_ms}
+                    if gate.process(ev):
+                        logger.info(f"[PARTIAL +{t:.2f}s] → OUT  '{text}' ({inf_ms}ms)")
+                        dispatch(ev)
+                    else:
+                        logger.info(f"[PARTIAL +{t:.2f}s] → GATED '{text}' ({inf_ms}ms)")
             except Exception as e:
                 logger.error(f"[realtime_worker] {e}")
             finally:
