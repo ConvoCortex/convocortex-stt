@@ -2,7 +2,11 @@
 
 Headless speech-to-text engine. Self-sufficient standalone, NATS participant when available.
 
-Dual-model pipeline: fast CPU model produces partial results during speech, accurate GPU model produces final results after silence. Silero VAD gates all inference so nothing runs in silence.
+Dual-model pipeline: a fast CPU model produces **partial** results during speech, an accurate GPU model produces **final** results after silence. Silero VAD gates all inference so nothing runs in silence.
+
+**Partial** results are low-accuracy transcriptions fired every ~100ms while you are still speaking. They are useful for detecting short voice commands before the utterance ends, or for displaying live feedback. They are not intended as reliable text output — use **final** results for that.
+
+**Final** results are high-accuracy transcriptions produced once silence is detected after speech ends.
 
 ## Features
 
