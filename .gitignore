@@ -1,0 +1,7 @@
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+output.txt
+paste.md
+how to install realtimestt.txt
