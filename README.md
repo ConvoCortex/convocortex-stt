@@ -158,9 +158,10 @@ stop_words   = ["stop", "pause"]
 
 ```toml
 [hotkeys]
-emission_gate_toggle = "ctrl+shift+space"   # Toggle gate open/closed
-push_to_talk         = ""                   # Hold to record, empty = disabled
-mute_toggle          = ""                   # Toggle mute, empty = disabled
+emission_gate_open   = "shift+f5"
+emission_gate_close  = "shift+f6"
+mute_toggle          = "`"
+device_cycle         = "shift+f8"
 ```
 
 ### NATS
