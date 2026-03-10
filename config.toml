@@ -42,28 +42,28 @@ max_chunks       = 100
 queue_size       = 10
 
 # ── Output handlers ─────────────────────────────────────────────────────────
-# All default-on. Disable when a NATS consumer replaces them.
-
+# Disable if not needed or when a NATS consumer replaces them.
+# TOML booleans must be lowercase
 [output.file_append]
 enabled = true
 path    = "output.txt"
 
 [output.file_overwrite]
-enabled = True
+enabled = true
 path    = "watched.txt"
 
 [output.clipboard_replace]
-enabled = True
+enabled = true
 
 [output.clipboard_accumulate]
-enabled   = True
+enabled   = true
 separator = " "
 
 [output.type_at_cursor]
-enabled = True
+enabled = true
 
 [output.trailing_char]
-enabled = True
+enabled = true
 char    = "a"
 
 # ── Emission gate ────────────────────────────────────────────────────────────
