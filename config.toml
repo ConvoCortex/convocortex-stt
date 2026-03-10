@@ -85,11 +85,11 @@ stop_words   = ["stop", "pause"]
 # Empty string = disabled. Max four hotkeys.
 
 [hotkeys]
-clipboard_accumulate_cycle = ""   # clears clipboard and starts fresh accumulation
 mute_toggle          = "`"
-emission_gate_open   = "shift+f5"
-emission_gate_close  = "shift+f6"
-device_cycle         = "shift+f8"
+clipboard_accumulate_cycle = "shift+f1"   # clears clipboard and starts fresh accumulation
+emission_gate_open   = "shift+f2"
+emission_gate_close  = "shift+f3"
+device_cycle         = "shift+f4"
 
 # ── NATS ─────────────────────────────────────────────────────────────────────
 # Requires nats-py installed. STT works fully without NATS.

@@ -1,8 +1,10 @@
 # convocortex-stt
 
-Headless speech-to-text engine designed for hands-free prolonged engagement. Intended to run in the background and stay out of your way — VAD triggers transcription automatically on pause, so you never need to press anything. Say a stop word to gate output off, say a start word to bring it back. No hands required.
+self-sufficient NATS-native hands-free speech-to-text engine.
 
-Self-sufficient standalone. Participates in NATS as a peer when available.
+Designed for ambient operation. VAD triggers transcription automatically on pause. Say a stop word to silence output, say a start word to resume, Hotkeys use is optional.
+
+Self-sufficient standalone, but intended to integrate via NATS.
 
 ## How it works
 
@@ -10,11 +12,11 @@ Dual-model pipeline: a fast CPU model produces **partial** results during speech
 
 **Final** results are high-accuracy transcriptions produced once a pause in speech is detected. This is the primary output — written to file, clipboard, typed at cursor, or published over NATS.
 
-**Partial** results are low-accuracy transcriptions fired every ~100ms while you are still speaking. Useful for detecting start/stop words before the utterance ends, or for live feedback displays. Not intended as reliable text output.
+**Partial** results are low-accuracy transcriptions fired every ~100ms while you are still speaking. Useful for reducing latency of voice commands and detecting start/stop words before the utterance ends, or for live feedback displays. Not intended as accurate text output.
 
 ## Features
 
-- Headless always — no GUI, no TUI
+- No GUI
 - VAD-triggered — silence ends an utterance, no push-to-talk required
 - Start/stop words gate output on and off hands-free
 - High-accuracy final transcriptions after each pause
