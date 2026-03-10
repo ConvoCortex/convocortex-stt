@@ -390,6 +390,7 @@ def main():
                     dispatch({"type": "status", "value": "muted"})
                 elif cmd == "toggle_emission_gate":
                     gate.toggle()
+                    persist()
                 elif cmd == "status_query":
                     with control_lock: muted = control_state['is_muted']
                     with gate._lock: gate_open = gate.open
