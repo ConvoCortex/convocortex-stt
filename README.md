@@ -52,6 +52,14 @@ On Windows (enables clipboard handlers):
 uv sync --extra windows
 ```
 
+**Hotkeys on Linux** require either running as root or adding your user to the `input` group:
+
+```bash
+sudo usermod -aG input $USER  # then log out and back in
+```
+
+**Hotkeys on macOS** require accessibility permissions granted in System Settings → Privacy & Security → Accessibility.
+
 With NATS support:
 
 ```bash
