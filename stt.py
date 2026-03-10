@@ -379,9 +379,11 @@ def main():
                 if cmd == "mute":
                     with control_lock: control_state['is_muted'] = True
                     dispatch({"type": "status", "value": "muted"})
+                    persist()
                 elif cmd == "unmute":
                     with control_lock: control_state['is_muted'] = False
                     dispatch({"type": "status", "value": "unmuted"})
+                    persist()
                 elif cmd == "push_to_talk_start":
                     with control_lock: control_state['is_muted'] = False
                     dispatch({"type": "status", "value": "unmuted"})
