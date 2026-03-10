@@ -14,7 +14,7 @@ import numpy as np
 import pyaudio
 from faster_whisper import WhisperModel
 
-OUTPUT_FILE = r"E:\Projects\STT\output.txt"
+OUTPUT_FILE = "output.txt"
 
 # ----------------------------
 # Configuration
