@@ -30,8 +30,6 @@ C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.1\bin
 C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.1\libnvvp
 ```
 
-cuDNN is not required — ctranslate2 (installed via pip) bundles the CUDA libraries it needs.
-
 To run on CPU only, skip CUDA entirely and set `final_device = "cpu"` in config.toml. Expect significantly slower final transcriptions.
 
 ### Python 3.10+
@@ -198,10 +196,6 @@ Send JSON to `stt.control`:
 ## Stdin control
 
 Send `MUTE` or `UNMUTE` to stdin at runtime.
-
-## Intended arc
-
-Ship with local handlers enabled. Build NATS consumers progressively. Disable local handlers in config as consumers replace them. Arrive at pure event-pipe mode incrementally. The binary never changes — only config changes.
 
 ## License
 
