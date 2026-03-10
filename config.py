@@ -41,10 +41,10 @@ _DEFAULTS = {
         "stop_words": ["stop", "pause"],
     },
     "hotkeys": {
-        "emission_gate_toggle": "ctrl+shift+space",
-        "push_to_talk": "",
-        "mute_toggle": "",
-        "device_cycle": "",
+        "emission_gate_toggle": "shift+f5",
+        "push_to_talk": "shift+f6",
+        "mute_toggle": "shift+f7",
+        "device_cycle": "shift+f8",
     },
     "nats": {
         "enabled": False,
