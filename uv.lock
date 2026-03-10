@@ -309,6 +309,9 @@ dependencies = [
 nats = [
     { name = "nats-py" },
 ]
+windows = [
+    { name = "pywin32" },
+]
 
 [package.metadata]
 requires-dist = [
@@ -318,12 +321,13 @@ requires-dist = [
     { name = "numpy" },
     { name = "pyaudio" },
     { name = "pywin32" },
+    { name = "pywin32", marker = "extra == 'windows'" },
     { name = "realtimestt" },
     { name = "torch", specifier = "==2.5.1", index = "https://download.pytorch.org/whl/cu121" },
     { name = "torchaudio", specifier = "==2.5.1", index = "https://download.pytorch.org/whl/cu121" },
     { name = "transformers" },
 ]
-provides-extras = ["nats"]
+provides-extras = ["nats", "windows"]
 
 [[package]]
 name = "ctranslate2"
