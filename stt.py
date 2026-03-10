@@ -68,6 +68,41 @@ def dispatch(event: dict):
         except Exception as e:
             logger.error(f"[handler:{fn.__name__}] {e}")
 
+# ── Emission gate ─────────────────────────────────────────────────────────────
+# Gates whether final transcription output is forwarded to handlers.
+# Trigger word matches on final text only — matching utterance is consumed, not output.
+# Partials and status/system events always pass through.
+
+class EmissionGate:
+    def __init__(self, cfg: dict):
+        ecfg = cfg["emission_gate"]
+        self.enabled     = ecfg["enabled"]
+        self.open        = ecfg["default_open"]
+        self.start_words = [w.lower() for w in ecfg["start_words"]]
+        self.stop_words  = [w.lower() for w in ecfg["stop_words"]]
+        self._lock       = threading.Lock()
+
+    def process(self, event: dict) -> bool:
+        """Return True if event should be forwarded to handlers."""
+        if not self.enabled or event.get("type") != "final":
+            return True
+        text = event.get("text", "").strip().lower()
+        with self._lock:
+            if text in self.stop_words:
+                self.open = False
+                logger.info(f"[gate] Closed ('{text}')")
+                return False
+            if text in self.start_words:
+                self.open = True
+                logger.info(f"[gate] Opened ('{text}')")
+                return False
+            return self.open
+
+    def toggle(self):
+        with self._lock:
+            self.open = not self.open
+            logger.info(f"[gate] Toggled -> {'open' if self.open else 'closed'}")
+
 # ── VAD wrapper ───────────────────────────────────────────────────────────────
 class SileroVAD:
     def __init__(self, model):
