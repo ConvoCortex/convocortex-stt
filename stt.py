@@ -293,6 +293,44 @@ def main():
     threading.Thread(target=final_worker,   daemon=True).start()
     threading.Thread(target=realtime_worker, daemon=True).start()
 
+    # ── Hotkeys ───────────────────────────────────────────────────────────────
+
+    def setup_hotkeys():
+        try:
+            import keyboard as kb
+        except ImportError:
+            logger.warning("[hotkeys] keyboard not installed, hotkeys disabled.")
+            return
+
+        hk = cfg["hotkeys"]
+
+        if hk["emission_gate_toggle"]:
+            kb.add_hotkey(hk["emission_gate_toggle"], gate.toggle)
+            logger.info(f"[hotkey] emission_gate_toggle = {hk['emission_gate_toggle']}")
+
+        if hk["mute_toggle"]:
+            def _mute_toggle():
+                with control_lock:
+                    control_state['is_muted'] = not control_state['is_muted']
+                    muted = control_state['is_muted']
+                logger.info(f"[hotkey] {'Muted' if muted else 'Unmuted'}")
+                dispatch({"type": "status", "value": "muted" if muted else "unmuted"})
+            kb.add_hotkey(hk["mute_toggle"], _mute_toggle)
+            logger.info(f"[hotkey] mute_toggle = {hk['mute_toggle']}")
+
+        if hk["push_to_talk"]:
+            def _ptt_press():
+                with control_lock: control_state['is_muted'] = False
+                dispatch({"type": "status", "value": "unmuted"})
+            def _ptt_release():
+                with control_lock: control_state['is_muted'] = True
+                dispatch({"type": "status", "value": "muted"})
+            kb.add_hotkey(hk["push_to_talk"], _ptt_press)
+            kb.on_release_key(hk["push_to_talk"].split("+")[-1], lambda _: _ptt_release())
+            logger.info(f"[hotkey] push_to_talk = {hk['push_to_talk']}")
+
+    setup_hotkeys()
+
     # ── Stdin control ─────────────────────────────────────────────────────────
 
     def input_listener():
