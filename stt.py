@@ -539,7 +539,7 @@ def main():
                 else:
                     ring_buffer.append(chunk)
 
-            if is_recording and (time.time() - last_rt_update > RT_CHECK_INTERVAL):
+            if rt_model and is_recording and (time.time() - last_rt_update > RT_CHECK_INTERVAL):
                 with state_lock:
                     ep  = state['speech_epoch']
                     fin = state['finalized_epoch']
