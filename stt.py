@@ -339,7 +339,6 @@ def main():
         if hk["emission_gate_close"]:
             kb.add_hotkey(hk["emission_gate_close"], lambda: (gate.close_gate(), persist()))
             logger.info(f"[hotkey] emission_gate_close = {hk['emission_gate_close']}")
-            logger.info(f"[hotkey] emission_gate_toggle = {hk['emission_gate_toggle']}")
 
         if hk["mute_toggle"]:
             def _mute_toggle():
