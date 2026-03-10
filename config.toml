@@ -54,7 +54,7 @@ enabled = true
 path    = "output.txt"
 
 [output.file_overwrite]
-enabled = true
+enabled = false
 path    = "watched.txt"
 
 [output.clipboard_replace]

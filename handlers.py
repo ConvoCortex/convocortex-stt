@@ -31,9 +31,8 @@ def make_file_append(cfg: dict):
     lock = threading.Lock()
 
     def file_append(event: dict):
-        label = "second" if event["type"] == "final" else "first"
         if event["type"] == "status":
-            line = f"[second] [STATUS:{event['value'].upper()}]\n"
+            line = f"[status:{event['value']}]\n"
         elif event["type"] in ("final", "partial"):
             text = event.get("text", "").strip()
             if not text:
