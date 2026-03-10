@@ -37,7 +37,7 @@ def make_file_append(cfg: dict):
             text = event.get("text", "").strip()
             if not text:
                 return
-            line = f"[{label}] {text}\n"
+            line = f"[{event['type']}] {text}\n"
         else:
             return
         with lock:
