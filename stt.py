@@ -107,10 +107,15 @@ class EmissionGate:
                 return self.open
         return True  # status/system always pass
 
-    def toggle(self):
+    def open_gate(self):
         with self._lock:
-            self.open = not self.open
-            logger.info(f"[gate] Toggled -> {'open' if self.open else 'closed'}")
+            self.open = True
+            logger.info("[gate] Opened")
+
+    def close_gate(self):
+        with self._lock:
+            self.open = False
+            logger.info("[gate] Closed")
 
 # ── VAD wrapper ───────────────────────────────────────────────────────────────
 class SileroVAD:
