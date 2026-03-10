@@ -212,7 +212,7 @@ def main():
     rt_cancel     = threading.Event()
 
     control_lock  = threading.Lock()
-    control_state = {'is_muted': False}
+    control_state = {'is_muted': _persisted['is_muted']}
 
     # ── Workers ───────────────────────────────────────────────────────────────
 
