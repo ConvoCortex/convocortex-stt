@@ -194,9 +194,12 @@ def main():
     p_instance  = resources['p_instance']
     dev_name    = resources['dev_name']
 
-    # ── Register handlers (tasks 3–7 add their handlers here) ─────────────────
+    # ── Register handlers ─────────────────────────────────────────────────────
     import handlers as h
     h.register_all(cfg, register_handler)
+
+    # ── Emission gate ─────────────────────────────────────────────────────────
+    gate = EmissionGate(cfg)
 
     # ── State ─────────────────────────────────────────────────────────────────
     final_queue   = queue.Queue()
