@@ -297,6 +297,13 @@ def main():
     threading.Thread(target=final_worker,   daemon=True).start()
     threading.Thread(target=realtime_worker, daemon=True).start()
 
+    # ── State persistence helper ──────────────────────────────────────────────
+
+    def persist():
+        with control_lock: muted = control_state['is_muted']
+        with gate._lock:   go    = gate.open
+        state_store.save({"is_muted": muted, "gate_open": go})
+
     # ── Hotkeys ───────────────────────────────────────────────────────────────
 
     def setup_hotkeys():
