@@ -214,7 +214,7 @@ def main():
 
     # ── Register handlers ─────────────────────────────────────────────────────
     import handlers as h
-    h.register_all(cfg, register_handler)
+    handler_extras = h.register_all(cfg, register_handler)
 
     # ── Emission gate ─────────────────────────────────────────────────────────
     gate = EmissionGate(cfg)
