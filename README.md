@@ -196,8 +196,6 @@ Send JSON to `stt.control`:
 ```json
 {"cmd": "mute"}
 {"cmd": "unmute"}
-{"cmd": "push_to_talk_start"}
-{"cmd": "push_to_talk_end"}
 {"cmd": "open_emission_gate"}
 {"cmd": "close_emission_gate"}
 {"cmd": "status_query"}
