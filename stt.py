@@ -203,6 +203,7 @@ def main():
 
     # ── Emission gate ─────────────────────────────────────────────────────────
     gate = EmissionGate(cfg)
+    gate.open = _persisted['gate_open']  # restore persisted gate state
 
     # ── State ─────────────────────────────────────────────────────────────────
     final_queue   = queue.Queue()
