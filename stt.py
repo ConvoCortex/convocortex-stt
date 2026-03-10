@@ -7,7 +7,6 @@ import sys
 import time
 import queue
 import threading
-import struct
 import logging
 from collections import deque
 

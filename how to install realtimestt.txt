@@ -1,0 +1,24 @@
+
+create folder E:\programs\RealtimeSTT
+E:\programs\Python\Python3109\python.exe -m venv venv
+cd E:\programs\RealtimeSTT\venv\Scripts
+activate
+cd E:\programs\RealtimeSTT
+python.exe -m pip install --upgrade pip
+pip cache purge
+pip install RealtimeSTT
+<
+install cuda 12.1 https://developer.nvidia.com/cuda-12-1-0-download-archive?target_os=Windows&target_arch=x86_64&target_version=11&target_type=exe_local 
+custom installation without driver or anything else. only cuda. 
+add to path: E:\programs\CUDA 12.1\bin  and   E:\programs\CUDA 12.1\libnvvp
+(I think in libvvp you put the cudnn files? I don't remember)
+>
+pip install torch==2.5.1+cu121 torchaudio==2.5.1 --index-url https://download.pytorch.org/whl/cu121
+git clone https://github.com/KoljaB/RealtimeSTT.git
+pip install keyboard
+pip install pywin32
+pip install transformers
+change path in python.go  	sttPythonPath = "E:\\programs\\RealtimeSTT_0.3.104\\venv\\Scripts\\python.exe"
+
+
+go run E:\Projects\247Feedback_aka_Browser-LLM_with_RealtimeSTT_EdgeTTS_RVC_DB_CMD\247Feedback\cmd\main\main.go
