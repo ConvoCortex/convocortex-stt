@@ -150,6 +150,10 @@ def main():
             sys.exit(1)
 
     def load_realtime():
+        if not REALTIME_MODEL:
+            logger.info("Realtime model disabled (no model configured). Partials will not fire.")
+            resources['realtime_model'] = None
+            return
         try:
             logger.info(f"Loading {REALTIME_MODEL} ({REALTIME_DEVICE})...")
             compute = "default" if REALTIME_DEVICE == "cpu" else FINAL_COMPUTE
