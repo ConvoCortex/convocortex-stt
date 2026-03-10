@@ -13,7 +13,11 @@ dependencies = [
     "torchaudio==2.5.1",
     "transformers",
     "pywin32",
+    "keyboard",
 ]
+
+[project.optional-dependencies]
+nats = ["nats-py"]
 
 [tool.uv.sources]
 torch = { index = "pytorch-cu121" }
