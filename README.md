@@ -1,8 +1,8 @@
 # convocortex-stt
 
-self-sufficient NATS-native hands-free speech-to-text engine.
+Self-sufficient NATS-native hands-free speech-to-text engine.
 
-Designed for ambient operation. VAD triggers transcription automatically on pause. Say a stop word to silence output, say a start word to resume, Hotkeys use is optional.
+Designed for ambient operation. VAD triggers transcription automatically on pause. Say a stop word to silence output, say a start word to resume. Hotkey use is optional.
 
 Self-sufficient standalone, but intended to integrate via NATS.
 
@@ -12,7 +12,7 @@ Dual-model pipeline: a fast CPU model produces **partial** results during speech
 
 **Final** results are high-accuracy transcriptions produced once a pause in speech is detected. This is the primary output — written to file, clipboard, typed at cursor, or published over NATS.
 
-**Partial** results are low-accuracy transcriptions fired every ~100ms while you are still speaking. Useful for reducing latency of voice commands and detecting start/stop words before the utterance ends, or for live feedback displays. Not intended as accurate text output.
+**Partial** results are low-accuracy transcriptions fired every ~100ms while you are still speaking. Useful for reducing latency of voice commands and detecting start/stop words before the utterance ends. Not intended as accurate text output.
 
 ## Features
 
@@ -41,6 +41,8 @@ C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.1\bin
 C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.1\libnvvp
 ```
 
+cuDNN may not be required — ctranslate2 installed via pip bundles some CUDA libraries. If you get CUDA errors at runtime, install cuDNN separately and place the files in the CUDA `bin` directory.
+
 To run on CPU only, skip CUDA entirely and set `final_device = "cpu"` in config.toml. Expect significantly slower final transcriptions.
 
 ### Python 3.10+
@@ -65,6 +67,12 @@ On Windows (enables clipboard handlers):
 uv sync --extra windows
 ```
 
+With NATS support:
+
+```bash
+uv sync --extra nats
+```
+
 **Hotkeys on Linux** require either running as root or adding your user to the `input` group:
 
 ```bash
@@ -72,18 +80,6 @@ sudo usermod -aG input $USER  # then log out and back in
 ```
 
 **Hotkeys on macOS** require accessibility permissions granted in System Settings → Privacy & Security → Accessibility.
-
-With NATS support:
-
-```bash
-uv sync --extra nats
-```
-
-Combined:
-
-```bash
-uv sync --extra windows --extra nats
-```
 
 ## Running
 
@@ -93,92 +89,13 @@ uv run python stt.py
 
 ## Configuration
 
-All settings live in `config.toml`. The file is read once at startup — restart to apply changes.
+All settings live in `config.toml`. Every option is documented there with comments. The file is read once at startup — restart to apply changes.
 
-### Models
+## NATS
 
-```toml
-[models]
-final           = "large-v3-turbo"   # Whisper model for final transcriptions
-final_device    = "cuda"             # "cuda" or "cpu"
-final_compute   = "float16"          # "float16", "int8", etc.
-realtime        = "tiny.en"          # Whisper model for partial results
-realtime_device = "cpu"
-language        = "en"
-```
+Requires `uv sync --extra nats` and `nats.enabled = true` in config.toml.
 
-### Audio
-
-```toml
-[audio]
-vad_threshold   = 0.4    # Silero VAD sensitivity 0–1 (higher = less sensitive)
-silence_timeout = 0.8    # Seconds of silence before finalizing an utterance
-buffer_seconds  = 1.0    # Pre-speech ring buffer duration
-```
-
-### Output handlers
-
-All default-on. Disable when a NATS consumer replaces them.
-
-```toml
-[output.file_append]
-enabled = true
-path    = "output.txt"       # Appends every partial and final result
-
-[output.file_overwrite]
-enabled = false
-path    = "watched.txt"      # Overwrites with latest final result only
-
-[output.clipboard_replace]
-enabled = false              # Replaces clipboard with each final result
-
-[output.clipboard_accumulate]
-enabled   = false            # Appends each final result to clipboard
-separator = " "
-
-[output.type_at_cursor]
-enabled = false              # Types final result at current cursor position
-
-[output.trailing_char]
-enabled = false
-char    = " "                # Appended to every output (e.g. " " or ".")
-```
-
-### Emission gate
-
-Trigger words gate whether output is forwarded. Not a voice command engine — just two word lists controlling a boolean. The matching utterance is consumed (not output).
-
-```toml
-[emission_gate]
-enabled      = false
-default_open = true          # Start forwarding at startup
-start_words  = ["listen", "start"]
-stop_words   = ["stop", "pause"]
-```
-
-### Hotkeys
-
-```toml
-[hotkeys]
-emission_gate_open   = "shift+f5"
-emission_gate_close  = "shift+f6"
-mute_toggle          = "`"
-device_cycle         = "shift+f8"
-```
-
-### NATS
-
-```toml
-[nats]
-enabled         = false
-url             = "nats://localhost:4222"
-subject_emit    = "stt"         # Events published to stt.final, stt.partial, etc.
-subject_control = "stt.control" # Control commands subscribed here
-```
-
-Requires `uv sync --extra nats`.
-
-#### Event schema
+### Event schema
 
 ```json
 {"type": "partial", "text": "like I can just be", "epoch": 4, "t": 1.23, "inference_ms": 140}
@@ -191,9 +108,9 @@ Requires `uv sync --extra nats`.
 {"type": "system",  "event": "shutdown"}
 ```
 
-#### Control commands
+### Control commands
 
-Send JSON to `stt.control`:
+Send JSON to the subject configured in `nats.subject_control`:
 
 ```json
 {"cmd": "mute"}
