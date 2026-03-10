@@ -6,7 +6,7 @@
 # ".en" variants are English-only but faster. Use non-.en for multilingual.
 # Can also be a local path or HuggingFace model ID.
 final          = "large-v3-turbo"
-realtime       = "tiny.en"
+realtime       = "tiny.en"   # set to "" to disable partials entirely
 
 # device: "cuda", "cpu", or "auto"
 final_device    = "cuda"
