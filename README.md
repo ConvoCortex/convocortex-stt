@@ -46,10 +46,22 @@ cd convocortex-stt
 uv sync
 ```
 
+On Windows (enables clipboard handlers):
+
+```bash
+uv sync --extra windows
+```
+
 With NATS support:
 
 ```bash
 uv sync --extra nats
+```
+
+Combined:
+
+```bash
+uv sync --extra windows --extra nats
 ```
 
 ## Running
