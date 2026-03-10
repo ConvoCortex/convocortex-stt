@@ -18,17 +18,21 @@ Dual-model pipeline: fast CPU model produces partial results during speech, accu
 
 ## Prerequisites
 
-### CUDA 12.1
+### CUDA 12.1 (Windows, GPU acceleration)
 
 Download: https://developer.nvidia.com/cuda-12-1-0-download-archive
 
-Custom installation — select only the CUDA toolkit, not the driver or other components.
+Use **custom installation** and select only the CUDA toolkit — uncheck the driver and everything else if you already have a driver installed.
 
-Add to PATH:
+Add to PATH (adjust if you installed to a non-default location):
 ```
 C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.1\bin
 C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.1\libnvvp
 ```
+
+cuDNN is not required — ctranslate2 (installed via pip) bundles the CUDA libraries it needs.
+
+To run on CPU only, skip CUDA entirely and set `final_device = "cpu"` in config.toml. Expect significantly slower final transcriptions.
 
 ### Python 3.10+
 
