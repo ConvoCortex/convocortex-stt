@@ -41,8 +41,9 @@ _DEFAULTS = {
         "stop_words": ["stop", "pause"],
     },
     "hotkeys": {
-        "emission_gate_toggle": "shift+f5",
-        "push_to_talk": "shift+f6",
+        "emission_gate_open": "shift+f5",
+        "emission_gate_close": "shift+f6",
+        "push_to_talk": "",
         "mute_toggle": "shift+f7",
         "device_cycle": "shift+f8",
     },
