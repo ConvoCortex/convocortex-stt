@@ -4,3 +4,4 @@ __pycache__/
 *.pyo
 mess/
 state.json
+output.txt
