@@ -231,11 +231,13 @@ def main():
                 t = time.time() - t0
 
                 if text:
-                    logger.info(f"[FINAL +{t:.2f}s] '{text}' ({inf_ms}ms)")
                     ev = {"type": "final", "text": text, "epoch": epoch,
                           "t": round(t, 3), "inference_ms": inf_ms}
                     if gate.process(ev):
+                        logger.info(f"[FINAL +{t:.2f}s] '{text}' ({inf_ms}ms)")
                         dispatch(ev)
+                    else:
+                        logger.info(f"[FINAL +{t:.2f}s] '{text}' ({inf_ms}ms) [gated]")
                 else:
                     logger.info(f"[FINAL +{t:.2f}s] <empty> ({inf_ms}ms)")
 
