@@ -331,6 +331,73 @@ def main():
 
     setup_hotkeys()
 
+    # ── NATS control surface ──────────────────────────────────────────────────
+
+    def setup_nats_control():
+        if not cfg["nats"]["enabled"]:
+            return
+        try:
+            import nats as natslib
+        except ImportError:
+            return
+
+        import asyncio
+        import json
+
+        url     = cfg["nats"]["url"]
+        subject = cfg["nats"]["subject_control"]
+
+        async def _run():
+            try:
+                nc = await natslib.connect(url)
+            except Exception as e:
+                logger.warning(f"[nats:control] Could not connect: {e}")
+                return
+
+            async def _handler(msg):
+                try:
+                    payload = json.loads(msg.data.decode())
+                    cmd = payload.get("cmd", "").lower()
+                except Exception:
+                    return
+
+                if cmd == "mute":
+                    with control_lock: control_state['is_muted'] = True
+                    dispatch({"type": "status", "value": "muted"})
+                elif cmd == "unmute":
+                    with control_lock: control_state['is_muted'] = False
+                    dispatch({"type": "status", "value": "unmuted"})
+                elif cmd == "push_to_talk_start":
+                    with control_lock: control_state['is_muted'] = False
+                    dispatch({"type": "status", "value": "unmuted"})
+                elif cmd == "push_to_talk_end":
+                    with control_lock: control_state['is_muted'] = True
+                    dispatch({"type": "status", "value": "muted"})
+                elif cmd == "toggle_emission_gate":
+                    gate.toggle()
+                elif cmd == "status_query":
+                    with control_lock: muted = control_state['is_muted']
+                    with gate._lock: gate_open = gate.open
+                    reply = {"muted": muted, "gate_open": gate_open,
+                             "gate_enabled": gate.enabled}
+                    if msg.reply:
+                        await nc.publish(msg.reply, json.dumps(reply).encode())
+                elif cmd == "shutdown":
+                    logger.info("[nats:control] Shutdown command received.")
+                    dispatch({"type": "system", "event": "shutdown"})
+                    import os; os._exit(0)
+
+            await nc.subscribe(subject, cb=_handler)
+            logger.info(f"[nats:control] Subscribed to {subject}")
+            await asyncio.Event().wait()
+
+        def _run_loop():
+            asyncio.run(_run())
+
+        threading.Thread(target=_run_loop, daemon=True, name="nats-control").start()
+
+    setup_nats_control()
+
     # ── Stdin control ─────────────────────────────────────────────────────────
 
     def input_listener():
