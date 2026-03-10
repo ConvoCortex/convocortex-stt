@@ -87,19 +87,25 @@ class EmissionGate:
 
     def process(self, event: dict) -> bool:
         """Return True if event should be forwarded to handlers."""
-        if not self.enabled or event.get("type") != "final":
+        if not self.enabled:
             return True
-        text = event.get("text", "").strip().lower().strip(".,!?;:")
-        with self._lock:
-            if text in self.stop_words:
-                self.open = False
-                logger.info(f"[gate] Closed ('{text}')")
-                return False
-            if text in self.start_words:
-                self.open = True
-                logger.info(f"[gate] Opened ('{text}')")
-                return False
-            return self.open
+        etype = event.get("type")
+        if etype == "partial":
+            with self._lock:
+                return self.open
+        if etype == "final":
+            text = event.get("text", "").strip().lower().strip(".,!?;:")
+            with self._lock:
+                if text in self.stop_words:
+                    self.open = False
+                    logger.info(f"[gate] Closed ('{text}')")
+                    return False
+                if text in self.start_words:
+                    self.open = True
+                    logger.info(f"[gate] Opened ('{text}')")
+                    return False
+                return self.open
+        return True  # status/system always pass
 
     def toggle(self):
         with self._lock:
