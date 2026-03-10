@@ -357,15 +357,18 @@ def main():
             logger.info(f"[hotkey] mute_toggle = {hk['mute_toggle']}")
 
         if hk["push_to_talk"]:
+            _ptt_prev_muted = [False]
             def _ptt_press():
-                with control_lock: control_state['is_muted'] = False
-                logger.info("[PTT] Press — unmuted")
+                with control_lock:
+                    _ptt_prev_muted[0] = control_state['is_muted']
+                    control_state['is_muted'] = False
+                logger.info("[PTT] on")
                 dispatch({"type": "status", "value": "unmuted"})
-                persist()
             def _ptt_release(_=None):
-                with control_lock: control_state['is_muted'] = True
-                logger.info("[PTT] Release — muted")
-                dispatch({"type": "status", "value": "muted"})
+                with control_lock:
+                    control_state['is_muted'] = _ptt_prev_muted[0]
+                logger.info("[PTT] off")
+                dispatch({"type": "status", "value": "muted" if _ptt_prev_muted[0] else "unmuted"})
                 persist()
             kb.add_hotkey(hk["push_to_talk"], _ptt_press)
             kb.on_release_key(hk["push_to_talk"].split("+")[-1], _ptt_release)
