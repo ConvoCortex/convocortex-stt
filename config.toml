@@ -1,9 +1,10 @@
 [models]
 # faster-whisper models:
 #   tiny, tiny.en, base, base.en, small, small.en, medium, medium.en
-#   large-v1, large-v2, large-v3, large-v3-turbo
+#   large-v1, large-v2, large-v3, large-v3-turbo, large
 #   distil-large-v2, distil-large-v3, distil-medium.en, distil-small.en
 # ".en" variants are English-only but faster. Use non-.en for multilingual.
+# Can also be a local path or HuggingFace model ID.
 final          = "large-v3-turbo"
 realtime       = "tiny.en"
 
