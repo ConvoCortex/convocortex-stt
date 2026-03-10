@@ -422,10 +422,12 @@ def main():
                     with control_lock: control_state['is_muted'] = True
                     logger.info("Muted.")
                     dispatch({"type": "status", "value": "muted"})
+                    persist()
                 elif cmd == "UNMUTE":
                     with control_lock: control_state['is_muted'] = False
                     logger.info("Unmuted.")
                     dispatch({"type": "status", "value": "unmuted"})
+                    persist()
             except: break
 
     threading.Thread(target=input_listener, daemon=True).start()
