@@ -583,22 +583,26 @@ def main():
 
         except (OSError, IOError) as e:
             err = str(e)
-            if not _stream_lock.locked() and err != last_error:
+            if err != last_error:
                 logger.warning(f"Stream error: {err}. Retrying...")
             last_error = err
             time.sleep(0.5)
-            if _stream_lock.acquire(blocking=False):
-                try:
-                    name = _reset_stream_unsafe(current_device_idx[0])
-                    ring_buffer.clear()
-                    recording_buffer.clear()
-                    is_recording = False
-                    logger.info(f"Device: {name}")
-                    dispatch({"type": "system", "event": "device_changed", "device": name})
-                    last_error = ""
-                except: pass
-                finally:
-                    _stream_lock.release()
+            try:
+                stream.stop_stream()
+                stream.close()
+            except: pass
+            try:
+                stream = p_instance.open(
+                    format=pyaudio.paInt16, channels=1, rate=RATE,
+                    input=True, frames_per_buffer=CHUNK,
+                    input_device_index=current_device_idx[0]
+                )
+                ring_buffer.clear()
+                recording_buffer.clear()
+                is_recording = False
+                last_error = ""
+            except Exception as e2:
+                logger.warning(f"[device] Recovery failed: {e2}")
 
         except KeyboardInterrupt:
             break
