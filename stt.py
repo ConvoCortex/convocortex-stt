@@ -513,22 +513,37 @@ def main():
             if pending is not None:
                 _pending_device[0] = None
                 next_idx, next_name = pending
+                prev_idx = current_device_idx[0]
+                _open_kwargs = dict(
+                    format=pyaudio.paInt16, channels=1, rate=RATE,
+                    input=True, frames_per_buffer=CHUNK,
+                )
                 try:
                     stream.stop_stream()
                     stream.close()
-                    stream = p_instance.open(
-                        format=pyaudio.paInt16, channels=1, rate=RATE,
-                        input=True, frames_per_buffer=CHUNK,
-                        input_device_index=next_idx
-                    )
+                    stream = p_instance.open(input_device_index=next_idx, **_open_kwargs)
+                    # Verify with a real read — catches devices that open but don't deliver audio
+                    vdata = stream.read(CHUNK, exception_on_overflow=False)
+                    vchunk = np.frombuffer(vdata, dtype=np.int16).astype(np.float32)
+                    rms = int(np.sqrt(np.mean(vchunk ** 2)))
                     current_device_idx[0] = next_idx
                     ring_buffer.clear()
                     recording_buffer.clear()
                     is_recording = False
-                    logger.info(f"[device] Cycled to: {next_name}")
+                    logger.info(f"[device] Cycled to: {next_name} (rms={rms})")
                     dispatch({"type": "system", "event": "device_changed", "device": next_name})
                 except Exception as e:
                     logger.error(f"[device] Failed to switch to {next_name}: {e}")
+                    # Reopen previous device so the main loop isn't left with a dead stream
+                    try:
+                        stream.stop_stream(); stream.close()
+                    except: pass
+                    try:
+                        stream = p_instance.open(input_device_index=prev_idx, **_open_kwargs)
+                        ring_buffer.clear(); recording_buffer.clear(); is_recording = False
+                        logger.info(f"[device] Reverted to previous device")
+                    except Exception as e2:
+                        logger.error(f"[device] Revert failed: {e2}")
                 continue
 
             with control_lock:
