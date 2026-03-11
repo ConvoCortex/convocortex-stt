@@ -544,6 +544,7 @@ def main():
             logger.error(f"Unexpected: {e}")
             break
 
+    import os
     logger.info("Shutting down...")
     try: stream.stop_stream(); stream.close()
     except: pass
@@ -554,6 +555,7 @@ def main():
         final_queue.join()
     dispatch({"type": "system", "event": "shutdown"})
     logger.info("Done.")
+    os._exit(0)
 
 
 if __name__ == '__main__':

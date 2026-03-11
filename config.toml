@@ -10,7 +10,7 @@ realtime       = "tiny.en"   # set to "" to disable partials entirely
 
 # device: "cuda", "cpu", or "auto"
 final_device    = "cuda"
-realtime_device = "cpu"
+realtime_device = "cuda"
 
 # compute_type (faster-whisper / ctranslate2):
 #   float16       — GPU only, fastest, recommended for cuda
@@ -41,7 +41,7 @@ check_interval   = 0.1
 # min_chunks: minimum audio chunks before attempting a partial (avoids transcribing too little audio)
 # max_chunks: stop attempting partials beyond this length (avoids slow inference on long utterances)
 # 1 chunk = 512 samples at 16000hz = ~32ms
-min_chunks       = 1
+min_chunks       = 10
 max_chunks       = 50
 # queue_size: max pending partial jobs — oldest dropped if full (keeps latency low)
 queue_size       = 10
@@ -58,13 +58,13 @@ enabled = false
 path    = "watched.txt"
 
 [output.clipboard_replace]
-enabled = true
+enabled = false
 
 # use either output.clipboard_replace or output.clipboard_accumulate
 # output.clipboard_accumulate accumulates text into clipboard until clipboard_accumulate_cycle hotkey is pressed, at which point it empties clipboard and starts accumulating again
 [output.clipboard_accumulate]
 enabled   = true
-separator = " "
+separator = ""
 
 [output.type_at_cursor]
 enabled = true
@@ -88,10 +88,10 @@ stop_words   = ["stop", "pause"]
 
 [hotkeys]
 mute_toggle          = "`"
-clipboard_accumulate_cycle = "shift+f5"   # clears clipboard and starts fresh accumulation
-emission_gate_open   = "shift+f6"
-emission_gate_close  = "shift+f7"
-device_cycle         = "shift+f8"
+clipboard_accumulate_cycle = "ctrl+b"   # clears clipboard and starts fresh accumulation
+emission_gate_open   = "shift+f5"
+emission_gate_close  = "shift+f6"
+device_cycle         = "shift+f7"
 
 # ── NATS ─────────────────────────────────────────────────────────────────────
 # Requires nats-py installed. STT works fully without NATS.
