@@ -443,6 +443,7 @@ def main():
     # ── Stream reset ──────────────────────────────────────────────────────────
 
     current_device_idx = [resources['dev_idx']]
+    _cycling = [False]
 
     def get_input_devices():
         devices = []
