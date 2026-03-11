@@ -416,8 +416,8 @@ def main():
                         await nc.publish(msg.reply, json.dumps(reply).encode())
                 elif cmd == "shutdown":
                     logger.info("[nats:control] Shutdown command received.")
-                    dispatch({"type": "system", "event": "shutdown"})
-                    import os; os._exit(0)
+                    import signal
+                    signal.raise_signal(signal.SIGTERM)
 
             await nc.subscribe(subject, cb=_handler)
             logger.info(f"[nats:control] Subscribed to {subject}")
