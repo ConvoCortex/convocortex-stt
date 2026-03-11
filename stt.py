@@ -462,8 +462,10 @@ def main():
             info = p_instance.get_device_info_by_index(i)
             if info['maxInputChannels'] <= 0:
                 continue
+            if info['hostApi'] != _host_api:
+                continue
             name = info['name']
-            if name in _ALIAS_NAMES or name in seen_names:
+            if name in seen_names or i in _bad_devices:
                 continue
             try:
                 p_instance.is_format_supported(
@@ -471,8 +473,6 @@ def main():
                     input_channels=1, input_format=pyaudio.paInt16
                 )
             except Exception:
-                continue
-            if i in _bad_devices:
                 continue
             seen_names.add(name)
             devices.append((i, name))
