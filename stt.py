@@ -536,7 +536,8 @@ def main():
                     logger.info(f"[device] Cycled to: {next_name} (rms={rms})")
                     dispatch({"type": "system", "event": "device_changed", "device": next_name})
                 except Exception as e:
-                    logger.error(f"[device] Failed to switch to {next_name}: {e}")
+                    _bad_devices.add(next_idx)
+                    logger.error(f"[device] Failed to switch to {next_name}: {e} — skipping in future cycles")
                     # Reopen previous device so the main loop isn't left with a dead stream
                     try:
                         stream.stop_stream(); stream.close()
