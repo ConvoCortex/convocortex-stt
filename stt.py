@@ -425,6 +425,8 @@ def main():
                              "gate_enabled": gate.enabled}
                     if msg.reply:
                         await nc.publish(msg.reply, json.dumps(reply).encode())
+                elif cmd == "device_cycle":
+                    cycle_input_device()
                 elif cmd == "shutdown":
                     logger.info("[nats:control] Shutdown command received.")
                     import signal
