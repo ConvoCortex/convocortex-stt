@@ -117,6 +117,7 @@ Send JSON to the subject configured in `nats.subject_control`:
 {"cmd": "unmute"}
 {"cmd": "open_emission_gate"}
 {"cmd": "close_emission_gate"}
+{"cmd": "device_cycle"}
 {"cmd": "status_query"}
 {"cmd": "shutdown"}
 ```

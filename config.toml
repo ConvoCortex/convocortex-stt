@@ -58,12 +58,12 @@ enabled = false
 path    = "watched.txt"
 
 [output.clipboard_replace]
-enabled = false
+enabled = true
 
 # use either output.clipboard_replace or output.clipboard_accumulate
 # output.clipboard_accumulate accumulates text into clipboard until clipboard_accumulate_cycle hotkey is pressed, at which point it empties clipboard and starts accumulating again
 [output.clipboard_accumulate]
-enabled   = true
+enabled   = false
 separator = ""
 
 [output.type_at_cursor]
