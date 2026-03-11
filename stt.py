@@ -508,6 +508,29 @@ def main():
                 logger.info("Recovered.")
                 last_error = ""
 
+            # ── Device switch (signalled by hotkey thread) ────────────────────
+            pending = _pending_device[0]
+            if pending is not None:
+                _pending_device[0] = None
+                next_idx, next_name = pending
+                try:
+                    stream.stop_stream()
+                    stream.close()
+                    stream = p_instance.open(
+                        format=pyaudio.paInt16, channels=1, rate=RATE,
+                        input=True, frames_per_buffer=CHUNK,
+                        input_device_index=next_idx
+                    )
+                    current_device_idx[0] = next_idx
+                    ring_buffer.clear()
+                    recording_buffer.clear()
+                    is_recording = False
+                    logger.info(f"[device] Cycled to: {next_name}")
+                    dispatch({"type": "system", "event": "device_changed", "device": next_name})
+                except Exception as e:
+                    logger.error(f"[device] Failed to switch to {next_name}: {e}")
+                continue
+
             with control_lock:
                 if control_state['is_muted']:
                     continue
