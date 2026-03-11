@@ -129,10 +129,6 @@ class SileroVAD:
             return self.model(tensor, RATE).item()
 
 
-class _SilentDevice(Exception):
-    """Raised when a device opens successfully but produces no audio signal."""
-
-
 def main():
     import signal
     def _sigterm(_s, _f):
