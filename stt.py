@@ -446,14 +446,10 @@ def main():
     _stream_lock = threading.Lock()
 
     def _reset_stream_unsafe(device_idx=None):
-        """Must be called with _stream_lock held."""
-        nonlocal stream, p_instance
+        """Must be called with _stream_lock held. Reuses p_instance."""
+        nonlocal stream
         try: stream.stop_stream(); stream.close()
         except: pass
-        try: p_instance.terminate()
-        except: pass
-        time.sleep(0.15)  # let the host release the device before reopening
-        p_instance = pyaudio.PyAudio()
         if device_idx is None:
             info = p_instance.get_default_input_device_info()
             device_idx = info['index']
@@ -466,7 +462,7 @@ def main():
         try:
             stream = p_instance.open(**open_kwargs)
         except OSError:
-            time.sleep(0.3)  # one retry for transient WASAPI/host errors
+            time.sleep(0.3)
             stream = p_instance.open(**open_kwargs)
         current_device_idx[0] = device_idx
         return name
