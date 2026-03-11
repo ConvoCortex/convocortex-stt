@@ -443,17 +443,10 @@ def main():
     # ── Stream reset ──────────────────────────────────────────────────────────
 
     current_device_idx = [resources['dev_idx']]
-    _cycling = [False]
+    _stream_lock = threading.Lock()
 
-    def get_input_devices():
-        devices = []
-        for i in range(p_instance.get_device_count()):
-            info = p_instance.get_device_info_by_index(i)
-            if info['maxInputChannels'] > 0:
-                devices.append((i, info['name']))
-        return devices
-
-    def reset_stream(device_idx=None):
+    def _reset_stream_unsafe(device_idx=None):
+        """Must be called with _stream_lock held."""
         nonlocal stream, p_instance
         try: stream.stop_stream(); stream.close()
         except: pass
@@ -472,25 +465,36 @@ def main():
         current_device_idx[0] = device_idx
         return name
 
+    def reset_stream(device_idx=None):
+        with _stream_lock:
+            return _reset_stream_unsafe(device_idx)
+
     def cycle_input_device():
-        devices = get_input_devices()
-        if len(devices) <= 1:
-            logger.info("[device] Only one input device available.")
+        if not _stream_lock.acquire(blocking=False):
+            logger.info("[device] Busy, skipping cycle.")
             return
-        idxs = [d[0] for d in devices]
         try:
-            pos = idxs.index(current_device_idx[0])
-        except ValueError:
-            pos = -1
-        next_idx, next_name = devices[(pos + 1) % len(devices)]
-        try:
-            _cycling[0] = True
-            name = reset_stream(next_idx)
+            devices = []
+            for i in range(p_instance.get_device_count()):
+                info = p_instance.get_device_info_by_index(i)
+                if info['maxInputChannels'] > 0:
+                    devices.append((i, info['name']))
+            if len(devices) <= 1:
+                logger.info("[device] Only one input device available.")
+                return
+            idxs = [d[0] for d in devices]
+            try:
+                pos = idxs.index(current_device_idx[0])
+            except ValueError:
+                pos = -1
+            next_idx, next_name = devices[(pos + 1) % len(devices)]
+            name = _reset_stream_unsafe(next_idx)
             logger.info(f"[device] Cycled to: {name}")
             dispatch({"type": "system", "event": "device_changed", "device": name})
         except Exception as e:
-            _cycling[0] = False
             logger.error(f"[device] Failed to switch: {e}")
+        finally:
+            _stream_lock.release()
 
     # ── Main loop ─────────────────────────────────────────────────────────────
     ring_buffer      = deque(maxlen=int(BUFFER_SECONDS * RATE / CHUNK))
