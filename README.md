@@ -123,4 +123,20 @@ Send JSON to the subject configured in `nats.subject_control`:
 
 ## License
 
-AGPL-3.0. See [LICENSE](LICENSE).
+convocortex-stt is licensed under the **GNU Affero General Public License v3.0**
+(AGPL-3.0). See [LICENSE](LICENSE) for the full text.
+
+AGPL-3.0 means: you may use, modify, and distribute this software freely,
+including running it as a network service — but any modifications must be
+released under the same license.
+
+### Commercial license
+
+If you need to use convocortex-stt in a proprietary product or service without
+the AGPL-3.0 obligations, a commercial license is available. Contact the
+maintainer to discuss terms.
+
+### Contributing
+
+Contributions require signing the [Individual Contributor License Agreement](CLA.md).
+See [CONTRIBUTING.md](CONTRIBUTING.md) for details.
