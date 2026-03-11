@@ -437,20 +437,54 @@ def main():
 
     # ── Stream reset ──────────────────────────────────────────────────────────
 
-    def reset_stream():
+    current_device_idx = [resources['dev_idx']]
+
+    def get_input_devices():
+        p = pyaudio.PyAudio()
+        devices = []
+        for i in range(p.get_device_count()):
+            info = p.get_device_info_by_index(i)
+            if info['maxInputChannels'] > 0:
+                devices.append((i, info['name']))
+        p.terminate()
+        return devices
+
+    def reset_stream(device_idx=None):
         nonlocal stream, p_instance
         try: stream.stop_stream(); stream.close()
         except: pass
         try: p_instance.terminate()
         except: pass
         p_instance = pyaudio.PyAudio()
-        info = p_instance.get_default_input_device_info()
+        if device_idx is None:
+            info = p_instance.get_default_input_device_info()
+            device_idx = info['index']
+        name = p_instance.get_device_info_by_index(device_idx)['name']
         stream = p_instance.open(
             format=pyaudio.paInt16, channels=1, rate=RATE,
             input=True, frames_per_buffer=CHUNK,
-            input_device_index=info['index']
+            input_device_index=device_idx
         )
-        return info['name']
+        current_device_idx[0] = device_idx
+        return name
+
+    def cycle_input_device():
+        devices = get_input_devices()
+        if len(devices) <= 1:
+            logger.info("[device] Only one input device available.")
+            return
+        idxs = [d[0] for d in devices]
+        try:
+            pos = idxs.index(current_device_idx[0])
+        except ValueError:
+            pos = -1
+        next_idx, next_name = devices[(pos + 1) % len(devices)]
+        try:
+            name = reset_stream(next_idx)
+            logger.info(f"[device] Cycled to: {name}")
+            dispatch({"type": "system", "event": "device_changed", "device": name})
+        except Exception as e:
+            logger.error(f"[device] Failed to switch: {e}")
 
     # ── Main loop ─────────────────────────────────────────────────────────────
     ring_buffer      = deque(maxlen=int(BUFFER_SECONDS * RATE / CHUNK))
