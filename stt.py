@@ -135,7 +135,7 @@ def main():
         raise KeyboardInterrupt
     signal.signal(signal.SIGTERM, _sigterm)
 
-    print(f"Initializing Hybrid STT (Realtime: {REALTIME_DEVICE}, Final: {FINAL_DEVICE})...")
+    print(f"Initializing STT (Realtime: {REALTIME_DEVICE}, Final: {FINAL_DEVICE})...")
     sys.stdout.flush()
 
     resources = {}
@@ -356,7 +356,7 @@ def main():
             logger.info(f"[hotkey] clipboard_accumulate_cycle = {hk['clipboard_accumulate_cycle']}")
 
         if hk.get("device_cycle"):
-            kb.add_hotkey(hk["device_cycle"], cycle_input_device)
+            kb.add_hotkey(hk["device_cycle"], lambda: cycle_input_device())
             logger.info(f"[hotkey] device_cycle = {hk['device_cycle']}")
 
         if hk["mute_toggle"]:
