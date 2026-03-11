@@ -463,7 +463,7 @@ def main():
             if info['hostApi'] != _host_api:
                 continue
             name = info['name']
-            if name in seen_names or i in _bad_devices:
+            if name in _ALIAS_NAMES or name in seen_names or i in _bad_devices:
                 continue
             try:
                 p_instance.is_format_supported(
