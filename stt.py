@@ -539,11 +539,16 @@ def main():
             logger.error(f"Unexpected: {e}")
             break
 
-    dispatch({"type": "system", "event": "shutdown"})
+    logger.info("Shutting down...")
     try: stream.stop_stream(); stream.close()
     except: pass
     try: p_instance.terminate()
     except: pass
+    if not final_queue.empty():
+        logger.info("Waiting for final queue to drain...")
+        final_queue.join()
+    dispatch({"type": "system", "event": "shutdown"})
+    logger.info("Done.")
 
 
 if __name__ == '__main__':
