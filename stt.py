@@ -355,6 +355,10 @@ def main():
             kb.add_hotkey(hk["clipboard_accumulate_cycle"], handler_extras["clipboard_accumulate_reset"])
             logger.info(f"[hotkey] clipboard_accumulate_cycle = {hk['clipboard_accumulate_cycle']}")
 
+        if hk.get("device_cycle"):
+            kb.add_hotkey(hk["device_cycle"], cycle_input_device)
+            logger.info(f"[hotkey] device_cycle = {hk['device_cycle']}")
+
         if hk["mute_toggle"]:
             def _mute_toggle():
                 with control_lock:
