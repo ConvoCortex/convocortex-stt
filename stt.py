@@ -202,6 +202,7 @@ def main():
             resources['stream'] = stream
             resources['dev_name'] = info['name']
             resources['dev_idx'] = info['index']
+            resources['host_api'] = info['hostApi']
             logger.info(f"Audio: {info['name']}")
         except Exception as e:
             logger.error(f"Audio stack error: {e}")
