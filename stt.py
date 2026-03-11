@@ -537,18 +537,32 @@ def main():
                         stream.stop_stream()
                         stream.close()
                         stream = p_instance.open(input_device_index=next_idx, **_open_kwargs)
-                        vdata = stream.read(CHUNK, exception_on_overflow=False)
-                        vchunk = np.frombuffer(vdata, dtype=np.int16).astype(np.float32)
-                        rms = int(np.sqrt(np.mean(vchunk ** 2)))
-                        if rms == 0:
-                            raise OSError("no audio signal (rms=0)")
+                        # Read several chunks to allow device warmup; take max RMS
+                        peak_rms = 0
+                        for _ in range(8):
+                            vdata = stream.read(CHUNK, exception_on_overflow=False)
+                            vchunk = np.frombuffer(vdata, dtype=np.int16).astype(np.float32)
+                            peak_rms = max(peak_rms, int(np.sqrt(np.mean(vchunk ** 2))))
+                            if peak_rms > 0:
+                                break
+                        if peak_rms == 0:
+                            # Silent after warmup — skip this cycle but don't permanently blacklist
+                            raise _SilentDevice("no audio signal after warmup")
                         current_device_idx[0] = next_idx
                         ring_buffer.clear(); recording_buffer.clear(); is_recording = False
-                        logger.info(f"[device] Cycled to: {next_name} (rms={rms})")
+                        logger.info(f"[device] Cycled to: {next_name} (rms={peak_rms})")
                         dispatch({"type": "system", "event": "device_changed", "device": next_name})
                         break
+                    except _SilentDevice as e:
+                        logger.warning(f"[device] Skipping {next_name}: {e}")
+                        try: stream.stop_stream(); stream.close()
+                        except: pass
+                        try:
+                            stream = p_instance.open(input_device_index=prev_idx, **_open_kwargs)
+                            current_device_idx[0] = prev_idx
+                        except: pass
                     except Exception as e:
-                        _bad_devices.add(next_idx)
+                        _bad_devices.add(next_idx)  # hard failure — permanently skip
                         logger.warning(f"[device] Skipping {next_name}: {e}")
                         try: stream.stop_stream(); stream.close()
                         except: pass
