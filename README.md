@@ -121,10 +121,6 @@ Send JSON to the subject configured in `nats.subject_control`:
 {"cmd": "shutdown"}
 ```
 
-## Stdin control
-
-Send `MUTE` or `UNMUTE` to stdin at runtime.
-
 ## License
 
 AGPL-3.0. See [LICENSE](LICENSE).
