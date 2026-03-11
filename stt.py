@@ -449,6 +449,8 @@ def main():
     _pending_device    = [None]   # (idx, name) set by hotkey, consumed by main loop
     _host_api          = resources['host_api']  # only cycle within this host API
     _bad_devices       = set()    # device indices that failed to open; skipped in cycle
+    _ALIAS_NAMES       = {'Primary Sound Capture Driver', 'Microsoft Sound Mapper',
+                          'Microsoft Sound Mapper - Input', 'Microsoft Sound Mapper - Output'}
 
     def _enumerate_input_devices():
         """Read-only enumeration — safe to call from any thread."""
