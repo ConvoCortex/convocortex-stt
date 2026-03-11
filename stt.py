@@ -130,6 +130,11 @@ class SileroVAD:
 
 
 def main():
+    import signal
+    def _sigterm(_s, _f):
+        raise KeyboardInterrupt
+    signal.signal(signal.SIGTERM, _sigterm)
+
     print(f"Initializing Hybrid STT (Realtime: {REALTIME_DEVICE}, Final: {FINAL_DEVICE})...")
     sys.stdout.flush()
 
