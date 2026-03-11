@@ -529,6 +529,8 @@ def main():
                     vdata = stream.read(CHUNK, exception_on_overflow=False)
                     vchunk = np.frombuffer(vdata, dtype=np.int16).astype(np.float32)
                     rms = int(np.sqrt(np.mean(vchunk ** 2)))
+                    if rms == 0:
+                        raise OSError(f"no audio signal (rms=0)")
                     current_device_idx[0] = next_idx
                     ring_buffer.clear()
                     recording_buffer.clear()
@@ -537,7 +539,7 @@ def main():
                     dispatch({"type": "system", "event": "device_changed", "device": next_name})
                 except Exception as e:
                     _bad_devices.add(next_idx)
-                    logger.error(f"[device] Failed to switch to {next_name}: {e} — skipping in future cycles")
+                    logger.error(f"[device] Skipping {next_name}: {e}")
                     # Reopen previous device so the main loop isn't left with a dead stream
                     try:
                         stream.stop_stream(); stream.close()
