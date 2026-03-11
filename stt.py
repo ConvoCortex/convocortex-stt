@@ -474,15 +474,20 @@ def main():
             logger.info("[device] Busy, skipping cycle.")
             return
         try:
+            _EXCLUDE_APIS = {'MME', 'Windows DirectSound'}
             devices = []
             for i in range(p_instance.get_device_count()):
                 info = p_instance.get_device_info_by_index(i)
                 if info['maxInputChannels'] <= 0:
                     continue
                 try:
-                    api = p_instance.get_host_api_info_by_index(info['hostApi'])
-                    if 'WASAPI' not in api['name']:
+                    api_name = p_instance.get_host_api_info_by_index(info['hostApi'])['name']
+                    if any(x in api_name for x in _EXCLUDE_APIS):
                         continue
+                    p_instance.is_format_supported(
+                        RATE, input_device=i,
+                        input_channels=1, input_format=pyaudio.paInt16
+                    )
                 except Exception:
                     continue
                 devices.append((i, info['name']))
