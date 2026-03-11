@@ -484,10 +484,12 @@ def main():
             pos = -1
         next_idx, next_name = devices[(pos + 1) % len(devices)]
         try:
+            _cycling[0] = True
             name = reset_stream(next_idx)
             logger.info(f"[device] Cycled to: {name}")
             dispatch({"type": "system", "event": "device_changed", "device": name})
         except Exception as e:
+            _cycling[0] = False
             logger.error(f"[device] Failed to switch: {e}")
 
     # ── Main loop ─────────────────────────────────────────────────────────────
