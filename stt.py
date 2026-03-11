@@ -467,6 +467,8 @@ def main():
                 )
             except Exception:
                 continue
+            if i in _bad_devices:
+                continue
             seen_names.add(name)
             devices.append((i, name))
         return devices
