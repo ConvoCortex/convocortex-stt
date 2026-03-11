@@ -480,23 +480,27 @@ def main():
             logger.info("[device] Busy, skipping cycle.")
             return
         try:
-            _EXCLUDE_APIS = {'MME', 'Windows DirectSound'}
+            # Windows MME exposes virtual aliases for the default device.
+            # Filter them by name — they never appear in real device lists.
+            _ALIAS_NAMES = {'Primary Sound Capture Driver', 'Microsoft Sound Mapper'}
             devices = []
+            seen_names = set()
             for i in range(p_instance.get_device_count()):
                 info = p_instance.get_device_info_by_index(i)
                 if info['maxInputChannels'] <= 0:
                     continue
+                name = info['name']
+                if name in _ALIAS_NAMES or name in seen_names:
+                    continue
                 try:
-                    api_name = p_instance.get_host_api_info_by_index(info['hostApi'])['name']
-                    if any(x in api_name for x in _EXCLUDE_APIS):
-                        continue
                     p_instance.is_format_supported(
                         RATE, input_device=i,
                         input_channels=1, input_format=pyaudio.paInt16
                     )
                 except Exception:
                     continue
-                devices.append((i, info['name']))
+                seen_names.add(name)
+                devices.append((i, name))
             if len(devices) <= 1:
                 logger.info("[device] Only one input device available.")
                 return
