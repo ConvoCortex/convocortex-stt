@@ -1,6 +1,6 @@
 # convocortex-stt
 
-Self-sufficient NATS-native hands-free speech-to-text engine.
+Self-sufficient NATS-native hands-free ergonomic speech-to-text engine.
 
 Designed for ambient operation. VAD triggers transcription automatically on pause. Say a stop word to silence output, say a start word to resume. Hotkey use is optional.
 
@@ -8,7 +8,7 @@ Self-sufficient standalone, but intended to integrate via NATS.
 
 ## How it works
 
-Dual-model pipeline: a fast CPU model produces **partial** results during speech, an accurate GPU model produces **final** results after silence. Silero VAD gates all inference so nothing runs while you are not speaking.
+Dual-model pipeline: a fast model produces **partial** results during speech, an accurate GPU model produces **final** results after silence. Silero VAD gates all inference so nothing runs while you are not speaking.
 
 **Final** results are high-accuracy transcriptions produced once a pause in speech is detected. This is the primary output — written to file, clipboard, typed at cursor, or published over NATS.
 
@@ -22,7 +22,7 @@ Dual-model pipeline: a fast CPU model produces **partial** results during speech
 - High-accuracy final transcriptions after each pause
 - Realtime partial transcriptions during speech
 - Local output handlers: file append, file overwrite, clipboard, type at cursor
-- Hotkeys available but not required for normal use
+- Hotkeys with additional features available but not required for normal use
 - NATS event emit and control surface (optional — works fully without NATS)
 - State persistence across restarts (mute state, gate state)
 - Device reconnect on audio loss

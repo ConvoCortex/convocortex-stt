@@ -477,8 +477,15 @@ def main():
             devices = []
             for i in range(p_instance.get_device_count()):
                 info = p_instance.get_device_info_by_index(i)
-                if info['maxInputChannels'] > 0:
-                    devices.append((i, info['name']))
+                if info['maxInputChannels'] <= 0:
+                    continue
+                try:
+                    api = p_instance.get_host_api_info_by_index(info['hostApi'])
+                    if 'WASAPI' not in api['name']:
+                        continue
+                except Exception:
+                    continue
+                devices.append((i, info['name']))
             if len(devices) <= 1:
                 logger.info("[device] Only one input device available.")
                 return
