@@ -596,6 +596,9 @@ def main():
             if _stream_lock.acquire(blocking=False):
                 try:
                     name = _reset_stream_unsafe(current_device_idx[0])
+                    ring_buffer.clear()
+                    recording_buffer.clear()
+                    is_recording = False
                     logger.info(f"Device: {name}")
                     dispatch({"type": "system", "event": "device_changed", "device": name})
                     last_error = ""
