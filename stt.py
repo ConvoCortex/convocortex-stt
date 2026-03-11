@@ -445,13 +445,11 @@ def main():
     current_device_idx = [resources['dev_idx']]
 
     def get_input_devices():
-        p = pyaudio.PyAudio()
         devices = []
-        for i in range(p.get_device_count()):
-            info = p.get_device_info_by_index(i)
+        for i in range(p_instance.get_device_count()):
+            info = p_instance.get_device_info_by_index(i)
             if info['maxInputChannels'] > 0:
                 devices.append((i, info['name']))
-        p.terminate()
         return devices
 
     def reset_stream(device_idx=None):
