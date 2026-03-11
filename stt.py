@@ -567,9 +567,10 @@ def main():
 
         except (OSError, IOError) as e:
             err = str(e)
-            if err != last_error:
+            if not _cycling[0] and err != last_error:
                 logger.warning(f"Stream error: {err}. Retrying...")
-                last_error = err
+            _cycling[0] = False
+            last_error = err
             time.sleep(0.5)
             try:
                 name = reset_stream(current_device_idx[0])
