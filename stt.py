@@ -571,17 +571,19 @@ def main():
 
         except (OSError, IOError) as e:
             err = str(e)
-            if not _cycling[0] and err != last_error:
+            if not _stream_lock.locked() and err != last_error:
                 logger.warning(f"Stream error: {err}. Retrying...")
-            _cycling[0] = False
             last_error = err
             time.sleep(0.5)
-            try:
-                name = reset_stream(current_device_idx[0])
-                logger.info(f"Device: {name}")
-                dispatch({"type": "system", "event": "device_changed", "device": name})
-                last_error = ""
-            except: pass
+            if _stream_lock.acquire(blocking=False):
+                try:
+                    name = _reset_stream_unsafe(current_device_idx[0])
+                    logger.info(f"Device: {name}")
+                    dispatch({"type": "system", "event": "device_changed", "device": name})
+                    last_error = ""
+                except: pass
+                finally:
+                    _stream_lock.release()
 
         except KeyboardInterrupt:
             break
