@@ -571,7 +571,7 @@ def main():
                 last_error = err
             time.sleep(0.5)
             try:
-                name = reset_stream()
+                name = reset_stream(current_device_idx[0])
                 logger.info(f"Device: {name}")
                 dispatch({"type": "system", "event": "device_changed", "device": name})
                 last_error = ""
