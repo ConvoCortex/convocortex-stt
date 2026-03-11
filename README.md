@@ -128,5 +128,3 @@ Send `MUTE` or `UNMUTE` to stdin at runtime.
 ## License
 
 AGPL-3.0. See [LICENSE](LICENSE).
-
-[RealtimeSTT](https://github.com/KoljaB/RealtimeSTT) by KoljaB is used as a dependency under the MIT license.

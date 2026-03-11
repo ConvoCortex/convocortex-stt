@@ -41,8 +41,8 @@ check_interval   = 0.1
 # min_chunks: minimum audio chunks before attempting a partial (avoids transcribing too little audio)
 # max_chunks: stop attempting partials beyond this length (avoids slow inference on long utterances)
 # 1 chunk = 512 samples at 16000hz = ~32ms
-min_chunks       = 40   # ~1.3s
-max_chunks       = 100  # ~3.2s
+min_chunks       = 1
+max_chunks       = 50
 # queue_size: max pending partial jobs — oldest dropped if full (keeps latency low)
 queue_size       = 10
 
@@ -60,6 +60,8 @@ path    = "watched.txt"
 [output.clipboard_replace]
 enabled = true
 
+# use either output.clipboard_replace or output.clipboard_accumulate
+# output.clipboard_accumulate accumulates text into clipboard until clipboard_accumulate_cycle hotkey is pressed, at which point it empties clipboard and starts accumulating again
 [output.clipboard_accumulate]
 enabled   = true
 separator = " "
@@ -82,14 +84,14 @@ start_words  = ["listen", "start"]
 stop_words   = ["stop", "pause"]
 
 # ── Hotkeys ──────────────────────────────────────────────────────────────────
-# Empty string = disabled. Max four hotkeys.
+# Empty string = disabled.
 
 [hotkeys]
 mute_toggle          = "`"
-clipboard_accumulate_cycle = "shift+f1"   # clears clipboard and starts fresh accumulation
-emission_gate_open   = "shift+f2"
-emission_gate_close  = "shift+f3"
-device_cycle         = "shift+f4"
+clipboard_accumulate_cycle = "shift+f5"   # clears clipboard and starts fresh accumulation
+emission_gate_open   = "shift+f6"
+emission_gate_close  = "shift+f7"
+device_cycle         = "shift+f8"
 
 # ── NATS ─────────────────────────────────────────────────────────────────────
 # Requires nats-py installed. STT works fully without NATS.
