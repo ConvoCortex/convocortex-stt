@@ -430,29 +430,6 @@ def main():
 
     setup_nats_control()
 
-    # ── Stdin control ─────────────────────────────────────────────────────────
-
-    def input_listener():
-        while True:
-            try:
-                line = sys.stdin.readline()
-                if not line:
-                    break
-                cmd = line.strip().upper()
-                if cmd == "MUTE":
-                    with control_lock: control_state['is_muted'] = True
-                    logger.info("Muted.")
-                    dispatch({"type": "status", "value": "muted"})
-                    persist()
-                elif cmd == "UNMUTE":
-                    with control_lock: control_state['is_muted'] = False
-                    logger.info("Unmuted.")
-                    dispatch({"type": "status", "value": "unmuted"})
-                    persist()
-            except: break
-
-    threading.Thread(target=input_listener, daemon=True).start()
-
     # ── Stream reset ──────────────────────────────────────────────────────────
 
     def reset_stream():
