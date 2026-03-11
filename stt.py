@@ -440,79 +440,50 @@ def main():
 
     setup_nats_control()
 
-    # ── Stream reset ──────────────────────────────────────────────────────────
+    # ── Device cycling ────────────────────────────────────────────────────────
+    # IMPORTANT: stream.close()/open() must only happen in the main loop thread.
+    # The hotkey thread only writes to _pending_device; the main loop consumes it.
 
     current_device_idx = [resources['dev_idx']]
-    _stream_lock = threading.Lock()
+    _pending_device    = [None]   # (idx, name) set by hotkey, consumed by main loop
+    _ALIAS_NAMES       = {'Primary Sound Capture Driver', 'Microsoft Sound Mapper'}
 
-    def _reset_stream_unsafe(device_idx=None):
-        """Must be called with _stream_lock held. Reuses p_instance."""
-        nonlocal stream
-        try: stream.stop_stream(); stream.close()
-        except: pass
-        if device_idx is None:
-            info = p_instance.get_default_input_device_info()
-            device_idx = info['index']
-        name = p_instance.get_device_info_by_index(device_idx)['name']
-        open_kwargs = dict(
-            format=pyaudio.paInt16, channels=1, rate=RATE,
-            input=True, frames_per_buffer=CHUNK,
-            input_device_index=device_idx
-        )
-        try:
-            stream = p_instance.open(**open_kwargs)
-        except OSError:
-            time.sleep(0.3)
-            stream = p_instance.open(**open_kwargs)
-        current_device_idx[0] = device_idx
-        return name
-
-    def reset_stream(device_idx=None):
-        with _stream_lock:
-            return _reset_stream_unsafe(device_idx)
+    def _enumerate_input_devices():
+        """Read-only enumeration — safe to call from any thread."""
+        devices = []
+        seen_names = set()
+        for i in range(p_instance.get_device_count()):
+            info = p_instance.get_device_info_by_index(i)
+            if info['maxInputChannels'] <= 0:
+                continue
+            name = info['name']
+            if name in _ALIAS_NAMES or name in seen_names:
+                continue
+            try:
+                p_instance.is_format_supported(
+                    RATE, input_device=i,
+                    input_channels=1, input_format=pyaudio.paInt16
+                )
+            except Exception:
+                continue
+            seen_names.add(name)
+            devices.append((i, name))
+        return devices
 
     def cycle_input_device():
-        if not _stream_lock.acquire(blocking=False):
-            logger.info("[device] Busy, skipping cycle.")
+        """Hotkey handler — only signals the main loop, never touches the stream."""
+        if _pending_device[0] is not None:
+            return  # previous cycle not yet consumed
+        devices = _enumerate_input_devices()
+        if len(devices) <= 1:
+            logger.info("[device] Only one input device available.")
             return
+        idxs = [d[0] for d in devices]
         try:
-            # Windows MME exposes virtual aliases for the default device.
-            # Filter them by name — they never appear in real device lists.
-            _ALIAS_NAMES = {'Primary Sound Capture Driver', 'Microsoft Sound Mapper'}
-            devices = []
-            seen_names = set()
-            for i in range(p_instance.get_device_count()):
-                info = p_instance.get_device_info_by_index(i)
-                if info['maxInputChannels'] <= 0:
-                    continue
-                name = info['name']
-                if name in _ALIAS_NAMES or name in seen_names:
-                    continue
-                try:
-                    p_instance.is_format_supported(
-                        RATE, input_device=i,
-                        input_channels=1, input_format=pyaudio.paInt16
-                    )
-                except Exception:
-                    continue
-                seen_names.add(name)
-                devices.append((i, name))
-            if len(devices) <= 1:
-                logger.info("[device] Only one input device available.")
-                return
-            idxs = [d[0] for d in devices]
-            try:
-                pos = idxs.index(current_device_idx[0])
-            except ValueError:
-                pos = -1
-            next_idx, next_name = devices[(pos + 1) % len(devices)]
-            name = _reset_stream_unsafe(next_idx)
-            logger.info(f"[device] Cycled to: {name}")
-            dispatch({"type": "system", "event": "device_changed", "device": name})
-        except Exception as e:
-            logger.error(f"[device] Failed to switch: {e}")
-        finally:
-            _stream_lock.release()
+            pos = idxs.index(current_device_idx[0])
+        except ValueError:
+            pos = -1
+        _pending_device[0] = devices[(pos + 1) % len(devices)]
 
     # ── Main loop ─────────────────────────────────────────────────────────────
     ring_buffer      = deque(maxlen=int(BUFFER_SECONDS * RATE / CHUNK))
