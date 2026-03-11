@@ -452,16 +452,22 @@ def main():
         except: pass
         try: p_instance.terminate()
         except: pass
+        time.sleep(0.15)  # let the host release the device before reopening
         p_instance = pyaudio.PyAudio()
         if device_idx is None:
             info = p_instance.get_default_input_device_info()
             device_idx = info['index']
         name = p_instance.get_device_info_by_index(device_idx)['name']
-        stream = p_instance.open(
+        open_kwargs = dict(
             format=pyaudio.paInt16, channels=1, rate=RATE,
             input=True, frames_per_buffer=CHUNK,
             input_device_index=device_idx
         )
+        try:
+            stream = p_instance.open(**open_kwargs)
+        except OSError:
+            time.sleep(0.3)  # one retry for transient WASAPI/host errors
+            stream = p_instance.open(**open_kwargs)
         current_device_idx[0] = device_idx
         return name
 
