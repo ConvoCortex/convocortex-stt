@@ -515,41 +515,47 @@ def main():
             pending = _pending_device[0]
             if pending is not None:
                 _pending_device[0] = None
-                next_idx, next_name = pending
-                prev_idx = current_device_idx[0]
                 _open_kwargs = dict(
                     format=pyaudio.paInt16, channels=1, rate=RATE,
                     input=True, frames_per_buffer=CHUNK,
                 )
-                try:
-                    stream.stop_stream()
-                    stream.close()
-                    stream = p_instance.open(input_device_index=next_idx, **_open_kwargs)
-                    # Verify with a real read — catches devices that open but don't deliver audio
-                    vdata = stream.read(CHUNK, exception_on_overflow=False)
-                    vchunk = np.frombuffer(vdata, dtype=np.int16).astype(np.float32)
-                    rms = int(np.sqrt(np.mean(vchunk ** 2)))
-                    if rms == 0:
-                        raise OSError(f"no audio signal (rms=0)")
-                    current_device_idx[0] = next_idx
-                    ring_buffer.clear()
-                    recording_buffer.clear()
-                    is_recording = False
-                    logger.info(f"[device] Cycled to: {next_name} (rms={rms})")
-                    dispatch({"type": "system", "event": "device_changed", "device": next_name})
-                except Exception as e:
-                    _bad_devices.add(next_idx)
-                    logger.error(f"[device] Skipping {next_name}: {e}")
-                    # Reopen previous device so the main loop isn't left with a dead stream
+                # Try candidates in order; skip bad ones until one works or we exhaust all
+                candidates = [pending] + []  # may grow if we auto-advance past failures
+                _tried = {current_device_idx[0]}
+                _all_devices = _enumerate_input_devices()
+                _idxs = [d[0] for d in _all_devices]
+                _start_pos = next(
+                    (i for i, d in enumerate(_all_devices) if d[0] == pending[0]), 0
+                )
+                for _attempt in range(len(_all_devices)):
+                    next_idx, next_name = _all_devices[(_start_pos + _attempt) % len(_all_devices)]
+                    if next_idx in _tried:
+                        continue
+                    _tried.add(next_idx)
+                    prev_idx = current_device_idx[0]
                     try:
-                        stream.stop_stream(); stream.close()
-                    except: pass
-                    try:
-                        stream = p_instance.open(input_device_index=prev_idx, **_open_kwargs)
+                        stream.stop_stream()
+                        stream.close()
+                        stream = p_instance.open(input_device_index=next_idx, **_open_kwargs)
+                        vdata = stream.read(CHUNK, exception_on_overflow=False)
+                        vchunk = np.frombuffer(vdata, dtype=np.int16).astype(np.float32)
+                        rms = int(np.sqrt(np.mean(vchunk ** 2)))
+                        if rms == 0:
+                            raise OSError("no audio signal (rms=0)")
+                        current_device_idx[0] = next_idx
                         ring_buffer.clear(); recording_buffer.clear(); is_recording = False
-                        logger.info(f"[device] Reverted to previous device")
-                    except Exception as e2:
-                        logger.error(f"[device] Revert failed: {e2}")
+                        logger.info(f"[device] Cycled to: {next_name} (rms={rms})")
+                        dispatch({"type": "system", "event": "device_changed", "device": next_name})
+                        break
+                    except Exception as e:
+                        _bad_devices.add(next_idx)
+                        logger.warning(f"[device] Skipping {next_name}: {e}")
+                        try: stream.stop_stream(); stream.close()
+                        except: pass
+                        try:
+                            stream = p_instance.open(input_device_index=prev_idx, **_open_kwargs)
+                            current_device_idx[0] = prev_idx
+                        except: pass
                 continue
 
             with control_lock:
