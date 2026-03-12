@@ -81,6 +81,8 @@ enabled = true
 on_sound = "sounds/on.ogg"
 off_sound = "sounds/off.ogg"
 silence_sound = "sounds/silence.ogg"
+final_sound = "sounds/final.ogg"
+final_sound_enabled = true
 # optional exact output device name for feedback sounds; empty = remembered last output device, then OS default
 output_device = ""
 
@@ -88,7 +90,7 @@ output_device = ""
 # Optional: simple exact-match commands on final transcriptions.
 # If enabled, matching utterances are "consumed" (not output/typed).
 #
-# Designed for workflow glue (e.g. say "enter" to press Enter). Not a full voice command engine, use NATS for that.
+# Designed for workflow glue (e.g. say "enter" to press Enter). Not a full voice command engine, a proper voice command engine is intended over NATS.
 [voice_commands]
 enabled = true
 
@@ -123,7 +125,7 @@ stop_words = ["stop", "pause", "sleep"]
 [hotkeys]
 sleep_toggle         = "`"         # toggles sleeping <-> working
 typing_toggle        = "shift+f5"  # toggles type_at_cursor output
-device_cycle         = "shift+f6"  # cycles input device
+input_device_cycle   = "shift+f6"  # cycles input device
 output_device_cycle  = "shift+f7"  # cycles audio feedback output device
 clipboard_accumulate_cycle = "ctrl+b"   # clears clipboard and starts fresh accumulation
 

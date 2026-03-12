@@ -109,6 +109,8 @@ Audio feedback behavior:
 - `feedback.silence_sound` loops continuously in background (Bluetooth keepalive).
 - `feedback.on_sound` plays on wake, typing-on, Enter action, and most device cycles.
 - `feedback.off_sound` plays on sleep/stop, typing-off, and when device cycle wraps to first device.
+- `feedback.final_sound` plays when the final model emits non-empty output text.
+- `feedback.final_sound_enabled` toggles only that final-output sound (independent from on/off sounds).
 - `feedback.output_device` pins feedback playback to an exact output device name (otherwise it remembers the last output device you cycled to).
 
 ## NATS
@@ -140,7 +142,7 @@ Send JSON to the subject configured in `nats.subject_control`:
 {"cmd": "typing_toggle"}
 {"cmd": "typing_enable"}
 {"cmd": "typing_disable"}
-{"cmd": "device_cycle"}
+{"cmd": "input_device_cycle"}
 {"cmd": "output_device_cycle"}
 {"cmd": "status_query"}
 {"cmd": "shutdown"}
@@ -154,6 +156,11 @@ convocortex-stt is licensed under the **GNU Affero General Public License v3.0**
 AGPL-3.0 means: you may use, modify, and distribute this software freely,
 including running it as a network service — but any modifications must be
 released under the same license.
+
+This project also depends on third-party packages (including `realtimestt`),
+which are licensed separately under their own terms. See
+[`pyproject.toml`](pyproject.toml) and [`uv.lock`](uv.lock) for the dependency
+list and pinned versions.
 
 ### Commercial license
 

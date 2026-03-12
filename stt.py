@@ -70,6 +70,8 @@ FEEDBACK_ENABLED = bool(_fb_cfg.get("enabled", True))
 FEEDBACK_ON_SOUND = str(_fb_cfg.get("on_sound", "sounds/on.ogg")).strip()
 FEEDBACK_OFF_SOUND = str(_fb_cfg.get("off_sound", "sounds/off.ogg")).strip()
 FEEDBACK_SILENCE_SOUND = str(_fb_cfg.get("silence_sound", "sounds/silence.ogg")).strip()
+FEEDBACK_FINAL_SOUND = str(_fb_cfg.get("final_sound", "sounds/final.ogg")).strip()
+FEEDBACK_FINAL_SOUND_ENABLED = bool(_fb_cfg.get("final_sound_enabled", True))
 FEEDBACK_OUTPUT_DEVICE = str(_fb_cfg.get("output_device", "")).strip()
 
 # ── Voice commands (minimal) ──────────────────────────────────────────────────
@@ -138,6 +140,8 @@ class FeedbackAudio:
         on_path: str,
         off_path: str,
         silence_path: str,
+        final_path: str,
+        final_sound_enabled: bool,
         output_device: str,
         persisted_output_device_name: str = "",
         persisted_output_device_host_api: int | None = None,
@@ -146,6 +150,8 @@ class FeedbackAudio:
         self.on_path = on_path
         self.off_path = off_path
         self.silence_path = silence_path
+        self.final_path = final_path
+        self.final_sound_enabled = final_sound_enabled
         self.output_device = output_device
         self._persisted_output_device_name = str(persisted_output_device_name or "").strip()
         self._persisted_output_device_host_api = persisted_output_device_host_api
@@ -171,6 +177,12 @@ class FeedbackAudio:
             self._clips["on"] = self._load_clip(torchaudio, self.on_path)
             self._clips["off"] = self._load_clip(torchaudio, self.off_path)
             self._clips["silence"] = self._load_clip(torchaudio, self.silence_path)
+            if self.final_sound_enabled:
+                try:
+                    self._clips["final"] = self._load_clip(torchaudio, self.final_path)
+                except Exception as e:
+                    logger.warning(f"[feedback] final_sound disabled: {e}")
+                    self.final_sound_enabled = False
             self._probe_sr = int(self._clips.get("on", {}).get("sr") or 0) or None
             self._probe_channels = int(self._clips.get("on", {}).get("channels") or 0) or None
             self._p_sfx = pyaudio.PyAudio()
@@ -368,6 +380,10 @@ class FeedbackAudio:
     def play_off(self):
         if self.enabled:
             self._sound_queue.put("off")
+
+    def play_final(self):
+        if self.enabled and self.final_sound_enabled and "final" in self._clips:
+            self._sound_queue.put("final")
 
     def shutdown(self):
         if not self.enabled:
@@ -573,6 +589,8 @@ def main():
         on_path=FEEDBACK_ON_SOUND,
         off_path=FEEDBACK_OFF_SOUND,
         silence_path=FEEDBACK_SILENCE_SOUND,
+        final_path=FEEDBACK_FINAL_SOUND,
+        final_sound_enabled=FEEDBACK_FINAL_SOUND_ENABLED,
         output_device=FEEDBACK_OUTPUT_DEVICE,
         persisted_output_device_name=persisted_output_name,
         persisted_output_device_host_api=persisted_output_host_api,
@@ -741,6 +759,8 @@ def main():
                         else:
                             logger.info(f"[FINAL +{t:.2f}s] → OUT  <action-only> ({inf_ms}ms)")
                         dispatch(ev)
+                        if text:
+                            feedback.play_final()
                         if actions.get("press_enter_after"):
                             feedback.play_on()
                 else:
@@ -827,9 +847,10 @@ def main():
             kb.add_hotkey(hk["clipboard_accumulate_cycle"], handler_extras["clipboard_accumulate_reset"])
             logger.info(f"[hotkey] clipboard_accumulate_cycle = {hk['clipboard_accumulate_cycle']}")
 
-        if hk.get("device_cycle"):
-            kb.add_hotkey(hk["device_cycle"], lambda: cycle_input_device())
-            logger.info(f"[hotkey] device_cycle = {hk['device_cycle']}")
+        input_cycle_hotkey = str(hk.get("input_device_cycle", "")).strip()
+        if input_cycle_hotkey:
+            kb.add_hotkey(input_cycle_hotkey, lambda: cycle_input_device())
+            logger.info(f"[hotkey] input_device_cycle = {input_cycle_hotkey}")
 
         if hk.get("output_device_cycle"):
             kb.add_hotkey(hk["output_device_cycle"], lambda: cycle_output_device())
@@ -907,7 +928,7 @@ def main():
                     }
                     if msg.reply:
                         await nc.publish(msg.reply, json.dumps(reply).encode())
-                elif cmd == "device_cycle":
+                elif cmd == "input_device_cycle":
                     cycle_input_device()
                 elif cmd == "output_device_cycle":
                     cycle_output_device()
