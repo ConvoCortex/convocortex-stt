@@ -1,10 +1,8 @@
 # convocortex-stt
 
-Self-sufficient NATS-native hands-free ergonomic speech-to-text engine.
+Standalone NATS-native hands-free speech-to-text engine.
 
 Designed for ambient operation. VAD triggers transcription automatically on pause. System runs in either sleeping (wake-word listening) or working (normal STT) mode.
-
-Self-sufficient standalone, but intended to integrate via NATS.
 
 ## How it works
 
@@ -101,6 +99,11 @@ Minimal voice command behavior:
 - If an utterance starts or ends with a configured `voice_commands.enter.words` trigger, STT removes that trigger from typed text and sends Enter after typing.
 - If you say only the trigger word (e.g. `enter`), it sends Enter without typing text.
 - You can also toggle typing by voice via `voice_commands.type_at_cursor_toggle.words`.
+
+Audio feedback behavior:
+- `feedback.silence_sound` loops continuously in background (Bluetooth keepalive).
+- `feedback.on_sound` plays on wake, typing-on, Enter action, and most device cycles.
+- `feedback.off_sound` plays on sleep/stop, typing-off, and when device cycle wraps to first device.
 
 ## NATS
 

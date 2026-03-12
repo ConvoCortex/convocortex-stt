@@ -59,10 +59,10 @@ path    = "output.txt"
 enabled = false
 path    = "watched.txt"
 
+# use either output.clipboard_replace or output.clipboard_accumulate, not both at once
 [output.clipboard_replace]
 enabled = true
 
-# use either output.clipboard_replace or output.clipboard_accumulate
 # output.clipboard_accumulate accumulates text into clipboard until clipboard_accumulate_cycle hotkey is pressed, at which point it empties clipboard and starts accumulating again
 [output.clipboard_accumulate]
 enabled   = false
@@ -75,6 +75,13 @@ enabled = true
 enabled = true
 char    = " "
 
+# ── Feedback sounds ──────────────────────────────────────────────────────────
+[feedback]
+enabled = true
+on_sound = "sounds/on.ogg"
+off_sound = "sounds/off.ogg"
+silence_sound = "sounds/silence.ogg"
+
 # ── Voice commands ────────────────────────────────────────────────────────────
 # Optional: simple exact-match commands on final transcriptions.
 # If enabled, matching utterances are "consumed" (not output/typed).
@@ -85,10 +92,10 @@ enabled = true
 
 [voice_commands.enter]
 enabled = true
-words   = ["enter", "send", "sand", "done", "Dan"] # Detected at the start and at the end of utterance, not detected in the middle of utterance.
+words   = ["enter"] # Detected at the start and at the end of utterance, not detected in the middle of utterance.
 [voice_commands.type_at_cursor_toggle]
 enabled = true
-words   = ["toggle typing", "typing toggle"]
+words   = ["toggle typing", "typing toggle"] # Detected at the start of utterance
 
 # ── Sleep / Wake ─────────────────────────────────────────────────────────────
 # Two modes:
@@ -113,8 +120,8 @@ stop_words = ["stop", "pause", "sleep"]
 
 [hotkeys]
 sleep_toggle         = "`"         # toggles sleeping <-> working
-typing_toggle        = "shift+f4"  # toggles type_at_cursor output
-device_cycle         = "shift+f5"
+typing_toggle        = "shift+f5"  # toggles type_at_cursor output
+device_cycle         = "shift+f6"
 clipboard_accumulate_cycle = "ctrl+b"   # clears clipboard and starts fresh accumulation
 
 # ── NATS ─────────────────────────────────────────────────────────────────────

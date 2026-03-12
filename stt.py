@@ -64,6 +64,13 @@ WAKEWORD = str(_sw_cfg.get("wake_word", "bumblebee")).strip().lower()
 WAKEWORD_SENSITIVITY = float(_sw_cfg.get("sensitivity", 0.8))
 WAKEWORD_DROP_SECONDS = float(_sw_cfg.get("drop_audio_after_wake_seconds", 0.4))
 
+# ── Feedback sounds ───────────────────────────────────────────────────────────
+_fb_cfg = cfg.get("feedback", {})
+FEEDBACK_ENABLED = bool(_fb_cfg.get("enabled", True))
+FEEDBACK_ON_SOUND = str(_fb_cfg.get("on_sound", "sounds/on.ogg")).strip()
+FEEDBACK_OFF_SOUND = str(_fb_cfg.get("off_sound", "sounds/off.ogg")).strip()
+FEEDBACK_SILENCE_SOUND = str(_fb_cfg.get("silence_sound", "sounds/silence.ogg")).strip()
+
 # ── Voice commands (minimal) ──────────────────────────────────────────────────
 VOICE_COMMANDS_ENABLED = bool(cfg.get("voice_commands", {}).get("enabled", False))
 ENTER_COMMAND_ENABLED = (
@@ -121,6 +128,125 @@ class SileroVAD:
         with torch.no_grad():
             tensor = torch.from_numpy(audio_chunk).unsqueeze(0)
             return self.model(tensor, RATE).item()
+
+
+class FeedbackAudio:
+    def __init__(self, enabled: bool, on_path: str, off_path: str, silence_path: str):
+        self.enabled = enabled
+        self.on_path = on_path
+        self.off_path = off_path
+        self.silence_path = silence_path
+        self._p_sfx = None
+        self._p_silence = None
+        self._sound_queue = queue.Queue()
+        self._running = False
+        self._clips = {}
+        self._silence_thread = None
+        self._sound_thread = None
+        self._lock = threading.Lock()
+
+        if not self.enabled:
+            return
+        try:
+            import torchaudio
+
+            self._clips["on"] = self._load_clip(torchaudio, self.on_path)
+            self._clips["off"] = self._load_clip(torchaudio, self.off_path)
+            self._clips["silence"] = self._load_clip(torchaudio, self.silence_path)
+            self._p_sfx = pyaudio.PyAudio()
+            self._p_silence = pyaudio.PyAudio()
+            self._running = True
+            self._sound_thread = threading.Thread(target=self._sound_worker, daemon=True, name="feedback-sound")
+            self._silence_thread = threading.Thread(target=self._silence_worker, daemon=True, name="feedback-silence")
+            self._sound_thread.start()
+            self._silence_thread.start()
+            logger.info("[feedback] Enabled")
+        except Exception as e:
+            logger.warning(f"[feedback] Disabled: {e}")
+            self.enabled = False
+
+    def _load_clip(self, torchaudio, path: str):
+        wav, sr = torchaudio.load(path)
+        wav = wav.detach().cpu().numpy().T.astype(np.float32)
+        if wav.ndim == 1:
+            wav = wav[:, np.newaxis]
+        return {"data": np.ascontiguousarray(wav), "sr": int(sr), "channels": int(wav.shape[1])}
+
+    def _play_clip_blocking(self, clip_name: str, pa_instance):
+        if not self.enabled:
+            return
+        if pa_instance is None:
+            return
+        clip = self._clips.get(clip_name)
+        if not clip:
+            return
+        stream = None
+        try:
+            stream = pa_instance.open(
+                format=pyaudio.paFloat32,
+                channels=clip["channels"],
+                rate=clip["sr"],
+                output=True,
+            )
+            stream.write(clip["data"].tobytes())
+        except Exception as e:
+            logger.warning(f"[feedback] Playback error ({clip_name}): {e}")
+        finally:
+            try:
+                if stream is not None:
+                    stream.stop_stream()
+                    stream.close()
+            except Exception:
+                pass
+
+    def _sound_worker(self):
+        while self._running:
+            try:
+                name = self._sound_queue.get(timeout=0.5)
+            except queue.Empty:
+                continue
+            try:
+                self._play_clip_blocking(name, self._p_sfx)
+            finally:
+                self._sound_queue.task_done()
+
+    def _silence_worker(self):
+        while self._running:
+            self._play_clip_blocking("silence", self._p_silence)
+
+    def play_on(self):
+        if self.enabled:
+            self._sound_queue.put("on")
+
+    def play_off(self):
+        if self.enabled:
+            self._sound_queue.put("off")
+
+    def shutdown(self):
+        if not self.enabled:
+            return
+        with self._lock:
+            self._running = False
+        try:
+            if self._silence_thread:
+                self._silence_thread.join(timeout=1.0)
+        except Exception:
+            pass
+        try:
+            if self._sound_thread:
+                self._sound_thread.join(timeout=1.0)
+        except Exception:
+            pass
+        try:
+            if self._p_sfx is not None:
+                self._p_sfx.terminate()
+        except Exception:
+            pass
+        try:
+            if self._p_silence is not None:
+                self._p_silence.terminate()
+        except Exception:
+            pass
 
 
 def main():
@@ -293,6 +419,12 @@ def main():
     # ── Register handlers ─────────────────────────────────────────────────────
     import handlers as h
     handler_extras = h.register_all(cfg, register_handler)
+    feedback = FeedbackAudio(
+        enabled=FEEDBACK_ENABLED,
+        on_path=FEEDBACK_ON_SOUND,
+        off_path=FEEDBACK_OFF_SOUND,
+        silence_path=FEEDBACK_SILENCE_SOUND,
+    )
 
     # ── State ─────────────────────────────────────────────────────────────────
     final_queue   = queue.Queue()
@@ -324,8 +456,6 @@ def main():
             typing_enabled = typing_state["enabled"]
         state_store.save({
             "sleeping": sleeping,
-            "is_muted": sleeping,
-            "gate_open": (not sleeping),
             "type_at_cursor_enabled": typing_enabled,
             "last_input_device_name": current_device_state[0]["name"],
             "last_input_device_host_api": current_device_state[0]["host_api"],
@@ -342,6 +472,9 @@ def main():
             with state_lock:
                 state["speech_epoch"] += 1
                 state["finalized_epoch"] = state["speech_epoch"]
+            feedback.play_off()
+        else:
+            feedback.play_on()
         logger.info(f"[mode] {'Sleeping' if sleeping else 'Working'}" + (f" ({reason})" if reason else ""))
         dispatch({"type": "status", "value": "sleeping" if sleeping else "working"})
         persist()
@@ -357,6 +490,10 @@ def main():
             current = typing_state["enabled"]
         if type_set_enabled:
             type_set_enabled(current)
+        if current:
+            feedback.play_on()
+        else:
+            feedback.play_off()
         logger.info(f"[typing] {'Enabled' if current else 'Disabled'}" + (f" ({reason})" if reason else ""))
         dispatch({"type": "status", "value": "typing_enabled" if current else "typing_disabled"})
         persist()
@@ -447,6 +584,8 @@ def main():
                         else:
                             logger.info(f"[FINAL +{t:.2f}s] → OUT  <action-only> ({inf_ms}ms)")
                         dispatch(ev)
+                        if actions.get("press_enter_after"):
+                            feedback.play_on()
                 else:
                     logger.info(f"[FINAL +{t:.2f}s] <empty> ({inf_ms}ms)")
 
@@ -604,8 +743,6 @@ def main():
                         "sleeping": sleeping,
                         "mode": "sleeping" if sleeping else "working",
                         "typing_at_cursor_enabled": typing_enabled,
-                        "muted": sleeping,
-                        "gate_open": (not sleeping),
                     }
                     if msg.reply:
                         await nc.publish(msg.reply, json.dumps(reply).encode())
@@ -762,7 +899,8 @@ def main():
                     (i for i, d in enumerate(_all_devices) if d[0] == pending[0]), 0
                 )
                 for _attempt in range(len(_all_devices)):
-                    next_idx, next_name = _all_devices[(_start_pos + _attempt) % len(_all_devices)]
+                    target_pos = (_start_pos + _attempt) % len(_all_devices)
+                    next_idx, next_name = _all_devices[target_pos]
                     if next_idx in _tried:
                         continue
                     _tried.add(next_idx)
@@ -780,6 +918,10 @@ def main():
                         ring_buffer.clear(); recording_buffer.clear(); is_recording = False
                         logger.info(f"[device] Cycled to: {next_name} (rms={rms})")
                         dispatch({"type": "system", "event": "device_changed", "device": next_name})
+                        if target_pos == 0:
+                            feedback.play_off()
+                        else:
+                            feedback.play_on()
                         persist()
                         break
                     except Exception as e:
@@ -900,6 +1042,8 @@ def main():
     try:
         if wakeword_engine is not None:
             wakeword_engine.delete()
+    except: pass
+    try: feedback.shutdown()
     except: pass
     try: p_instance.terminate()
     except: pass

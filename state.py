@@ -17,8 +17,6 @@ _path: Path | None = None
 _DEFAULTS = {
     "sleeping": True,
     "type_at_cursor_enabled": True,
-    "is_muted": False,
-    "gate_open": True,
     "last_input_device_name": "",
     "last_input_device_host_api": None,
 }
