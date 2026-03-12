@@ -70,6 +70,7 @@ FEEDBACK_ENABLED = bool(_fb_cfg.get("enabled", True))
 FEEDBACK_ON_SOUND = str(_fb_cfg.get("on_sound", "sounds/on.ogg")).strip()
 FEEDBACK_OFF_SOUND = str(_fb_cfg.get("off_sound", "sounds/off.ogg")).strip()
 FEEDBACK_SILENCE_SOUND = str(_fb_cfg.get("silence_sound", "sounds/silence.ogg")).strip()
+FEEDBACK_OUTPUT_DEVICE = str(_fb_cfg.get("output_device", "")).strip()
 
 # ── Voice commands (minimal) ──────────────────────────────────────────────────
 VOICE_COMMANDS_ENABLED = bool(cfg.get("voice_commands", {}).get("enabled", False))
@@ -131,13 +132,15 @@ class SileroVAD:
 
 
 class FeedbackAudio:
-    def __init__(self, enabled: bool, on_path: str, off_path: str, silence_path: str):
+    def __init__(self, enabled: bool, on_path: str, off_path: str, silence_path: str, output_device: str):
         self.enabled = enabled
         self.on_path = on_path
         self.off_path = off_path
         self.silence_path = silence_path
+        self.output_device = output_device
         self._p_sfx = None
         self._p_silence = None
+        self._output_device_index = None
         self._sound_queue = queue.Queue()
         self._running = False
         self._clips = {}
@@ -155,15 +158,32 @@ class FeedbackAudio:
             self._clips["silence"] = self._load_clip(torchaudio, self.silence_path)
             self._p_sfx = pyaudio.PyAudio()
             self._p_silence = pyaudio.PyAudio()
+            self._output_device_index = self._resolve_output_device_index(self._p_sfx, self.output_device)
             self._running = True
             self._sound_thread = threading.Thread(target=self._sound_worker, daemon=True, name="feedback-sound")
             self._silence_thread = threading.Thread(target=self._silence_worker, daemon=True, name="feedback-silence")
             self._sound_thread.start()
             self._silence_thread.start()
-            logger.info("[feedback] Enabled")
+            if self._output_device_index is None:
+                logger.info("[feedback] Enabled (default output device)")
+            else:
+                logger.info(f"[feedback] Enabled (output device index={self._output_device_index})")
         except Exception as e:
             logger.warning(f"[feedback] Disabled: {e}")
             self.enabled = False
+
+    def _resolve_output_device_index(self, p_instance, device_name: str):
+        if not device_name:
+            return None
+        target = device_name.strip().lower()
+        for i in range(p_instance.get_device_count()):
+            info = p_instance.get_device_info_by_index(i)
+            if info.get("maxOutputChannels", 0) <= 0:
+                continue
+            if str(info.get("name", "")).strip().lower() == target:
+                return int(info.get("index", i))
+        logger.warning(f"[feedback] Configured output_device not found: {device_name}. Using default.")
+        return None
 
     def _load_clip(self, torchaudio, path: str):
         wav, sr = torchaudio.load(path)
@@ -182,12 +202,15 @@ class FeedbackAudio:
             return
         stream = None
         try:
-            stream = pa_instance.open(
+            open_kwargs = dict(
                 format=pyaudio.paFloat32,
                 channels=clip["channels"],
                 rate=clip["sr"],
                 output=True,
             )
+            if self._output_device_index is not None:
+                open_kwargs["output_device_index"] = self._output_device_index
+            stream = pa_instance.open(**open_kwargs)
             stream.write(clip["data"].tobytes())
         except Exception as e:
             logger.warning(f"[feedback] Playback error ({clip_name}): {e}")
@@ -424,6 +447,7 @@ def main():
         on_path=FEEDBACK_ON_SOUND,
         off_path=FEEDBACK_OFF_SOUND,
         silence_path=FEEDBACK_SILENCE_SOUND,
+        output_device=FEEDBACK_OUTPUT_DEVICE,
     )
 
     # ── State ─────────────────────────────────────────────────────────────────

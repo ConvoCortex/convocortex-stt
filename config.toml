@@ -81,6 +81,8 @@ enabled = true
 on_sound = "sounds/on.ogg"
 off_sound = "sounds/off.ogg"
 silence_sound = "sounds/silence.ogg"
+# optional exact output device name for feedback sounds; empty = OS default output
+output_device = ""
 
 # ── Voice commands ────────────────────────────────────────────────────────────
 # Optional: simple exact-match commands on final transcriptions.

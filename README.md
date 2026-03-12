@@ -104,6 +104,7 @@ Audio feedback behavior:
 - `feedback.silence_sound` loops continuously in background (Bluetooth keepalive).
 - `feedback.on_sound` plays on wake, typing-on, Enter action, and most device cycles.
 - `feedback.off_sound` plays on sleep/stop, typing-off, and when device cycle wraps to first device.
+- `feedback.output_device` can pin feedback playback to an exact output device name.
 
 ## NATS
 
