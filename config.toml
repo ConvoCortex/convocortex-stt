@@ -83,6 +83,9 @@ off_sound = "sounds/off.ogg"
 silence_sound = "sounds/silence.ogg"
 final_sound = "sounds/final.ogg"
 final_sound_enabled = true
+on_volume = 1.0
+off_volume = 1.0
+final_volume = 1.0
 # optional exact output device name for feedback sounds; empty = remembered last output device, then OS default
 output_device = ""
 
@@ -96,7 +99,7 @@ enabled = true
 
 [voice_commands.enter]
 enabled = true
-words   = ["enter"] # Detected at the start and at the end of utterance, not detected in the middle of utterance.
+words   = ["enter", "simba"] # Detected at the start and at the end of utterance, not detected in the middle of utterance.
 [voice_commands.type_at_cursor_toggle]
 enabled = true
 words   = ["toggle typing", "typing toggle"] # Detected at the start of utterance

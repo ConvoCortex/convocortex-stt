@@ -72,6 +72,9 @@ FEEDBACK_OFF_SOUND = str(_fb_cfg.get("off_sound", "sounds/off.ogg")).strip()
 FEEDBACK_SILENCE_SOUND = str(_fb_cfg.get("silence_sound", "sounds/silence.ogg")).strip()
 FEEDBACK_FINAL_SOUND = str(_fb_cfg.get("final_sound", "sounds/final.ogg")).strip()
 FEEDBACK_FINAL_SOUND_ENABLED = bool(_fb_cfg.get("final_sound_enabled", True))
+FEEDBACK_ON_VOLUME = float(_fb_cfg.get("on_volume", 1.0))
+FEEDBACK_OFF_VOLUME = float(_fb_cfg.get("off_volume", 1.0))
+FEEDBACK_FINAL_VOLUME = float(_fb_cfg.get("final_volume", 1.0))
 FEEDBACK_OUTPUT_DEVICE = str(_fb_cfg.get("output_device", "")).strip()
 
 # ── Voice commands (minimal) ──────────────────────────────────────────────────
@@ -100,6 +103,10 @@ logging.basicConfig(level=logging.INFO, format='%(message)s')
 logger = logging.getLogger("STT")
 logging.getLogger("faster_whisper").setLevel(logging.WARNING)
 logging.getLogger("ctranslate2").setLevel(logging.WARNING)
+
+
+def _clamp_volume(v: float) -> float:
+    return max(0.0, min(2.0, float(v)))
 
 # ── Event dispatch ────────────────────────────────────────────────────────────
 # Handlers are registered at startup. Each receives every event dict.
@@ -142,6 +149,9 @@ class FeedbackAudio:
         silence_path: str,
         final_path: str,
         final_sound_enabled: bool,
+        on_volume: float,
+        off_volume: float,
+        final_volume: float,
         output_device: str,
         persisted_output_device_name: str = "",
         persisted_output_device_host_api: int | None = None,
@@ -152,6 +162,9 @@ class FeedbackAudio:
         self.silence_path = silence_path
         self.final_path = final_path
         self.final_sound_enabled = final_sound_enabled
+        self.on_volume = _clamp_volume(on_volume)
+        self.off_volume = _clamp_volume(off_volume)
+        self.final_volume = _clamp_volume(final_volume)
         self.output_device = output_device
         self._persisted_output_device_name = str(persisted_output_device_name or "").strip()
         self._persisted_output_device_host_api = persisted_output_device_host_api
@@ -174,12 +187,12 @@ class FeedbackAudio:
         try:
             import torchaudio
 
-            self._clips["on"] = self._load_clip(torchaudio, self.on_path)
-            self._clips["off"] = self._load_clip(torchaudio, self.off_path)
+            self._clips["on"] = self._load_clip(torchaudio, self.on_path, self.on_volume)
+            self._clips["off"] = self._load_clip(torchaudio, self.off_path, self.off_volume)
             self._clips["silence"] = self._load_clip(torchaudio, self.silence_path)
             if self.final_sound_enabled:
                 try:
-                    self._clips["final"] = self._load_clip(torchaudio, self.final_path)
+                    self._clips["final"] = self._load_clip(torchaudio, self.final_path, self.final_volume)
                 except Exception as e:
                     logger.warning(f"[feedback] final_sound disabled: {e}")
                     self.final_sound_enabled = False
@@ -319,9 +332,13 @@ class FeedbackAudio:
             self._output_device_host_api = host_api
         return True
 
-    def _load_clip(self, torchaudio, path: str):
+    def _load_clip(self, torchaudio, path: str, volume: float = 1.0):
         wav, sr = torchaudio.load(path)
         wav = wav.detach().cpu().numpy().T.astype(np.float32)
+        vol = _clamp_volume(volume)
+        if vol != 1.0:
+            wav *= vol
+            np.clip(wav, -1.0, 1.0, out=wav)
         if wav.ndim == 1:
             wav = wav[:, np.newaxis]
         return {"data": np.ascontiguousarray(wav), "sr": int(sr), "channels": int(wav.shape[1])}
@@ -591,6 +608,9 @@ def main():
         silence_path=FEEDBACK_SILENCE_SOUND,
         final_path=FEEDBACK_FINAL_SOUND,
         final_sound_enabled=FEEDBACK_FINAL_SOUND_ENABLED,
+        on_volume=FEEDBACK_ON_VOLUME,
+        off_volume=FEEDBACK_OFF_VOLUME,
+        final_volume=FEEDBACK_FINAL_VOLUME,
         output_device=FEEDBACK_OUTPUT_DEVICE,
         persisted_output_device_name=persisted_output_name,
         persisted_output_device_host_api=persisted_output_host_api,

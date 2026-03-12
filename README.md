@@ -111,6 +111,7 @@ Audio feedback behavior:
 - `feedback.off_sound` plays on sleep/stop, typing-off, and when device cycle wraps to first device.
 - `feedback.final_sound` plays when the final model emits non-empty output text.
 - `feedback.final_sound_enabled` toggles only that final-output sound (independent from on/off sounds).
+- `feedback.on_volume`, `feedback.off_volume`, `feedback.final_volume` set per-sound volume ratios (`0.0..2.0`).
 - `feedback.output_device` pins feedback playback to an exact output device name (otherwise it remembers the last output device you cycled to).
 
 ## NATS
