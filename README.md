@@ -22,7 +22,7 @@ Dual-model pipeline: a fast model produces **partial** results during speech, an
 - Local output handlers: file append, file overwrite, clipboard, type at cursor
 - Hotkeys with additional features available but not required for normal use
 - NATS event emit and control surface (optional — works fully without NATS)
-- State persistence across restarts (sleep mode, typing toggle, last input device)
+- State persistence across restarts (sleep mode, typing toggle, last input device, last output device)
 - Device reconnect on audio loss
 
 ## Prerequisites
@@ -94,6 +94,11 @@ Audio startup selection order:
 - remembered last-used input device from `state.json`
 - OS default input device
 
+Feedback output startup selection order:
+- `feedback.output_device` (if set to an exact device name)
+- remembered last-used output device from `state.json`
+- OS default output device
+
 Minimal voice command behavior:
 - Enable `voice_commands.enabled = true` and `voice_commands.enter.enabled = true`.
 - If an utterance starts or ends with a configured `voice_commands.enter.words` trigger, STT removes that trigger from typed text and sends Enter after typing.
@@ -104,7 +109,7 @@ Audio feedback behavior:
 - `feedback.silence_sound` loops continuously in background (Bluetooth keepalive).
 - `feedback.on_sound` plays on wake, typing-on, Enter action, and most device cycles.
 - `feedback.off_sound` plays on sleep/stop, typing-off, and when device cycle wraps to first device.
-- `feedback.output_device` can pin feedback playback to an exact output device name.
+- `feedback.output_device` pins feedback playback to an exact output device name (otherwise it remembers the last output device you cycled to).
 
 ## NATS
 
@@ -136,6 +141,7 @@ Send JSON to the subject configured in `nats.subject_control`:
 {"cmd": "typing_enable"}
 {"cmd": "typing_disable"}
 {"cmd": "device_cycle"}
+{"cmd": "output_device_cycle"}
 {"cmd": "status_query"}
 {"cmd": "shutdown"}
 ```

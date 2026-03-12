@@ -19,6 +19,8 @@ _DEFAULTS = {
     "type_at_cursor_enabled": True,
     "last_input_device_name": "",
     "last_input_device_host_api": None,
+    "last_output_device_name": "",
+    "last_output_device_host_api": None,
 }
 
 

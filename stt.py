@@ -132,15 +132,30 @@ class SileroVAD:
 
 
 class FeedbackAudio:
-    def __init__(self, enabled: bool, on_path: str, off_path: str, silence_path: str, output_device: str):
+    def __init__(
+        self,
+        enabled: bool,
+        on_path: str,
+        off_path: str,
+        silence_path: str,
+        output_device: str,
+        persisted_output_device_name: str = "",
+        persisted_output_device_host_api: int | None = None,
+    ):
         self.enabled = enabled
         self.on_path = on_path
         self.off_path = off_path
         self.silence_path = silence_path
         self.output_device = output_device
+        self._persisted_output_device_name = str(persisted_output_device_name or "").strip()
+        self._persisted_output_device_host_api = persisted_output_device_host_api
         self._p_sfx = None
         self._p_silence = None
         self._output_device_index = None
+        self._output_device_name = ""
+        self._output_device_host_api = None
+        self._probe_sr = None
+        self._probe_channels = None
         self._sound_queue = queue.Queue()
         self._running = False
         self._clips = {}
@@ -156,34 +171,141 @@ class FeedbackAudio:
             self._clips["on"] = self._load_clip(torchaudio, self.on_path)
             self._clips["off"] = self._load_clip(torchaudio, self.off_path)
             self._clips["silence"] = self._load_clip(torchaudio, self.silence_path)
+            self._probe_sr = int(self._clips.get("on", {}).get("sr") or 0) or None
+            self._probe_channels = int(self._clips.get("on", {}).get("channels") or 0) or None
             self._p_sfx = pyaudio.PyAudio()
             self._p_silence = pyaudio.PyAudio()
-            self._output_device_index = self._resolve_output_device_index(self._p_sfx, self.output_device)
+            self._set_initial_output_device()
             self._running = True
             self._sound_thread = threading.Thread(target=self._sound_worker, daemon=True, name="feedback-sound")
             self._silence_thread = threading.Thread(target=self._silence_worker, daemon=True, name="feedback-silence")
             self._sound_thread.start()
             self._silence_thread.start()
-            if self._output_device_index is None:
-                logger.info("[feedback] Enabled (default output device)")
+            if self._output_device_name:
+                logger.info(f"[feedback] Enabled (output={self._output_device_name})")
             else:
-                logger.info(f"[feedback] Enabled (output device index={self._output_device_index})")
+                logger.info("[feedback] Enabled (output=default)")
         except Exception as e:
             logger.warning(f"[feedback] Disabled: {e}")
             self.enabled = False
 
-    def _resolve_output_device_index(self, p_instance, device_name: str):
-        if not device_name:
-            return None
-        target = device_name.strip().lower()
+    def _iter_output_devices(self, p_instance):
         for i in range(p_instance.get_device_count()):
             info = p_instance.get_device_info_by_index(i)
-            if info.get("maxOutputChannels", 0) <= 0:
+            if info.get("maxOutputChannels", 0) > 0:
+                yield info
+
+    def _find_output_device_by_name(self, p_instance, name: str, host_api: int | None = None):
+        target = name.strip().lower()
+        if not target:
+            return None
+        for info in self._iter_output_devices(p_instance):
+            if host_api is not None and info.get("hostApi") != host_api:
                 continue
             if str(info.get("name", "")).strip().lower() == target:
-                return int(info.get("index", i))
-        logger.warning(f"[feedback] Configured output_device not found: {device_name}. Using default.")
+                return info
         return None
+
+    def _supports_output_format(self, p_instance, device_index: int) -> bool:
+        if not self._probe_sr or not self._probe_channels:
+            return True
+        try:
+            p_instance.is_format_supported(
+                self._probe_sr,
+                output_device=int(device_index),
+                output_channels=int(self._probe_channels),
+                output_format=pyaudio.paFloat32,
+            )
+            return True
+        except Exception:
+            return False
+
+    def _set_output_device_state(self, info: dict | None):
+        if not info:
+            self._output_device_index = None
+            self._output_device_name = ""
+            self._output_device_host_api = None
+            return
+        self._output_device_index = int(info["index"])
+        self._output_device_name = str(info.get("name", "")).strip()
+        self._output_device_host_api = info.get("hostApi")
+
+    def _set_initial_output_device(self):
+        if not self.enabled or self._p_sfx is None:
+            return
+
+        desired_name = str(self.output_device or "").strip()
+        desired_host_api = None
+        source = "config"
+        if not desired_name:
+            desired_name = str(self._persisted_output_device_name or "").strip()
+            desired_host_api = self._persisted_output_device_host_api
+            source = "persisted"
+
+        info = None
+        if desired_name:
+            info = self._find_output_device_by_name(self._p_sfx, desired_name, desired_host_api)
+            if not info:
+                info = self._find_output_device_by_name(self._p_sfx, desired_name)
+            if info and not self._supports_output_format(self._p_sfx, int(info["index"])):
+                info = None
+            if info:
+                logger.info(f"[feedback] Startup output from {source}: {info['name']}")
+            else:
+                logger.warning(f"[feedback] {source} output unavailable: {desired_name}")
+
+        if info is None:
+            try:
+                info = self._p_sfx.get_default_output_device_info()
+            except Exception:
+                info = None
+
+        self._set_output_device_state(info)
+
+    def get_output_device_state(self) -> dict:
+        return {
+            "idx": self._output_device_index,
+            "name": self._output_device_name,
+            "host_api": self._output_device_host_api,
+        }
+
+    def get_probe_format(self) -> tuple[int, int] | None:
+        if not self._probe_sr or not self._probe_channels:
+            return None
+        return (int(self._probe_sr), int(self._probe_channels))
+
+    def try_set_output_device_index(self, device_index: int, device_name: str, host_api: int | None = None) -> bool:
+        if not self.enabled or self._p_sfx is None:
+            return False
+        if not self._supports_output_format(self._p_sfx, int(device_index)):
+            return False
+        if self._probe_sr and self._probe_channels:
+            stream = None
+            try:
+                open_kwargs = dict(
+                    format=pyaudio.paFloat32,
+                    channels=int(self._probe_channels),
+                    rate=int(self._probe_sr),
+                    output=True,
+                    output_device_index=int(device_index),
+                    frames_per_buffer=256,
+                )
+                stream = self._p_sfx.open(**open_kwargs)
+                stream.write((b"\x00\x00\x00\x00") * int(self._probe_channels) * 256)
+            except Exception:
+                return False
+            finally:
+                try:
+                    if stream is not None:
+                        stream.stop_stream()
+                        stream.close()
+                except Exception:
+                    pass
+        with self._lock:
+            self._output_device_index = int(device_index)
+            self._output_device_name = str(device_name or "").strip()
+            self._output_device_host_api = host_api
+        return True
 
     def _load_clip(self, torchaudio, path: str):
         wav, sr = torchaudio.load(path)
@@ -208,8 +330,10 @@ class FeedbackAudio:
                 rate=clip["sr"],
                 output=True,
             )
-            if self._output_device_index is not None:
-                open_kwargs["output_device_index"] = self._output_device_index
+            with self._lock:
+                out_idx = self._output_device_index
+            if out_idx is not None:
+                open_kwargs["output_device_index"] = int(out_idx)
             stream = pa_instance.open(**open_kwargs)
             stream.write(clip["data"].tobytes())
         except Exception as e:
@@ -442,12 +566,16 @@ def main():
     # ── Register handlers ─────────────────────────────────────────────────────
     import handlers as h
     handler_extras = h.register_all(cfg, register_handler)
+    persisted_output_name = str(_persisted.get("last_output_device_name") or "").strip()
+    persisted_output_host_api = _persisted.get("last_output_device_host_api")
     feedback = FeedbackAudio(
         enabled=FEEDBACK_ENABLED,
         on_path=FEEDBACK_ON_SOUND,
         off_path=FEEDBACK_OFF_SOUND,
         silence_path=FEEDBACK_SILENCE_SOUND,
         output_device=FEEDBACK_OUTPUT_DEVICE,
+        persisted_output_device_name=persisted_output_name,
+        persisted_output_device_host_api=persisted_output_host_api,
     )
 
     # ── State ─────────────────────────────────────────────────────────────────
@@ -472,6 +600,9 @@ def main():
 
     # ── State persistence helper ──────────────────────────────────────────────
     current_device_state = [{"name": dev_name, "host_api": resources['host_api']}]
+    current_output_device_state = [
+        feedback.get_output_device_state() if getattr(feedback, "enabled", False) else {"idx": None, "name": "", "host_api": None}
+    ]
 
     def persist():
         with mode_lock:
@@ -483,6 +614,8 @@ def main():
             "type_at_cursor_enabled": typing_enabled,
             "last_input_device_name": current_device_state[0]["name"],
             "last_input_device_host_api": current_device_state[0]["host_api"],
+            "last_output_device_name": current_output_device_state[0].get("name", ""),
+            "last_output_device_host_api": current_output_device_state[0].get("host_api", None),
         })
 
     def set_sleeping(sleeping: bool, reason: str = ""):
@@ -698,6 +831,10 @@ def main():
             kb.add_hotkey(hk["device_cycle"], lambda: cycle_input_device())
             logger.info(f"[hotkey] device_cycle = {hk['device_cycle']}")
 
+        if hk.get("output_device_cycle"):
+            kb.add_hotkey(hk["output_device_cycle"], lambda: cycle_output_device())
+            logger.info(f"[hotkey] output_device_cycle = {hk['output_device_cycle']}")
+
         if SLEEP_HOTKEY_TOGGLE:
             def _sleep_toggle():
                 with mode_lock:
@@ -772,6 +909,8 @@ def main():
                         await nc.publish(msg.reply, json.dumps(reply).encode())
                 elif cmd == "device_cycle":
                     cycle_input_device()
+                elif cmd == "output_device_cycle":
+                    cycle_output_device()
                 elif cmd == "shutdown":
                     logger.info("[nats:control] Shutdown command received.")
                     import signal
@@ -841,6 +980,8 @@ def main():
     _bad_devices       = set()    # device indices that failed to open; skipped in cycle
     _ALIAS_NAMES       = {'Primary Sound Capture Driver', 'Microsoft Sound Mapper',
                           'Microsoft Sound Mapper - Input', 'Microsoft Sound Mapper - Output'}
+    _bad_output_devices = set()
+    _pending_output_device = [None]  # (idx, name) set by hotkey, consumed by main loop
 
     def _enumerate_input_devices():
         """Read-only enumeration — safe to call from any thread."""
@@ -866,6 +1007,48 @@ def main():
             devices.append((i, name))
         return devices
 
+    def _enumerate_output_devices():
+        """Read-only enumeration — safe to call from any thread."""
+        if not getattr(feedback, "enabled", False):
+            return []
+        devices = []
+        seen_names = set()
+        probe = None
+        try:
+            probe = feedback.get_probe_format()
+        except Exception:
+            probe = None
+        probe_rate = int(probe[0]) if probe else 44100
+        probe_channels = int(probe[1]) if probe else 2
+        out_state = current_output_device_state[0] if current_output_device_state else {}
+        out_host_api = out_state.get("host_api", None)
+        if out_host_api is None:
+            try:
+                out_host_api = p_instance.get_default_output_device_info().get("hostApi")
+            except Exception:
+                out_host_api = None
+        for i in range(p_instance.get_device_count()):
+            info = p_instance.get_device_info_by_index(i)
+            if info.get("maxOutputChannels", 0) <= 0:
+                continue
+            if out_host_api is not None and info.get("hostApi") != out_host_api:
+                continue
+            name = info.get("name", "")
+            if name in _ALIAS_NAMES or name in seen_names or i in _bad_output_devices:
+                continue
+            try:
+                p_instance.is_format_supported(
+                    probe_rate,
+                    output_device=i,
+                    output_channels=probe_channels,
+                    output_format=pyaudio.paFloat32
+                )
+            except Exception:
+                continue
+            seen_names.add(name)
+            devices.append((i, name))
+        return devices
+
     def cycle_input_device():
         """Hotkey handler — only signals the main loop, never touches the stream."""
         if _pending_device[0] is not None:
@@ -880,6 +1063,30 @@ def main():
         except ValueError:
             pos = -1
         _pending_device[0] = devices[(pos + 1) % len(devices)]
+
+    def cycle_output_device():
+        """Hotkey handler — only signals the main loop, never touches PyAudio."""
+        if not getattr(feedback, "enabled", False):
+            logger.info("[feedback] Output device cycle ignored (feedback disabled).")
+            return
+        if _pending_output_device[0] is not None:
+            return  # previous cycle not yet consumed
+        devices = _enumerate_output_devices()
+        if len(devices) <= 1:
+            logger.info("[feedback] Only one output device available.")
+            return
+        idxs = [d[0] for d in devices]
+        cur_idx = current_output_device_state[0].get("idx", None)
+        if cur_idx is None:
+            try:
+                cur_idx = int(p_instance.get_default_output_device_info().get("index"))
+            except Exception:
+                cur_idx = None
+        try:
+            pos = idxs.index(int(cur_idx))
+        except Exception:
+            pos = -1
+        _pending_output_device[0] = devices[(pos + 1) % len(devices)]
 
     # ── Main loop ─────────────────────────────────────────────────────────────
     ring_buffer      = deque(maxlen=int(BUFFER_SECONDS * RATE / CHUNK))
@@ -957,6 +1164,54 @@ def main():
                             stream = p_instance.open(input_device_index=prev_idx, **_open_kwargs)
                             current_device_idx[0] = prev_idx
                         except: pass
+                continue
+
+            # ── Feedback output device switch (signalled by hotkey thread) ────
+            pending_out = _pending_output_device[0]
+            if pending_out is not None:
+                _pending_output_device[0] = None
+                if not getattr(feedback, "enabled", False):
+                    continue
+                _all_devices = _enumerate_output_devices()
+                if not _all_devices:
+                    logger.warning("[feedback] No output devices available to cycle.")
+                    continue
+                try:
+                    _start_pos = next(
+                        (i for i, d in enumerate(_all_devices) if d[0] == pending_out[0]), 0
+                    )
+                except Exception:
+                    _start_pos = 0
+
+                switched = False
+                for _attempt in range(len(_all_devices)):
+                    target_pos = (_start_pos + _attempt) % len(_all_devices)
+                    next_idx, next_name = _all_devices[target_pos]
+                    try:
+                        next_info = p_instance.get_device_info_by_index(int(next_idx))
+                        next_host_api = next_info.get("hostApi")
+                    except Exception:
+                        next_host_api = None
+                    ok = False
+                    try:
+                        ok = feedback.try_set_output_device_index(int(next_idx), str(next_name), next_host_api)
+                    except Exception:
+                        ok = False
+                    if ok:
+                        current_output_device_state[0] = {"idx": int(next_idx), "name": str(next_name), "host_api": next_host_api}
+                        logger.info(f"[feedback] Cycled output to: {next_name}")
+                        dispatch({"type": "system", "event": "output_device_changed", "device": str(next_name)})
+                        if target_pos == 0:
+                            feedback.play_off()
+                        else:
+                            feedback.play_on()
+                        persist()
+                        switched = True
+                        break
+                    _bad_output_devices.add(int(next_idx))
+                    logger.warning(f"[feedback] Skipping output {next_name}")
+                if not switched:
+                    logger.warning("[feedback] Output device cycle failed (all candidates rejected).")
                 continue
 
             chunk = np.frombuffer(data, dtype=np.int16)
