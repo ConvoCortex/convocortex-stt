@@ -80,33 +80,42 @@ char    = " "
 # If enabled, matching utterances are "consumed" (not output/typed).
 #
 # Designed for workflow glue (e.g. say "enter" to press Enter). Not a full voice command engine, use NATS for that.
-
 [voice_commands]
 enabled = true
 
 [voice_commands.enter]
 enabled = true
-words   = ["enter", "send", "done"]
+words   = ["enter", "send", "sand", "done", "Dan"] # Detected at the start and at the end of utterance, not detected in the middle of utterance.
+[voice_commands.type_at_cursor_toggle]
+enabled = true
+words   = ["toggle typing", "typing toggle"]
 
-# ── Emission gate ────────────────────────────────────────────────────────────
-# Trigger words gate whether output is forwarded. Not a voice command engine.
-# String match on final transcriptions only.
+# ── Sleep / Wake ─────────────────────────────────────────────────────────────
+# Two modes:
+# - sleeping: waits for wake word only (no partial/final output)
+# - working: normal STT (partials + finals)
+# Say a stop word or press the sleep_toggle hotkey to go back to sleeping.
 
-[emission_gate]
-enabled      = true
-default_open = true      # true = forwarding on at startup
-start_words  = ["listen", "start"]
-stop_words   = ["stop", "pause"]
+[sleep_wake]
+enabled = true
+backend = "pvporcupine"            # supported: pvporcupine
+wake_word = "bumblebee"            # must be a supported built-in Porcupine keyword
+# Built-in Porcupine wake words:
+# alexa, americano, blueberry, bumblebee, computer, grapefruit, grasshopper,
+# hey google, hey siri, jarvis, ok google, pico clock, picovoice, porcupine, terminator
+sensitivity = 0.8                  # 0..1, higher = more sensitive
+drop_audio_after_wake_seconds = 0.4  # helps avoid wake word leaking into first transcription
+start_sleeping = true
+stop_words = ["stop", "pause", "sleep"]
 
 # ── Hotkeys ──────────────────────────────────────────────────────────────────
 # Empty string = disabled.
 
 [hotkeys]
-mute_toggle          = "`"
+sleep_toggle         = "`"         # toggles sleeping <-> working
+typing_toggle        = "shift+f4"  # toggles type_at_cursor output
+device_cycle         = "shift+f5"
 clipboard_accumulate_cycle = "ctrl+b"   # clears clipboard and starts fresh accumulation
-emission_gate_open   = "shift+f5"
-emission_gate_close  = "shift+f6"
-device_cycle         = "shift+f7"
 
 # ── NATS ─────────────────────────────────────────────────────────────────────
 # Requires nats-py installed. STT works fully without NATS.

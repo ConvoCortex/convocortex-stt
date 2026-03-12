@@ -134,7 +134,25 @@ def make_type_at_cursor(cfg: dict):
         logger.warning("[type_at_cursor] keyboard not installed, handler disabled.")
         return None
 
+    enabled_lock = threading.Lock()
+    enabled_state = [bool(cfg["output"]["type_at_cursor"]["enabled"])]
+
+    def set_enabled(enabled: bool):
+        with enabled_lock:
+            enabled_state[0] = bool(enabled)
+
+    def toggle_enabled() -> bool:
+        with enabled_lock:
+            enabled_state[0] = not enabled_state[0]
+            return enabled_state[0]
+
+    def is_enabled() -> bool:
+        with enabled_lock:
+            return enabled_state[0]
+
     def type_at_cursor(event: dict):
+        if not is_enabled():
+            return
         text = _final_text(event, cfg)
         actions = event.get("actions", {}) or {}
         if text is not None:
@@ -143,7 +161,7 @@ def make_type_at_cursor(cfg: dict):
             keyboard.press_and_release("enter")
 
     type_at_cursor.__name__ = "type_at_cursor"
-    return type_at_cursor
+    return type_at_cursor, set_enabled, toggle_enabled, is_enabled
 
 
 # ── NATS emit ─────────────────────────────────────────────────────────────────
@@ -224,9 +242,13 @@ def register_all(cfg: dict, register) -> dict:
             logger.info("[handler] clipboard_accumulate")
 
     if out["type_at_cursor"]["enabled"]:
-        fn = make_type_at_cursor(cfg)
-        if fn:
+        result = make_type_at_cursor(cfg)
+        if result:
+            fn, set_enabled, toggle_enabled, is_enabled = result
             register(fn)
+            extras["type_at_cursor_set_enabled"] = set_enabled
+            extras["type_at_cursor_toggle"] = toggle_enabled
+            extras["type_at_cursor_is_enabled"] = is_enabled
             logger.info("[handler] type_at_cursor")
 
     if cfg["nats"]["enabled"]:

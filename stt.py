@@ -16,6 +16,7 @@ from collections import deque
 
 import numpy as np
 import pyaudio
+import pvporcupine
 from faster_whisper import WhisperModel
 
 import config
@@ -47,6 +48,22 @@ MIN_CHUNKS        = cfg["realtime"]["min_chunks"]
 MAX_CHUNKS        = cfg["realtime"]["max_chunks"]
 RT_QUEUE_SIZE     = cfg["realtime"]["queue_size"]
 
+# ── Sleep / Wake ───────────────────────────────────────────────────────────────
+_sw_cfg = cfg.get("sleep_wake", {})
+SLEEP_START_SLEEPING = bool(_sw_cfg.get("start_sleeping", True))
+SLEEP_HOTKEY_TOGGLE = str(cfg["hotkeys"].get("sleep_toggle", "")).strip()
+TYPE_TOGGLE_HOTKEY = str(cfg["hotkeys"].get("typing_toggle", "")).strip()
+SLEEP_STOP_WORDS = [
+    str(w).strip().lower()
+    for w in _sw_cfg.get("stop_words", ["stop", "pause"])
+    if str(w).strip()
+]
+WAKEWORD_ENABLED = bool(_sw_cfg.get("enabled", True))
+WAKEWORD_BACKEND = str(_sw_cfg.get("backend", "pvporcupine")).strip().lower()
+WAKEWORD = str(_sw_cfg.get("wake_word", "bumblebee")).strip().lower()
+WAKEWORD_SENSITIVITY = float(_sw_cfg.get("sensitivity", 0.8))
+WAKEWORD_DROP_SECONDS = float(_sw_cfg.get("drop_audio_after_wake_seconds", 0.4))
+
 # ── Voice commands (minimal) ──────────────────────────────────────────────────
 VOICE_COMMANDS_ENABLED = bool(cfg.get("voice_commands", {}).get("enabled", False))
 ENTER_COMMAND_ENABLED = (
@@ -56,6 +73,15 @@ ENTER_COMMAND_ENABLED = (
 ENTER_COMMAND_WORDS = [
     str(w).strip()
     for w in cfg.get("voice_commands", {}).get("enter", {}).get("words", [])
+    if str(w).strip()
+]
+TYPE_TOGGLE_COMMAND_ENABLED = (
+    VOICE_COMMANDS_ENABLED
+    and bool(cfg.get("voice_commands", {}).get("type_at_cursor_toggle", {}).get("enabled", False))
+)
+TYPE_TOGGLE_COMMAND_WORDS = [
+    str(w).strip().lower()
+    for w in cfg.get("voice_commands", {}).get("type_at_cursor_toggle", {}).get("words", [])
     if str(w).strip()
 ]
 
@@ -70,7 +96,7 @@ logging.getLogger("ctranslate2").setLevel(logging.WARNING)
 # Schema:
 #   {"type": "partial", "text": str, "epoch": int, "t": float, "inference_ms": int}
 #   {"type": "final",   "text": str, "epoch": int, "t": float, "inference_ms": int}
-#   {"type": "status",  "value": str}   # "recording" | "idle" | "muted" | "unmuted"
+#   {"type": "status",  "value": str}   # "recording" | "idle" | "sleeping" | "working"
 #   {"type": "system",  "event": str, ...extra}
 
 _handlers: list = []
@@ -84,52 +110,6 @@ def dispatch(event: dict):
             fn(event)
         except Exception as e:
             logger.error(f"[handler:{fn.__name__}] {e}")
-
-# ── Emission gate ─────────────────────────────────────────────────────────────
-# Gates whether final transcription output is forwarded to handlers.
-# Trigger word matches on final text only — matching utterance is consumed, not output.
-# Partials and status/system events always pass through.
-
-class EmissionGate:
-    def __init__(self, cfg: dict):
-        ecfg = cfg["emission_gate"]
-        self.enabled     = ecfg["enabled"]
-        self.open        = ecfg["default_open"]
-        self.start_words = [w.lower() for w in ecfg["start_words"]]
-        self.stop_words  = [w.lower() for w in ecfg["stop_words"]]
-        self._lock       = threading.Lock()
-
-    def process(self, event: dict) -> bool:
-        """Return True if event should be forwarded to handlers."""
-        if not self.enabled:
-            return True
-        etype = event.get("type")
-        if etype == "partial":
-            with self._lock:
-                return self.open
-        if etype == "final":
-            text = event.get("text", "").strip().lower().strip(".,!?;:")
-            with self._lock:
-                if text in self.stop_words:
-                    self.open = False
-                    logger.info(f"[gate] Closed ('{text}')")
-                    return False
-                if text in self.start_words:
-                    self.open = True
-                    logger.info(f"[gate] Opened ('{text}')")
-                    return False
-                return self.open
-        return True  # status/system always pass
-
-    def open_gate(self):
-        with self._lock:
-            self.open = True
-            logger.info("[gate] Opened")
-
-    def close_gate(self):
-        with self._lock:
-            self.open = False
-            logger.info("[gate] Closed")
 
 # ── VAD wrapper ───────────────────────────────────────────────────────────────
 class SileroVAD:
@@ -314,19 +294,79 @@ def main():
     import handlers as h
     handler_extras = h.register_all(cfg, register_handler)
 
-    # ── Emission gate ─────────────────────────────────────────────────────────
-    gate = EmissionGate(cfg)
-    gate.open = _persisted['gate_open']  # restore persisted gate state
-
     # ── State ─────────────────────────────────────────────────────────────────
     final_queue   = queue.Queue()
     rt_queue      = queue.Queue(maxsize=RT_QUEUE_SIZE)
     state_lock    = threading.Lock()
     state         = {'speech_epoch': 0, 'finalized_epoch': -1}
     rt_cancel     = threading.Event()
+    mode_lock     = threading.Lock()
+    mode_state    = {"sleeping": bool(_persisted.get("sleeping", SLEEP_START_SLEEPING))}
+    typing_lock   = threading.Lock()
+    default_typing_enabled = bool(cfg["output"]["type_at_cursor"]["enabled"])
+    typing_state = {
+        "enabled": bool(_persisted.get("type_at_cursor_enabled", default_typing_enabled))
+    }
 
-    control_lock  = threading.Lock()
-    control_state = {'is_muted': _persisted['is_muted']}
+    type_set_enabled = handler_extras.get("type_at_cursor_set_enabled")
+    if type_set_enabled:
+        type_set_enabled(typing_state["enabled"])
+    else:
+        typing_state["enabled"] = False
+
+    # ── State persistence helper ──────────────────────────────────────────────
+    current_device_state = [{"name": dev_name, "host_api": resources['host_api']}]
+
+    def persist():
+        with mode_lock:
+            sleeping = mode_state["sleeping"]
+        with typing_lock:
+            typing_enabled = typing_state["enabled"]
+        state_store.save({
+            "sleeping": sleeping,
+            "is_muted": sleeping,
+            "gate_open": (not sleeping),
+            "type_at_cursor_enabled": typing_enabled,
+            "last_input_device_name": current_device_state[0]["name"],
+            "last_input_device_host_api": current_device_state[0]["host_api"],
+        })
+
+    def set_sleeping(sleeping: bool, reason: str = ""):
+        with mode_lock:
+            was_sleeping = mode_state["sleeping"]
+            if was_sleeping == sleeping:
+                return
+            mode_state["sleeping"] = sleeping
+        rt_cancel.set()
+        if sleeping:
+            with state_lock:
+                state["speech_epoch"] += 1
+                state["finalized_epoch"] = state["speech_epoch"]
+        logger.info(f"[mode] {'Sleeping' if sleeping else 'Working'}" + (f" ({reason})" if reason else ""))
+        dispatch({"type": "status", "value": "sleeping" if sleeping else "working"})
+        persist()
+
+    def set_typing_enabled(enabled: bool, reason: str = ""):
+        if not type_set_enabled:
+            logger.info("[typing] type_at_cursor handler is not active.")
+            return
+        with typing_lock:
+            if typing_state["enabled"] == bool(enabled):
+                return
+            typing_state["enabled"] = bool(enabled)
+            current = typing_state["enabled"]
+        if type_set_enabled:
+            type_set_enabled(current)
+        logger.info(f"[typing] {'Enabled' if current else 'Disabled'}" + (f" ({reason})" if reason else ""))
+        dispatch({"type": "status", "value": "typing_enabled" if current else "typing_disabled"})
+        persist()
+
+    def toggle_typing_enabled(reason: str = "") -> bool:
+        with typing_lock:
+            next_value = not typing_state["enabled"]
+        set_typing_enabled(next_value, reason=reason)
+        with typing_lock:
+            return typing_state["enabled"]
 
     # ── Workers ───────────────────────────────────────────────────────────────
 
@@ -366,6 +406,9 @@ def main():
         while True:
             try:
                 epoch, t0, audio_data = final_queue.get()
+                with mode_lock:
+                    if mode_state["sleeping"]:
+                        continue
                 audio = np.concatenate(audio_data).astype(np.float32) / 32768.0
                 logger.info(f"[FINAL] Processing {len(audio)/RATE:.2f}s audio...")
 
@@ -374,6 +417,14 @@ def main():
                 raw_text = " ".join(s.text for s in segs).strip()
                 inf_ms = int((time.time() - t_start) * 1000)
                 t = time.time() - t0
+
+                normalized = raw_text.lower().strip().strip(".,!?;:")
+                if normalized in SLEEP_STOP_WORDS:
+                    set_sleeping(True, reason=f"voice:{normalized}")
+                    continue
+                if TYPE_TOGGLE_COMMAND_ENABLED and normalized in TYPE_TOGGLE_COMMAND_WORDS:
+                    toggle_typing_enabled(reason=f"voice:{normalized}")
+                    continue
 
                 text, actions = apply_voice_commands(raw_text)
                 if text or actions:
@@ -386,14 +437,16 @@ def main():
                     }
                     if actions:
                         ev["actions"] = actions
-                    if gate.process(ev):
+                    with mode_lock:
+                        currently_sleeping = mode_state["sleeping"]
+                    if currently_sleeping:
+                        logger.info(f"[FINAL +{t:.2f}s] → SLEEPING (dropped) ({inf_ms}ms)")
+                    else:
                         if text:
                             logger.info(f"[FINAL +{t:.2f}s] → OUT  '{text}' ({inf_ms}ms)")
                         else:
                             logger.info(f"[FINAL +{t:.2f}s] → OUT  <action-only> ({inf_ms}ms)")
                         dispatch(ev)
-                    else:
-                        logger.info(f"[FINAL +{t:.2f}s] → GATED '{text}' ({inf_ms}ms)")
                 else:
                     logger.info(f"[FINAL +{t:.2f}s] <empty> ({inf_ms}ms)")
 
@@ -425,6 +478,9 @@ def main():
                             or state['finalized_epoch'] >= epoch
                             or rt_cancel.is_set()):
                         continue
+                with mode_lock:
+                    if mode_state["sleeping"]:
+                        continue
 
                 if not (MIN_CHUNKS <= len(audio_data) <= MAX_CHUNKS):
                     continue
@@ -441,15 +497,15 @@ def main():
                             or state['finalized_epoch'] >= epoch
                             or rt_cancel.is_set()):
                         continue
+                with mode_lock:
+                    if mode_state["sleeping"]:
+                        continue
 
                 if text:
                     ev = {"type": "partial", "text": text, "epoch": epoch,
                           "t": round(t, 3), "inference_ms": inf_ms}
-                    if gate.process(ev):
-                        logger.info(f"[PARTIAL +{t:.2f}s] → OUT  '{text}' ({inf_ms}ms)")
-                        dispatch(ev)
-                    else:
-                        logger.info(f"[PARTIAL +{t:.2f}s] → GATED '{text}' ({inf_ms}ms)")
+                    logger.info(f"[PARTIAL +{t:.2f}s] → OUT  '{text}' ({inf_ms}ms)")
+                    dispatch(ev)
             except Exception as e:
                 logger.error(f"[realtime_worker] {e}")
             finally:
@@ -459,20 +515,6 @@ def main():
     threading.Thread(target=final_worker, daemon=True).start()
     if rt_model:
         threading.Thread(target=realtime_worker, daemon=True).start()
-
-    # ── State persistence helper ──────────────────────────────────────────────
-
-    current_device_state = [{"name": dev_name, "host_api": resources['host_api']}]
-
-    def persist():
-        with control_lock: muted = control_state['is_muted']
-        with gate._lock:   go    = gate.open
-        state_store.save({
-            "is_muted": muted,
-            "gate_open": go,
-            "last_input_device_name": current_device_state[0]["name"],
-            "last_input_device_host_api": current_device_state[0]["host_api"],
-        })
 
     # ── Hotkeys ───────────────────────────────────────────────────────────────
 
@@ -485,14 +527,6 @@ def main():
 
         hk = cfg["hotkeys"]
 
-        if hk["emission_gate_open"]:
-            kb.add_hotkey(hk["emission_gate_open"], lambda: (gate.open_gate(), persist()))
-            logger.info(f"[hotkey] emission_gate_open = {hk['emission_gate_open']}")
-
-        if hk["emission_gate_close"]:
-            kb.add_hotkey(hk["emission_gate_close"], lambda: (gate.close_gate(), persist()))
-            logger.info(f"[hotkey] emission_gate_close = {hk['emission_gate_close']}")
-
         if hk.get("clipboard_accumulate_cycle") and "clipboard_accumulate_reset" in handler_extras:
             kb.add_hotkey(hk["clipboard_accumulate_cycle"], handler_extras["clipboard_accumulate_reset"])
             logger.info(f"[hotkey] clipboard_accumulate_cycle = {hk['clipboard_accumulate_cycle']}")
@@ -501,16 +535,17 @@ def main():
             kb.add_hotkey(hk["device_cycle"], lambda: cycle_input_device())
             logger.info(f"[hotkey] device_cycle = {hk['device_cycle']}")
 
-        if hk["mute_toggle"]:
-            def _mute_toggle():
-                with control_lock:
-                    control_state['is_muted'] = not control_state['is_muted']
-                    muted = control_state['is_muted']
-                logger.info(f"[hotkey] {'Muted' if muted else 'Unmuted'}")
-                dispatch({"type": "status", "value": "muted" if muted else "unmuted"})
-                persist()
-            kb.add_hotkey(hk["mute_toggle"], _mute_toggle)
-            logger.info(f"[hotkey] mute_toggle = {hk['mute_toggle']}")
+        if SLEEP_HOTKEY_TOGGLE:
+            def _sleep_toggle():
+                with mode_lock:
+                    sleeping = mode_state["sleeping"]
+                set_sleeping(not sleeping, reason="hotkey")
+            kb.add_hotkey(SLEEP_HOTKEY_TOGGLE, _sleep_toggle)
+            logger.info(f"[hotkey] sleep_toggle = {SLEEP_HOTKEY_TOGGLE}")
+
+        if TYPE_TOGGLE_HOTKEY:
+            kb.add_hotkey(TYPE_TOGGLE_HOTKEY, lambda: toggle_typing_enabled(reason="hotkey"))
+            logger.info(f"[hotkey] typing_toggle = {TYPE_TOGGLE_HOTKEY}")
 
 
     setup_hotkeys()
@@ -546,25 +581,32 @@ def main():
                 except Exception:
                     return
 
-                if cmd == "mute":
-                    with control_lock: control_state['is_muted'] = True
-                    dispatch({"type": "status", "value": "muted"})
-                    persist()
-                elif cmd == "unmute":
-                    with control_lock: control_state['is_muted'] = False
-                    dispatch({"type": "status", "value": "unmuted"})
-                    persist()
-                elif cmd == "open_emission_gate":
-                    gate.open_gate()
-                    persist()
-                elif cmd == "close_emission_gate":
-                    gate.close_gate()
-                    persist()
+                if cmd == "sleep":
+                    set_sleeping(True, reason=f"nats:{cmd}")
+                elif cmd == "wake":
+                    set_sleeping(False, reason=f"nats:{cmd}")
+                elif cmd == "sleep_toggle":
+                    with mode_lock:
+                        sleeping = mode_state["sleeping"]
+                    set_sleeping(not sleeping, reason="nats:sleep_toggle")
+                elif cmd == "typing_toggle":
+                    toggle_typing_enabled(reason="nats:typing_toggle")
+                elif cmd == "typing_enable":
+                    set_typing_enabled(True, reason="nats:typing_enable")
+                elif cmd == "typing_disable":
+                    set_typing_enabled(False, reason="nats:typing_disable")
                 elif cmd == "status_query":
-                    with control_lock: muted = control_state['is_muted']
-                    with gate._lock: gate_open = gate.open
-                    reply = {"muted": muted, "gate_open": gate_open,
-                             "gate_enabled": gate.enabled}
+                    with mode_lock:
+                        sleeping = mode_state["sleeping"]
+                    with typing_lock:
+                        typing_enabled = typing_state["enabled"]
+                    reply = {
+                        "sleeping": sleeping,
+                        "mode": "sleeping" if sleeping else "working",
+                        "typing_at_cursor_enabled": typing_enabled,
+                        "muted": sleeping,
+                        "gate_open": (not sleeping),
+                    }
                     if msg.reply:
                         await nc.publish(msg.reply, json.dumps(reply).encode())
                 elif cmd == "device_cycle":
@@ -584,6 +626,49 @@ def main():
         threading.Thread(target=_run_loop, daemon=True, name="nats-control").start()
 
     setup_nats_control()
+
+    # ── Wake word detector ────────────────────────────────────────────────────
+    wakeword_engine = None
+    wakeword_frame_length = 0
+    wakeword_buffer = np.array([], dtype=np.int16)
+    if WAKEWORD_ENABLED:
+        if WAKEWORD_BACKEND not in {"pvporcupine", "pvp"}:
+            logger.warning(f"[wake] Unsupported backend '{WAKEWORD_BACKEND}', wake word disabled.")
+        elif not WAKEWORD:
+            logger.warning("[wake] Empty wake_word, wake word disabled.")
+        else:
+            try:
+                wakeword_engine = pvporcupine.create(
+                    keywords=[WAKEWORD],
+                    sensitivities=[WAKEWORD_SENSITIVITY]
+                )
+                wakeword_frame_length = int(wakeword_engine.frame_length)
+                if int(wakeword_engine.sample_rate) != RATE:
+                    logger.warning(
+                        f"[wake] Sample-rate mismatch: wake detector {wakeword_engine.sample_rate}Hz vs STT {RATE}Hz"
+                    )
+                logger.info(f"[wake] Enabled backend={WAKEWORD_BACKEND} word={WAKEWORD}")
+            except Exception as e:
+                logger.warning(f"[wake] Could not initialize wake detector: {e}")
+    else:
+        logger.info("[wake] Disabled by config.")
+
+    def detect_wakeword(chunk: np.ndarray) -> bool:
+        nonlocal wakeword_buffer
+        if wakeword_engine is None:
+            return False
+        wakeword_buffer = np.concatenate((wakeword_buffer, chunk.astype(np.int16)))
+        while wakeword_buffer.size >= wakeword_frame_length > 0:
+            frame = wakeword_buffer[:wakeword_frame_length]
+            wakeword_buffer = wakeword_buffer[wakeword_frame_length:]
+            try:
+                idx = wakeword_engine.process(frame.tolist())
+                if idx >= 0:
+                    return True
+            except Exception as e:
+                logger.warning(f"[wake] Detector error: {e}")
+                return False
+        return False
 
     # ── Device cycling ────────────────────────────────────────────────────────
     # IMPORTANT: stream.close()/open() must only happen in the main loop thread.
@@ -644,10 +729,12 @@ def main():
     last_rt_update   = 0.0
     current_t0       = None
     last_error       = ""
+    drop_chunks_after_wake = 0
 
     dispatch({"type": "system", "event": "startup",
               "device": dev_name,
               "models": {"final": FINAL_MODEL, "realtime": REALTIME_MODEL}})
+    dispatch({"type": "status", "value": "sleeping" if mode_state["sleeping"] else "working"})
     print("STT Ready!")
     sys.stdout.flush()
 
@@ -689,6 +776,7 @@ def main():
                         rms = int(np.sqrt(np.mean(vchunk ** 2)))
                         current_device_idx[0] = next_idx
                         current_device_state[0] = {"name": next_name, "host_api": _host_api}
+                        wakeword_buffer = np.array([], dtype=np.int16)
                         ring_buffer.clear(); recording_buffer.clear(); is_recording = False
                         logger.info(f"[device] Cycled to: {next_name} (rms={rms})")
                         dispatch({"type": "system", "event": "device_changed", "device": next_name})
@@ -705,11 +793,31 @@ def main():
                         except: pass
                 continue
 
-            with control_lock:
-                if control_state['is_muted']:
-                    continue
-
             chunk = np.frombuffer(data, dtype=np.int16)
+
+            with mode_lock:
+                sleeping = mode_state["sleeping"]
+            if sleeping:
+                if is_recording or recording_buffer:
+                    ring_buffer.clear()
+                    recording_buffer = []
+                    is_recording = False
+                    silence_counter = 0
+                    current_t0 = None
+                if detect_wakeword(chunk):
+                    set_sleeping(False, reason=f"wake:{WAKEWORD}")
+                    drop_chunks_after_wake = int(max(0.0, WAKEWORD_DROP_SECONDS) * RATE / CHUNK)
+                    ring_buffer.clear()
+                    recording_buffer = []
+                    is_recording = False
+                    silence_counter = 0
+                    current_t0 = None
+                continue
+
+            if drop_chunks_after_wake > 0:
+                drop_chunks_after_wake -= 1
+                continue
+
             prob  = vad.is_speech(chunk.astype(np.float32) / 32768.0)
 
             if prob > VAD_THRESHOLD:
@@ -771,6 +879,7 @@ def main():
                     input=True, frames_per_buffer=CHUNK,
                     input_device_index=current_device_idx[0]
                 )
+                wakeword_buffer = np.array([], dtype=np.int16)
                 ring_buffer.clear()
                 recording_buffer.clear()
                 is_recording = False
@@ -787,6 +896,10 @@ def main():
     import os
     logger.info("Shutting down...")
     try: stream.stop_stream(); stream.close()
+    except: pass
+    try:
+        if wakeword_engine is not None:
+            wakeword_engine.delete()
     except: pass
     try: p_instance.terminate()
     except: pass
