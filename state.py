@@ -17,6 +17,8 @@ _path: Path | None = None
 _DEFAULTS = {
     "is_muted": False,
     "gate_open": True,
+    "last_input_device_name": "",
+    "last_input_device_host_api": None,
 }
 
 

@@ -34,6 +34,8 @@ chunk           = 512    # audio frames per VAD check — lower = more responsiv
 vad_threshold   = 0.4   # Silero VAD sensitivity 0–1 (lower = more sensitive, picks up more speech)
 buffer_seconds  = 1.0   # ring buffer before speech start — captures audio before VAD triggers
 silence_timeout = 0.8   # seconds of silence before ending an utterance and firing final transcription
+# startup input device override by exact device name; empty = use remembered device then OS default
+input_device    = ""
 
 [realtime]
 # check_interval: how often (seconds) a partial transcription is triggered during speech
@@ -72,6 +74,19 @@ enabled = true
 [output.trailing_char]
 enabled = true
 char    = " "
+
+# ── Voice commands ────────────────────────────────────────────────────────────
+# Optional: simple exact-match commands on final transcriptions.
+# If enabled, matching utterances are "consumed" (not output/typed).
+#
+# Designed for workflow glue (e.g. say "enter" to press Enter). Not a full voice command engine, use NATS for that.
+
+[voice_commands]
+enabled = true
+
+[voice_commands.enter]
+enabled = true
+words   = ["enter", "send", "done"]
 
 # ── Emission gate ────────────────────────────────────────────────────────────
 # Trigger words gate whether output is forwarded. Not a voice command engine.

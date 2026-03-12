@@ -9,6 +9,7 @@ Output via configurable local handlers. NATS optional.
 import sys
 import time
 import queue
+import re
 import threading
 import logging
 from collections import deque
@@ -38,12 +39,25 @@ CHUNK           = cfg["audio"]["chunk"]
 VAD_THRESHOLD   = cfg["audio"]["vad_threshold"]
 BUFFER_SECONDS  = cfg["audio"]["buffer_seconds"]
 SILENCE_TIMEOUT = cfg["audio"]["silence_timeout"]
+PREFERRED_INPUT_DEVICE = str(cfg["audio"].get("input_device", "")).strip()
 
 # ── Realtime ──────────────────────────────────────────────────────────────────
 RT_CHECK_INTERVAL = cfg["realtime"]["check_interval"]
 MIN_CHUNKS        = cfg["realtime"]["min_chunks"]
 MAX_CHUNKS        = cfg["realtime"]["max_chunks"]
 RT_QUEUE_SIZE     = cfg["realtime"]["queue_size"]
+
+# ── Voice commands (minimal) ──────────────────────────────────────────────────
+VOICE_COMMANDS_ENABLED = bool(cfg.get("voice_commands", {}).get("enabled", False))
+ENTER_COMMAND_ENABLED = (
+    VOICE_COMMANDS_ENABLED
+    and bool(cfg.get("voice_commands", {}).get("enter", {}).get("enabled", False))
+)
+ENTER_COMMAND_WORDS = [
+    str(w).strip()
+    for w in cfg.get("voice_commands", {}).get("enter", {}).get("words", [])
+    if str(w).strip()
+]
 
 # ── Logging ───────────────────────────────────────────────────────────────────
 logging.basicConfig(level=logging.INFO, format='%(message)s')
@@ -139,7 +153,13 @@ def main():
     sys.stdout.flush()
 
     resources = {}
+    load_errors = []
+    load_errors_lock = threading.Lock()
     warmup_audio = np.zeros(RATE, dtype=np.float32)
+
+    def record_load_error(message: str):
+        with load_errors_lock:
+            load_errors.append(message)
 
     # ── Async model loading ───────────────────────────────────────────────────
 
@@ -151,8 +171,7 @@ def main():
             resources['final_model'] = m
             logger.info("Final model ready.")
         except Exception as e:
-            logger.error(f"Final load error: {e}")
-            sys.exit(1)
+            record_load_error(f"Final load error: {e}")
 
     def load_realtime():
         if not REALTIME_MODEL:
@@ -167,8 +186,7 @@ def main():
             resources['realtime_model'] = m
             logger.info("Realtime model ready.")
         except Exception as e:
-            logger.error(f"Realtime load error: {e}")
-            sys.exit(1)
+            record_load_error(f"Realtime load error: {e}")
 
     def load_audio_stack():
         import torch
@@ -189,20 +207,88 @@ def main():
             logger.info("Initializing PyAudio...")
             p = pyaudio.PyAudio()
             resources['p_instance'] = p
-            info = p.get_default_input_device_info()
-            stream = p.open(
+            def _iter_input_devices():
+                for i in range(p.get_device_count()):
+                    info = p.get_device_info_by_index(i)
+                    if info.get("maxInputChannels", 0) > 0:
+                        yield info
+
+            def _find_device_by_name(name: str, host_api: int | None = None):
+                target = name.strip().lower()
+                if not target:
+                    return None
+                for info in _iter_input_devices():
+                    if host_api is not None and info.get("hostApi") != host_api:
+                        continue
+                    if str(info.get("name", "")).strip().lower() == target:
+                        return info
+                return None
+
+            def _supports_format(info: dict) -> bool:
+                try:
+                    p.is_format_supported(
+                        RATE,
+                        input_device=int(info["index"]),
+                        input_channels=1,
+                        input_format=pyaudio.paInt16
+                    )
+                    return True
+                except Exception:
+                    return False
+
+            default_info = p.get_default_input_device_info()
+            info = None
+
+            if PREFERRED_INPUT_DEVICE:
+                configured_info = _find_device_by_name(PREFERRED_INPUT_DEVICE)
+                if configured_info and _supports_format(configured_info):
+                    info = configured_info
+                    logger.info(f"[device] Startup from config: {configured_info['name']}")
+                else:
+                    logger.warning(f"[device] Configured startup device unavailable: {PREFERRED_INPUT_DEVICE}")
+            else:
+                persisted_name = str(_persisted.get("last_input_device_name") or "").strip()
+                persisted_host_api = _persisted.get("last_input_device_host_api")
+                if persisted_name:
+                    persisted_info = _find_device_by_name(persisted_name, persisted_host_api)
+                    if not persisted_info:
+                        persisted_info = _find_device_by_name(persisted_name)
+                    if persisted_info and _supports_format(persisted_info):
+                        info = persisted_info
+                        logger.info(f"[device] Startup from persisted state: {persisted_info['name']}")
+                    else:
+                        logger.warning(f"[device] Persisted startup device unavailable: {persisted_name}")
+
+            if info is None:
+                info = default_info
+
+            open_kwargs = dict(
                 format=pyaudio.paInt16, channels=1, rate=RATE,
-                input=True, frames_per_buffer=CHUNK,
-                input_device_index=info['index']
+                input=True, frames_per_buffer=CHUNK
             )
+            try:
+                stream = p.open(
+                    input_device_index=int(info['index']),
+                    **open_kwargs
+                )
+            except Exception as open_error:
+                if int(info['index']) != int(default_info['index']):
+                    logger.warning(f"[device] Startup device open failed ({info['name']}): {open_error}")
+                    logger.warning(f"[device] Falling back to OS default: {default_info['name']}")
+                    info = default_info
+                    stream = p.open(
+                        input_device_index=int(info['index']),
+                        **open_kwargs
+                    )
+                else:
+                    raise
             resources['stream'] = stream
             resources['dev_name'] = info['name']
-            resources['dev_idx'] = info['index']
+            resources['dev_idx'] = int(info['index'])
             resources['host_api'] = info['hostApi']
             logger.info(f"Audio: {info['name']}")
         except Exception as e:
-            logger.error(f"Audio stack error: {e}")
-            sys.exit(1)
+            record_load_error(f"Audio stack error: {e}")
 
     threads = [
         threading.Thread(target=load_final),
@@ -211,6 +297,11 @@ def main():
     ]
     for t in threads: t.start()
     for t in threads: t.join()
+
+    if load_errors:
+        for msg in load_errors:
+            logger.error(msg)
+        sys.exit(1)
 
     final_model = resources['final_model']
     rt_model    = resources['realtime_model']
@@ -239,6 +330,38 @@ def main():
 
     # ── Workers ───────────────────────────────────────────────────────────────
 
+    def apply_voice_commands(final_text: str) -> tuple[str, dict]:
+        if not ENTER_COMMAND_ENABLED or not ENTER_COMMAND_WORDS:
+            return final_text, {}
+
+        text = final_text.strip()
+        press_enter_after = False
+        words = sorted(ENTER_COMMAND_WORDS, key=len, reverse=True)
+
+        for trigger in words:
+            pat = re.compile(rf"^\s*{re.escape(trigger)}(?:[\s\.,!?;:]+|$)", re.IGNORECASE)
+            m = pat.match(text)
+            if m:
+                press_enter_after = True
+                text = text[m.end():].strip()
+                break
+
+        for trigger in words:
+            pat = re.compile(
+                rf"(?:^|[\s\.,!?;:]+){re.escape(trigger)}(?:[\s\.,!?;:]+)?$",
+                re.IGNORECASE
+            )
+            m = pat.search(text)
+            if m:
+                press_enter_after = True
+                text = text[:m.start()].strip()
+                break
+
+        actions = {}
+        if press_enter_after:
+            actions["press_enter_after"] = True
+        return text, actions
+
     def final_worker():
         while True:
             try:
@@ -248,15 +371,26 @@ def main():
 
                 t_start = time.time()
                 segs, _ = final_model.transcribe(audio, language=LANGUAGE, beam_size=5)
-                text = " ".join(s.text for s in segs).strip()
+                raw_text = " ".join(s.text for s in segs).strip()
                 inf_ms = int((time.time() - t_start) * 1000)
                 t = time.time() - t0
 
-                if text:
-                    ev = {"type": "final", "text": text, "epoch": epoch,
-                          "t": round(t, 3), "inference_ms": inf_ms}
+                text, actions = apply_voice_commands(raw_text)
+                if text or actions:
+                    ev = {
+                        "type": "final",
+                        "text": text,
+                        "epoch": epoch,
+                        "t": round(t, 3),
+                        "inference_ms": inf_ms,
+                    }
+                    if actions:
+                        ev["actions"] = actions
                     if gate.process(ev):
-                        logger.info(f"[FINAL +{t:.2f}s] → OUT  '{text}' ({inf_ms}ms)")
+                        if text:
+                            logger.info(f"[FINAL +{t:.2f}s] → OUT  '{text}' ({inf_ms}ms)")
+                        else:
+                            logger.info(f"[FINAL +{t:.2f}s] → OUT  <action-only> ({inf_ms}ms)")
                         dispatch(ev)
                     else:
                         logger.info(f"[FINAL +{t:.2f}s] → GATED '{text}' ({inf_ms}ms)")
@@ -328,10 +462,17 @@ def main():
 
     # ── State persistence helper ──────────────────────────────────────────────
 
+    current_device_state = [{"name": dev_name, "host_api": resources['host_api']}]
+
     def persist():
         with control_lock: muted = control_state['is_muted']
         with gate._lock:   go    = gate.open
-        state_store.save({"is_muted": muted, "gate_open": go})
+        state_store.save({
+            "is_muted": muted,
+            "gate_open": go,
+            "last_input_device_name": current_device_state[0]["name"],
+            "last_input_device_host_api": current_device_state[0]["host_api"],
+        })
 
     # ── Hotkeys ───────────────────────────────────────────────────────────────
 
@@ -373,6 +514,7 @@ def main():
 
 
     setup_hotkeys()
+    persist()
 
     # ── NATS control surface ──────────────────────────────────────────────────
 
@@ -546,9 +688,11 @@ def main():
                         vchunk = np.frombuffer(vdata, dtype=np.int16).astype(np.float32)
                         rms = int(np.sqrt(np.mean(vchunk ** 2)))
                         current_device_idx[0] = next_idx
+                        current_device_state[0] = {"name": next_name, "host_api": _host_api}
                         ring_buffer.clear(); recording_buffer.clear(); is_recording = False
                         logger.info(f"[device] Cycled to: {next_name} (rms={rms})")
                         dispatch({"type": "system", "event": "device_changed", "device": next_name})
+                        persist()
                         break
                     except Exception as e:
                         _bad_devices.add(next_idx)

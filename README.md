@@ -24,7 +24,7 @@ Dual-model pipeline: a fast model produces **partial** results during speech, an
 - Local output handlers: file append, file overwrite, clipboard, type at cursor
 - Hotkeys with additional features available but not required for normal use
 - NATS event emit and control surface (optional — works fully without NATS)
-- State persistence across restarts (mute state, gate state)
+- State persistence across restarts (mute state, gate state, last input device)
 - Device reconnect on audio loss
 
 ## Prerequisites
@@ -90,6 +90,17 @@ uv run python stt.py
 ## Configuration
 
 All settings live in `config.toml`. Every option is documented there with comments. The file is read once at startup — restart to apply changes.
+
+Audio startup selection order:
+- `audio.input_device` (if set to an exact device name)
+- remembered last-used input device from `state.json`
+- OS default input device
+
+Minimal voice command behavior:
+- Enable `voice_commands.enabled = true` and `voice_commands.enter.enabled = true`.
+- If an utterance starts or ends with a configured `voice_commands.enter.words` trigger, STT removes that trigger from typed text and sends Enter after typing.
+- If you say only the trigger word (e.g. `enter`), it sends Enter without typing text.
+- `voice_commands.tts*` settings are currently placeholders and are not implemented yet.
 
 ## NATS
 

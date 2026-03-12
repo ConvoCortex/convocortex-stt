@@ -136,9 +136,11 @@ def make_type_at_cursor(cfg: dict):
 
     def type_at_cursor(event: dict):
         text = _final_text(event, cfg)
-        if text is None:
-            return
-        keyboard.write(text, delay=0)
+        actions = event.get("actions", {}) or {}
+        if text is not None:
+            keyboard.write(text, delay=0)
+        if actions.get("press_enter_after"):
+            keyboard.press_and_release("enter")
 
     type_at_cursor.__name__ = "type_at_cursor"
     return type_at_cursor
