@@ -12,12 +12,12 @@ dependencies = [
     "torch==2.5.1",
     "torchaudio==2.5.1",
     "transformers",
-    "pywin32",
+    "nats-py",
+    "pywin32; platform_system == 'Windows'",
     "keyboard",
 ]
 
 [project.optional-dependencies]
-nats     = ["nats-py"]
 windows  = ["pywin32"]
 
 [tool.uv.sources]

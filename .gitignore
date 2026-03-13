@@ -1,9 +1,13 @@
 .venv/
+.uv-cache/
 __pycache__/
 *.pyc
 *.pyo
+.pytest_cache/
+.mypy_cache/
+.coverage
+*.log
 *.agent
 mess/
 state.json
 output.txt
-*.git

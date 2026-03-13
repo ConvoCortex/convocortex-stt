@@ -1,93 +1,127 @@
 # convocortex-stt
 
-Hands-free speech-to-text with voice commands, VAD, wake-word sleep mode, realtime partials, transcription on pause, hotkeys, clipboard, and optional NATS integration.
+Hands-free speech-to-text for ambient use with voice commands, wake-word, VAD, feedback, realtime partials and NATS integration.
 
-## How it works
+It is designed to run continuously in the background, transcribe on pause, and expose events/controls over NATS so you can plug it into a larger voice system.
 
-VAD triggers transcription automatically on pause. System runs in either sleeping (wake-word listening) or working (normal STT) mode.
+## How it actually works
 
-Dual-model pipeline: a fast model produces **partial** results during speech, an accurate GPU model produces **final** results after silence. Silero VAD gates all inference so nothing runs while you are not speaking.
+### 1) Hands-free transcription on pause
 
-**Final** results are high-accuracy transcriptions produced once a pause in speech is detected. This is the primary output — written to file, clipboard, typed at cursor, or published over NATS.
+In working mode, you speak naturally. Silero VAD tracks speech vs silence:
+- speech starts/continues an utterance buffer
+- silence timeout closes the utterance
+- final transcription runs after that pause
 
-**Partial** results are low-accuracy transcriptions fired every ~100ms while you are still speaking. Useful for greatly reducing latency of voice commands, eg. stop. Not intended as accurate text output.
+This is why it is hands-free: no key press required to start/stop an utterance.
+
+### 2) Wake word is mode control, not push-to-talk
+
+The runtime has two modes:
+- `sleeping`: listens only for wake word
+- `working`: normal STT behavior
+
+Wake word exists to move from sleeping -> working.
+Stop words (or hotkey/NATS command) move from working -> sleeping.
+
+So wake word is not "say phrase to start one transcription". It controls whether STT is active at all.
+
+### 3) VAD prevents constant noise chewing
+
+When in working mode, inference is driven by VAD-detected speech windows instead of blindly processing endless noise.
+
+### 4) Dual-model pipeline
+
+- Realtime model emits **partial** text while you are speaking (low latency)
+- Final model emits **final** text after pause/silence (higher accuracy)
+
+Partials are primarily for responsiveness and command latency, not for high-accuracy text output.
+
+## Voice commands
+
+Built-in voice commands are intentionally minimal and convenience-oriented.
+
+Current built-in command types:
+- sleep/stop words
+- type-at-cursor toggle words
+- enter trigger words
+
+Commands are matched from partials (fast path) and finals (reliable path), using normalized exact matching for configured command phrases.
+
+For a proper, richer voice command engine, use the emitted NATS events and implement command logic externally.
 
 ## Features
 
 - No GUI
-- VAD-triggered — silence ends an utterance, no push-to-talk required
+- Hands-free transcription on pause
 - Sleep/working mode with wake word + stop words
-- High-accuracy final transcriptions after each pause
 - Realtime partial transcriptions during speech
-- Local output handlers: file append, file overwrite, clipboard, type at cursor
-- Hotkeys with additional features available but not required for normal use
-- NATS event emit and control surface (optional — works fully without NATS)
-- State persistence across restarts (sleep mode, typing toggle, last input device, last output device)
-- Device reconnect on audio loss
+- High-accuracy final transcriptions after pauses
+- Built-in audio feedback sounds (on/off/final + silence loop for bluetooth audio issues)
+- Simple built-in voice command actions
+- Local output handlers:
+  - append file
+  - overwrite file
+  - clipboard replace
+  - clipboard accumulate
+  - type at cursor
+- Hotkeys:
+  - sleep toggle
+  - typing toggleOh, it doesn't. 
+  - input device cycle
+  - output device cycle
+  - clipboard-accumulate reset cycle
+- NATS integration:
+  - event stream (`partial`, `final`, `status`, `system`)
+  - control surface (`sleep`, `wake`, `typing_*`, device cycle, etc.)
+- Persisted runtime state across restarts
+- Input/output device switching and reconnect behavior
+
+## Performance behavior
+
+Defaults favor practical command responsiveness over nonstop partial spam:
+- partials are rate-limited by `realtime.check_interval`
+- partial jobs are constrained by `realtime.min_chunks` / `realtime.max_chunks`
+
+You can tune these if you want denser realtime partial output.
 
 ## Prerequisites
 
-Windows OS, Nvidia GPU
+Primary tested target:
+- Windows
+- NVIDIA GPU with CUDA 12.1 (recommended)
 
-### CUDA 12.1 (Windows, GPU acceleration)
+Linux/macOS may work but are currently untested in this repository.
+
+### CUDA 12.1 (Windows)
 
 Download: https://developer.nvidia.com/cuda-12-1-0-download-archive
 
-Use **custom installation** and select only the CUDA toolkit — uncheck the driver and everything else if you already have a driver installed.
+Use custom install and keep CUDA toolkit. If runtime CUDA errors occur, verify driver/runtime and related CUDA libs.
 
-Add to PATH (adjust if you installed to a non-default location):
-```
+Optional PATH entries (adjust to your install path):
+
+```text
 C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.1\bin
 C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.1\libnvvp
 ```
 
-cuDNN may not be required — ctranslate2 installed via pip bundles some CUDA libraries. If you get CUDA errors at runtime, install cuDNN separately and place the files in the CUDA `bin` directory.
+CPU-only is supported by setting `models.final_device = "cpu"` in `config.toml` (slower finals).
 
-To run on CPU only, skip CUDA entirely and set `final_device = "cpu"` in config.toml. Expect significantly slower final transcriptions.
+### Python and uv
 
-### Python 3.10+
-
-### uv
-
-```
-pip install uv
-```
+- Python 3.10+
+- `uv` installed (`pip install uv`)
 
 ## Installation
 
 ```bash
-git clone https://github.com/you/convocortex-stt
+git clone https://github.com/<your-org-or-user>/convocortex-stt
 cd convocortex-stt
 uv sync
 ```
 
-On Windows (enables clipboard handlers):
-
-```bash
-uv sync --extra windows
-```
-
-With NATS support:
-
-```bash
-uv sync --extra nats
-```
-
-**Linux** 
-
-Not tested on Linux.
-
-require either running as root or adding your user to the `input` group:
-
-```bash
-sudo usermod -aG input $USER  # then log out and back in
-```
-
-**macOS** 
-
-Not tested on macOS.
-
-require accessibility permissions granted in System Settings → Privacy & Security → Accessibility.
+NATS Python client dependency is included by default.
 
 ## Running
 
@@ -97,36 +131,27 @@ uv run python stt.py
 
 ## Configuration
 
-All settings live in `config.toml`. Every option is documented there with comments. The file is read once at startup — restart to apply changes.
+All runtime settings live in `config.toml` and are loaded at startup.
 
-Audio startup selection order:
-- `audio.input_device` (if set to an exact device name)
-- remembered last-used input device from `state.json`
-- OS default input device
-
-Feedback output startup selection order:
-- `feedback.output_device` (if set to an exact device name)
-- remembered last-used output device from `state.json`
-- OS default output device
-
-Minimal voice command behavior:
-- Enable `voice_commands.enabled = true` and `voice_commands.enter.enabled = true`.
-- If an utterance starts or ends with a configured `voice_commands.enter.words` trigger, STT removes that trigger from typed text and sends Enter after typing.
-- If you say only the trigger word (e.g. `enter`), it sends Enter without typing text.
-- You can also toggle typing by voice via `voice_commands.type_at_cursor_toggle.words`.
-
-Audio feedback behavior:
-- `feedback.silence_sound` loops continuously in background (Bluetooth keepalive).
-- `feedback.on_sound` plays on wake, typing-on, Enter action, and most device cycles.
-- `feedback.off_sound` plays on sleep/stop, typing-off, and when device cycle wraps to first device.
-- `feedback.final_sound` plays when the final model emits non-empty output text.
-- `feedback.final_sound_enabled` toggles only that final-output sound (independent from on/off sounds).
-- `feedback.on_volume`, `feedback.off_volume`, `feedback.final_volume` set per-sound volume ratios (`0.0..2.0`).
-- `feedback.output_device` pins feedback playback to an exact output device name (otherwise it remembers the last output device you cycled to).
+Important areas:
+- `models`: realtime/final models and device choices
+- `audio`: VAD behavior + silence timeout + preferred input
+- `realtime`: partial cadence/window limits
+- `output`: handler toggles and paths
+- `voice_commands`: built-in convenience command words
+- `sleep_wake`: wake word backend + stop words + startup mode
+- `hotkeys`: optional runtime controls
+- `nats`: URL/subjects + enable toggle
 
 ## NATS
 
-Requires `uv sync --extra nats` and `nats.enabled = true` in config.toml.
+Enable by setting:
+- `nats.enabled = true`
+
+NATS is intended as the integration boundary to a larger app:
+- consume emitted events
+- issue control commands
+- implement advanced voice command logic outside this process
 
 ### Event schema
 
@@ -139,12 +164,13 @@ Requires `uv sync --extra nats` and `nats.enabled = true` in config.toml.
 {"type": "status",  "value": "working"}
 {"type": "system",  "event": "startup", "device": "Microphone (USB)", "models": {...}}
 {"type": "system",  "event": "device_changed", "device": "Microphone (USB)"}
+{"type": "system",  "event": "output_device_changed", "device": "Speakers (USB)"}
 {"type": "system",  "event": "shutdown"}
 ```
 
 ### Control commands
 
-Send JSON to the subject configured in `nats.subject_control`:
+Send JSON to `nats.subject_control`:
 
 ```json
 {"cmd": "sleep"}
@@ -159,27 +185,20 @@ Send JSON to the subject configured in `nats.subject_control`:
 {"cmd": "shutdown"}
 ```
 
+## Platform notes
+
+- Windows is the primary tested path.
+- Linux hotkeys may require input permissions (group/root setup).
+- macOS hotkeys may require Accessibility permissions.
+
 ## License
 
-convocortex-stt is licensed under the **GNU Affero General Public License v3.0**
-(AGPL-3.0). See [LICENSE](LICENSE) for the full text.
+convocortex-stt is licensed under **GNU Affero General Public License v3.0** (AGPL-3.0).
+See [LICENSE](LICENSE).
 
-AGPL-3.0 means: you may use, modify, and distribute this software freely,
-including running it as a network service — but any modifications must be
-released under the same license.
+Commercial licensing is available for proprietary use; contact the maintainer.
 
-This project also depends on third-party packages (including `realtimestt`),
-which are licensed separately under their own terms. See
-[`pyproject.toml`](pyproject.toml) and [`uv.lock`](uv.lock) for the dependency
-list and pinned versions.
-
-### Commercial license
-
-If you need to use convocortex-stt in a proprietary product or service without
-the AGPL-3.0 obligations, a commercial license is available. Contact the
-maintainer to discuss terms.
-
-### Contributing
+## Contributing
 
 Contributions require signing the [Individual Contributor License Agreement](CLA.md).
-See [CONTRIBUTING.md](CONTRIBUTING.md) for details.
+See [CONTRIBUTING.md](CONTRIBUTING.md).
