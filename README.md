@@ -1,16 +1,16 @@
 # convocortex-stt
 
-Standalone NATS-native hands-free speech-to-text engine.
-
-Designed for ambient operation. VAD triggers transcription automatically on pause. System runs in either sleeping (wake-word listening) or working (normal STT) mode.
+Hands-free speech-to-text with voice commands, VAD, wake-word sleep mode, realtime partials, transcription on pause, hotkeys, clipboard, and optional NATS integration.
 
 ## How it works
+
+VAD triggers transcription automatically on pause. System runs in either sleeping (wake-word listening) or working (normal STT) mode.
 
 Dual-model pipeline: a fast model produces **partial** results during speech, an accurate GPU model produces **final** results after silence. Silero VAD gates all inference so nothing runs while you are not speaking.
 
 **Final** results are high-accuracy transcriptions produced once a pause in speech is detected. This is the primary output — written to file, clipboard, typed at cursor, or published over NATS.
 
-**Partial** results are low-accuracy transcriptions fired every ~100ms while you are still speaking. Useful for reducing latency of voice commands and detecting start/stop words before the utterance ends. Not intended as accurate text output.
+**Partial** results are low-accuracy transcriptions fired every ~100ms while you are still speaking. Useful for greatly reducing latency of voice commands, eg. stop. Not intended as accurate text output.
 
 ## Features
 
@@ -26,6 +26,8 @@ Dual-model pipeline: a fast model produces **partial** results during speech, an
 - Device reconnect on audio loss
 
 ## Prerequisites
+
+Windows OS, Nvidia GPU
 
 ### CUDA 12.1 (Windows, GPU acceleration)
 
@@ -71,13 +73,21 @@ With NATS support:
 uv sync --extra nats
 ```
 
-**Hotkeys on Linux** require either running as root or adding your user to the `input` group:
+**Linux** 
+
+Not tested on Linux.
+
+require either running as root or adding your user to the `input` group:
 
 ```bash
 sudo usermod -aG input $USER  # then log out and back in
 ```
 
-**Hotkeys on macOS** require accessibility permissions granted in System Settings → Privacy & Security → Accessibility.
+**macOS** 
+
+Not tested on macOS.
+
+require accessibility permissions granted in System Settings → Privacy & Security → Accessibility.
 
 ## Running
 

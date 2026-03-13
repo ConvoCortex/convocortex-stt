@@ -102,7 +102,7 @@ enabled = true
 words   = ["enter", "simba"] # Detected at the start and at the end of utterance, not detected in the middle of utterance.
 [voice_commands.type_at_cursor_toggle]
 enabled = true
-words   = ["toggle typing", "typing toggle"] # Detected at the start of utterance
+words   = ["typing"] # Detected at the start of utterance
 
 # ── Sleep / Wake ─────────────────────────────────────────────────────────────
 # Two modes:
@@ -120,7 +120,7 @@ wake_word = "bumblebee"            # must be a supported built-in Porcupine keyw
 sensitivity = 0.8                  # 0..1, higher = more sensitive
 drop_audio_after_wake_seconds = 0.4  # helps avoid wake word leaking into first transcription
 start_sleeping = true
-stop_words = ["stop", "pause", "sleep"]
+stop_words = ["stop", "pause", "sleep", "mufasa"]
 
 # ── Hotkeys ──────────────────────────────────────────────────────────────────
 # Empty string = disabled.
@@ -130,7 +130,7 @@ sleep_toggle         = "`"         # toggles sleeping <-> working
 typing_toggle        = "shift+f5"  # toggles type_at_cursor output
 input_device_cycle   = "shift+f6"  # cycles input device
 output_device_cycle  = "shift+f7"  # cycles audio feedback output device
-clipboard_accumulate_cycle = "ctrl+b"   # clears clipboard and starts fresh accumulation
+clipboard_accumulate_cycle = "ctrl+b"   # if output.clipboard_accumulate is enabled, clears clipboard and starts fresh accumulation
 
 # ── NATS ─────────────────────────────────────────────────────────────────────
 # Requires nats-py installed. STT works fully without NATS.

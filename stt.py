@@ -22,6 +22,11 @@ from faster_whisper import WhisperModel
 import config
 import state as state_store
 
+
+def _normalize_command_phrase(value: str) -> str:
+    return str(value).strip().lower().strip(".,!?;:")
+
+
 cfg = config.load()
 state_store.init(cfg)
 _persisted = state_store.load()
@@ -54,9 +59,9 @@ SLEEP_START_SLEEPING = bool(_sw_cfg.get("start_sleeping", True))
 SLEEP_HOTKEY_TOGGLE = str(cfg["hotkeys"].get("sleep_toggle", "")).strip()
 TYPE_TOGGLE_HOTKEY = str(cfg["hotkeys"].get("typing_toggle", "")).strip()
 SLEEP_STOP_WORDS = [
-    str(w).strip().lower()
+    _normalize_command_phrase(w)
     for w in _sw_cfg.get("stop_words", ["stop", "pause"])
-    if str(w).strip()
+    if _normalize_command_phrase(w)
 ]
 WAKEWORD_ENABLED = bool(_sw_cfg.get("enabled", True))
 WAKEWORD_BACKEND = str(_sw_cfg.get("backend", "pvporcupine")).strip().lower()
@@ -93,9 +98,14 @@ TYPE_TOGGLE_COMMAND_ENABLED = (
     and bool(cfg.get("voice_commands", {}).get("type_at_cursor_toggle", {}).get("enabled", False))
 )
 TYPE_TOGGLE_COMMAND_WORDS = [
-    str(w).strip().lower()
+    _normalize_command_phrase(w)
     for w in cfg.get("voice_commands", {}).get("type_at_cursor_toggle", {}).get("words", [])
-    if str(w).strip()
+    if _normalize_command_phrase(w)
+]
+ENTER_COMMAND_WORDS_EXACT = [
+    _normalize_command_phrase(w)
+    for w in ENTER_COMMAND_WORDS
+    if _normalize_command_phrase(w)
 ]
 
 # ── Logging ───────────────────────────────────────────────────────────────────
@@ -629,6 +639,8 @@ def main():
     typing_state = {
         "enabled": bool(_persisted.get("type_at_cursor_enabled", default_typing_enabled))
     }
+    voice_command_lock = threading.Lock()
+    voice_command_seen_by_epoch: dict[int, set[str]] = {}
 
     type_set_enabled = handler_extras.get("type_at_cursor_set_enabled")
     if type_set_enabled:
@@ -734,6 +746,48 @@ def main():
             actions["press_enter_after"] = True
         return text, actions
 
+    def _mark_voice_command_seen(epoch: int, key: str) -> bool:
+        with voice_command_lock:
+            seen = voice_command_seen_by_epoch.setdefault(epoch, set())
+            if key in seen:
+                return False
+            seen.add(key)
+            stale_epochs = [e for e in voice_command_seen_by_epoch if e < epoch - 8]
+            for e in stale_epochs:
+                del voice_command_seen_by_epoch[e]
+            return True
+
+    def apply_exact_voice_command(text: str, epoch: int, t: float, inf_ms: int, source: str) -> bool:
+        normalized = _normalize_command_phrase(text)
+        if not normalized:
+            return False
+
+        if normalized in SLEEP_STOP_WORDS:
+            if _mark_voice_command_seen(epoch, f"sleep:{normalized}"):
+                set_sleeping(True, reason=f"voice:{normalized}")
+            return True
+
+        if TYPE_TOGGLE_COMMAND_ENABLED and normalized in TYPE_TOGGLE_COMMAND_WORDS:
+            if _mark_voice_command_seen(epoch, f"typing_toggle:{normalized}"):
+                toggle_typing_enabled(reason=f"voice:{normalized}")
+            return True
+
+        if ENTER_COMMAND_ENABLED and normalized in ENTER_COMMAND_WORDS_EXACT:
+            if _mark_voice_command_seen(epoch, f"press_enter:{normalized}"):
+                logger.info(f"[{source.upper()} +{t:.2f}s] → CMD enter ({inf_ms}ms)")
+                dispatch({
+                    "type": "final",
+                    "text": "",
+                    "actions": {"press_enter_after": True},
+                    "epoch": epoch,
+                    "t": round(t, 3),
+                    "inference_ms": inf_ms,
+                })
+                feedback.play_on()
+            return True
+
+        return False
+
     def final_worker():
         while True:
             try:
@@ -750,12 +804,7 @@ def main():
                 inf_ms = int((time.time() - t_start) * 1000)
                 t = time.time() - t0
 
-                normalized = raw_text.lower().strip().strip(".,!?;:")
-                if normalized in SLEEP_STOP_WORDS:
-                    set_sleeping(True, reason=f"voice:{normalized}")
-                    continue
-                if TYPE_TOGGLE_COMMAND_ENABLED and normalized in TYPE_TOGGLE_COMMAND_WORDS:
-                    toggle_typing_enabled(reason=f"voice:{normalized}")
+                if apply_exact_voice_command(raw_text, epoch, t, inf_ms, source="final"):
                     continue
 
                 text, actions = apply_voice_commands(raw_text)
@@ -836,6 +885,9 @@ def main():
                 with mode_lock:
                     if mode_state["sleeping"]:
                         continue
+
+                if apply_exact_voice_command(text, epoch, t, inf_ms, source="partial"):
+                    continue
 
                 if text:
                     ev = {"type": "partial", "text": text, "epoch": epoch,
