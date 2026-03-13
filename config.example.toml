@@ -102,7 +102,7 @@ enabled = true
 words   = ["enter"] # Detected at the start and at the end of utterance, not detected in the middle of utterance.
 [voice_commands.type_at_cursor_toggle]
 enabled = true
-words   = ["toggle typing", "typing toggle"] # Detected at the start of utterance
+words   = ["typing"] # Detected at the start of utterance
 
 # ── Sleep / Wake ─────────────────────────────────────────────────────────────
 # Two modes:
