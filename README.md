@@ -123,6 +123,18 @@ uv sync
 
 NATS Python client dependency is included by default.
 
+Create your local config from the example:
+
+```bash
+cp config.example.toml config.toml
+```
+
+On Windows PowerShell:
+
+```powershell
+Copy-Item config.example.toml config.toml
+```
+
 ## Running
 
 ```bash
