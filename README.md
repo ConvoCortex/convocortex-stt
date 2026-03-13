@@ -67,7 +67,7 @@ For a proper, richer voice command engine, use the emitted NATS events and imple
   - type at cursor
 - Hotkeys:
   - sleep toggle
-  - typing toggleOh, it doesn't. 
+  - typing toggle
   - input device cycle
   - output device cycle
   - clipboard-accumulate reset cycle
@@ -116,7 +116,7 @@ CPU-only is supported by setting `models.final_device = "cpu"` in `config.toml` 
 ## Installation
 
 ```bash
-git clone https://github.com/<your-org-or-user>/convocortex-stt
+git clone https://github.com/ConvoCortex/convocortex-stt
 cd convocortex-stt
 uv sync
 ```
@@ -202,3 +202,6 @@ Commercial licensing is available for proprietary use; contact the maintainer.
 
 Contributions require signing the [Individual Contributor License Agreement](CLA.md).
 See [CONTRIBUTING.md](CONTRIBUTING.md).
+
+
+
