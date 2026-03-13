@@ -4,8 +4,6 @@ Hands-free speech-to-text for ambient use with voice commands, wake-word, VAD, f
 
 It is designed to run continuously in the background, transcribe on pause, and expose events/controls over NATS so you can plug it into a larger voice system.
 
-This project builds on top of the RealTimeSTT ecosystem and uses faster-whisper/ctranslate2 under the hood.
-
 ## How it actually works
 
 ### 1) Hands-free transcription on pause
@@ -192,6 +190,10 @@ Send JSON to `nats.subject_control`:
 - Windows is the primary tested path.
 - Linux hotkeys may require input permissions (group/root setup).
 - macOS hotkeys may require Accessibility permissions.
+
+## Acknowledgments
+
+This project builds on top of the RealTimeSTT ecosystem and uses faster-whisper/ctranslate2 under the hood.
 
 ## License
 
