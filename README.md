@@ -45,6 +45,7 @@ Current built-in command types:
 - sleep/stop words
 - type-at-cursor toggle words
 - enter trigger words
+- file-buffer release words
 
 Commands are matched from partials (fast path) and finals (reliable path), using normalized exact matching for configured command phrases.
 
@@ -62,6 +63,7 @@ For a proper, richer voice command engine, use the emitted NATS events and imple
 - Local output handlers:
   - append file
   - overwrite file
+  - file buffer accumulate/release
   - clipboard replace
   - clipboard accumulate
   - type at cursor
@@ -149,11 +151,45 @@ Important areas:
 - `models`: realtime/final models and device choices
 - `audio`: VAD behavior + silence timeout + preferred input
 - `realtime`: partial cadence/window limits
-- `output`: handler toggles and paths
+- `logging`: toggleable debug traces written to a file for freeze/debug analysis
+- `output`: handler toggles and paths, including editable `file_buffer`
 - `voice_commands`: built-in convenience command words
 - `sleep_wake`: wake word backend + stop words + startup mode
 - `hotkeys`: optional runtime controls
 - `nats`: URL/subjects + enable toggle
+
+### File buffer workflow
+
+If `output.file_buffer.enabled = true`, each final transcription is appended to `output.file_buffer.path`.
+
+This gives you a plain text working buffer you can keep open in an editor, adjust manually, and then inject into the active cursor later with an exact voice command such as `buffer`.
+
+Relevant settings:
+- `output.file_buffer.separator`: separator inserted between finalized utterances
+- `output.file_buffer.clear_after_release`: clear the file after the `buffer` command types it
+- `voice_commands.buffer_release.words`: exact phrases that trigger release
+- `voice_commands.buffer_release.press_enter_after`: optionally press Enter after typing the buffer
+
+### Debug logging
+
+When you need to investigate intermittent stalls or missed speech, enable:
+
+```toml
+[logging]
+debug = true
+file = "stt-debug.log"
+third_party_debug = false
+heartbeat_seconds = 5.0
+```
+
+With `debug = true`, the runtime keeps normal console output but also appends detailed traces to the log file, including:
+- long `stream.read()` blocks
+- VAD speech/silence transitions with scores
+- speech start/finalization boundaries
+- realtime queue enqueue/drop behavior
+- periodic heartbeats showing mode, queue depth, buffer sizes, and current VAD state
+
+This project is not currently using the `realtimestt` package at runtime for the main loop; the useful debug points are in [`stt.py`](stt.py) around PyAudio, Silero VAD, and faster-whisper.
 
 ## NATS
 

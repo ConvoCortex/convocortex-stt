@@ -48,6 +48,17 @@ max_chunks       = 50
 # queue_size: max pending partial jobs — oldest dropped if full (keeps latency low)
 queue_size       = 10
 
+# ── Logging / Debugging ──────────────────────────────────────────────────────
+[logging]
+# debug: when true, detailed runtime traces are written to `file`
+debug = true
+# append-only debug log file for investigating stalls / missed audio / queue pressure
+file = "stt-debug.log"
+# include DEBUG logs from faster-whisper / ctranslate2 too; usually leave false unless needed
+third_party_debug = false
+# throttled runtime snapshot cadence while debug logging is enabled
+heartbeat_seconds = 5.0
+
 # ── Output handlers ─────────────────────────────────────────────────────────
 # Disable if not needed or when a NATS consumer replaces them.
 # TOML booleans must be lowercase
@@ -58,6 +69,12 @@ path    = "output.txt"
 [output.file_overwrite]
 enabled = false
 path    = "watched.txt"
+
+[output.file_buffer]
+enabled = true
+path    = "buffer.txt"
+separator = ""
+clear_after_release = true
 
 # use either output.clipboard_replace or output.clipboard_accumulate, not both at once
 [output.clipboard_replace]
@@ -103,6 +120,10 @@ words   = ["enter", "simba"] # Detected at the start and at the end of utterance
 [voice_commands.type_at_cursor_toggle]
 enabled = true
 words   = ["typing"] # Detected at the start of utterance
+[voice_commands.buffer_release]
+enabled = true
+words   = ["buffer"]
+press_enter_after = false
 
 # ── Sleep / Wake ─────────────────────────────────────────────────────────────
 # Two modes:

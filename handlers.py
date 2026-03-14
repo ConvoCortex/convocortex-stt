@@ -8,6 +8,7 @@ Handlers are registered at startup based on config.
 
 import logging
 import threading
+from pathlib import Path
 
 logger = logging.getLogger("STT")
 
@@ -60,6 +61,66 @@ def make_file_overwrite(cfg: dict):
 
     file_overwrite.__name__ = "file_overwrite"
     return file_overwrite
+
+
+# ── File buffer ───────────────────────────────────────────────────────────────
+
+def make_file_buffer(cfg: dict):
+    bcfg = cfg["output"]["file_buffer"]
+    path = Path(bcfg["path"])
+    sep = bcfg["separator"]
+    clear_after_release = bool(bcfg.get("clear_after_release", True))
+    lock = threading.Lock()
+
+    try:
+        import keyboard
+    except ImportError:
+        keyboard = None
+        logger.warning("[file_buffer] keyboard not installed, voice-triggered release disabled.")
+
+    def _read_buffer() -> str:
+        if not path.exists():
+            return ""
+        return path.read_text(encoding="utf-8")
+
+    def _write_buffer(content: str):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content, encoding="utf-8")
+
+    def _append_buffer(text: str):
+        with lock:
+            existing = _read_buffer()
+            combined = (existing + sep + text) if existing else text
+            _write_buffer(combined)
+
+    def _release_buffer(press_enter_after: bool = False):
+        if keyboard is None:
+            logger.warning("[file_buffer] Release ignored: keyboard not installed.")
+            return
+        with lock:
+            content = _read_buffer()
+            if clear_after_release:
+                _write_buffer("")
+        if not content:
+            logger.info("[file_buffer] Release ignored: buffer is empty.")
+            return
+        keyboard.write(content, delay=0)
+        if press_enter_after:
+            keyboard.press_and_release("enter")
+        logger.info(f"[file_buffer] released {len(content)} chars" + (" + enter" if press_enter_after else ""))
+
+    def file_buffer(event: dict):
+        actions = event.get("actions", {}) or {}
+        if actions.get("release_file_buffer"):
+            _release_buffer(bool(actions.get("press_enter_after")))
+            return
+        text = _final_text(event, cfg)
+        if text is None:
+            return
+        _append_buffer(text)
+
+    file_buffer.__name__ = "file_buffer"
+    return file_buffer
 
 
 # ── Clipboard replace ─────────────────────────────────────────────────────────
@@ -153,8 +214,10 @@ def make_type_at_cursor(cfg: dict):
     def type_at_cursor(event: dict):
         if not is_enabled():
             return
-        text = _final_text(event, cfg)
         actions = event.get("actions", {}) or {}
+        if actions.get("release_file_buffer"):
+            return
+        text = _final_text(event, cfg)
         if text is not None:
             keyboard.write(text, delay=0)
         if actions.get("press_enter_after"):
@@ -226,6 +289,10 @@ def register_all(cfg: dict, register) -> dict:
     if out["file_overwrite"]["enabled"]:
         register(make_file_overwrite(cfg))
         logger.info(f"[handler] file_overwrite -> {out['file_overwrite']['path']}")
+
+    if out["file_buffer"]["enabled"]:
+        register(make_file_buffer(cfg))
+        logger.info(f"[handler] file_buffer -> {out['file_buffer']['path']}")
 
     if out["clipboard_replace"]["enabled"]:
         fn = make_clipboard_replace(cfg)

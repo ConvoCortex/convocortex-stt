@@ -12,6 +12,7 @@ import queue
 import re
 import threading
 import logging
+import os
 from collections import deque
 
 import numpy as np
@@ -28,6 +29,43 @@ def _normalize_command_phrase(value: str) -> str:
 
 
 cfg = config.load()
+
+# ── Logging ───────────────────────────────────────────────────────────────────
+_log_cfg = cfg.get("logging", {})
+DEBUG_LOGGING_ENABLED = bool(_log_cfg.get("debug", False))
+DEBUG_LOG_FILE = str(_log_cfg.get("file", "stt-debug.log")).strip()
+THIRD_PARTY_DEBUG_LOGGING = bool(_log_cfg.get("third_party_debug", False))
+DEBUG_HEARTBEAT_SECONDS = max(1.0, float(_log_cfg.get("heartbeat_seconds", 5.0)))
+
+
+def _setup_logging():
+    root = logging.getLogger()
+    root.handlers.clear()
+    root.setLevel(logging.DEBUG if DEBUG_LOGGING_ENABLED else logging.INFO)
+
+    console = logging.StreamHandler()
+    console.setLevel(logging.INFO)
+    console.setFormatter(logging.Formatter("%(message)s"))
+    root.addHandler(console)
+
+    if DEBUG_LOGGING_ENABLED and DEBUG_LOG_FILE:
+        file_handler = logging.FileHandler(DEBUG_LOG_FILE, encoding="utf-8")
+        file_handler.setLevel(logging.DEBUG)
+        file_handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
+        root.addHandler(file_handler)
+
+    fw_level = logging.DEBUG if DEBUG_LOGGING_ENABLED and THIRD_PARTY_DEBUG_LOGGING else logging.WARNING
+    logging.getLogger("faster_whisper").setLevel(fw_level)
+    logging.getLogger("ctranslate2").setLevel(fw_level)
+
+    configured_logger = logging.getLogger("STT")
+    if DEBUG_LOGGING_ENABLED:
+        target = DEBUG_LOG_FILE or "<disabled>"
+        configured_logger.debug(f"[debug] enabled file={target} third_party={THIRD_PARTY_DEBUG_LOGGING}")
+    return configured_logger
+
+
+logger = _setup_logging()
 state_store.init(cfg)
 _persisted = state_store.load()
 
@@ -102,21 +140,45 @@ TYPE_TOGGLE_COMMAND_WORDS = [
     for w in cfg.get("voice_commands", {}).get("type_at_cursor_toggle", {}).get("words", [])
     if _normalize_command_phrase(w)
 ]
+BUFFER_RELEASE_COMMAND_ENABLED = (
+    VOICE_COMMANDS_ENABLED
+    and bool(cfg.get("output", {}).get("file_buffer", {}).get("enabled", False))
+    and bool(cfg.get("voice_commands", {}).get("buffer_release", {}).get("enabled", False))
+)
+BUFFER_RELEASE_COMMAND_WORDS = [
+    _normalize_command_phrase(w)
+    for w in cfg.get("voice_commands", {}).get("buffer_release", {}).get("words", [])
+    if _normalize_command_phrase(w)
+]
+BUFFER_RELEASE_COMMAND_PRESS_ENTER_AFTER = bool(
+    cfg.get("voice_commands", {}).get("buffer_release", {}).get("press_enter_after", False)
+)
 ENTER_COMMAND_WORDS_EXACT = [
     _normalize_command_phrase(w)
     for w in ENTER_COMMAND_WORDS
     if _normalize_command_phrase(w)
 ]
-
-# ── Logging ───────────────────────────────────────────────────────────────────
-logging.basicConfig(level=logging.INFO, format='%(message)s')
-logger = logging.getLogger("STT")
-logging.getLogger("faster_whisper").setLevel(logging.WARNING)
-logging.getLogger("ctranslate2").setLevel(logging.WARNING)
-
+BUFFER_RELEASE_COMMAND_WORDS_EXACT = BUFFER_RELEASE_COMMAND_WORDS
 
 def _clamp_volume(v: float) -> float:
     return max(0.0, min(2.0, float(v)))
+
+
+_debug_timestamps: dict[str, float] = {}
+
+
+def debug_log(message: str):
+    if DEBUG_LOGGING_ENABLED:
+        logger.debug(message)
+
+
+def debug_log_every(key: str, seconds: float, message: str):
+    if not DEBUG_LOGGING_ENABLED:
+        return
+    now = time.monotonic()
+    if now - _debug_timestamps.get(key, 0.0) >= seconds:
+        _debug_timestamps[key] = now
+        logger.debug(message)
 
 # ── Event dispatch ────────────────────────────────────────────────────────────
 # Handlers are registered at startup. Each receives every event dict.
@@ -447,6 +509,12 @@ def main():
 
     print(f"Initializing STT (Realtime: {REALTIME_DEVICE}, Final: {FINAL_DEVICE})...")
     sys.stdout.flush()
+    debug_log(
+        "[startup] "
+        f"rate={RATE} chunk={CHUNK} vad_threshold={VAD_THRESHOLD} "
+        f"silence_timeout={SILENCE_TIMEOUT} rt_interval={RT_CHECK_INTERVAL} "
+        f"rt_queue_size={RT_QUEUE_SIZE} start_sleeping={SLEEP_START_SLEEPING}"
+    )
 
     resources = {}
     load_errors = []
@@ -786,14 +854,36 @@ def main():
                 feedback.play_on()
             return True
 
+        if BUFFER_RELEASE_COMMAND_ENABLED and normalized in BUFFER_RELEASE_COMMAND_WORDS_EXACT:
+            if _mark_voice_command_seen(epoch, f"release_buffer:{normalized}"):
+                logger.info(f"[{source.upper()} +{t:.2f}s] → CMD buffer_release ({inf_ms}ms)")
+                dispatch({
+                    "type": "final",
+                    "text": "",
+                    "actions": {
+                        "release_file_buffer": True,
+                        "press_enter_after": BUFFER_RELEASE_COMMAND_PRESS_ENTER_AFTER,
+                    },
+                    "epoch": epoch,
+                    "t": round(t, 3),
+                    "inference_ms": inf_ms,
+                })
+                feedback.play_on()
+            return True
+
         return False
 
     def final_worker():
         while True:
             try:
                 epoch, t0, audio_data = final_queue.get()
+                debug_log(
+                    f"[final_worker] dequeue epoch={epoch} chunks={len(audio_data)} "
+                    f"pending_final={final_queue.qsize()} pending_rt={rt_queue.qsize()}"
+                )
                 with mode_lock:
                     if mode_state["sleeping"]:
+                        debug_log(f"[final_worker] skip epoch={epoch} reason=sleeping")
                         continue
                 audio = np.concatenate(audio_data).astype(np.float32) / 32768.0
                 logger.info(f"[FINAL] Processing {len(audio)/RATE:.2f}s audio...")
@@ -835,6 +925,7 @@ def main():
                 else:
                     logger.info(f"[FINAL +{t:.2f}s] <empty> ({inf_ms}ms)")
 
+                drained = 0
                 with state_lock:
                     if state['finalized_epoch'] < epoch:
                         state['finalized_epoch'] = epoch
@@ -842,8 +933,11 @@ def main():
                 try:
                     while True:
                         rt_queue.get_nowait(); rt_queue.task_done()
+                        drained += 1
                 except queue.Empty:
                     pass
+                if drained:
+                    debug_log(f"[final_worker] cleared_rt_queue epoch={epoch} dropped={drained}")
             except Exception as e:
                 logger.error(f"[final_worker] {e}")
             finally:
@@ -857,17 +951,27 @@ def main():
                 if job is None:
                     continue
                 epoch, t0, audio_data = job
+                debug_log(
+                    f"[realtime_worker] dequeue epoch={epoch} chunks={len(audio_data)} "
+                    f"pending_rt={rt_queue.qsize()}"
+                )
 
                 with state_lock:
                     if (epoch != state['speech_epoch']
                             or state['finalized_epoch'] >= epoch
                             or rt_cancel.is_set()):
+                        debug_log(f"[realtime_worker] skip epoch={epoch} reason=stale")
                         continue
                 with mode_lock:
                     if mode_state["sleeping"]:
+                        debug_log(f"[realtime_worker] skip epoch={epoch} reason=sleeping")
                         continue
 
                 if not (MIN_CHUNKS <= len(audio_data) <= MAX_CHUNKS):
+                    debug_log(
+                        f"[realtime_worker] skip epoch={epoch} reason=chunk_window "
+                        f"chunks={len(audio_data)}"
+                    )
                     continue
 
                 audio = np.concatenate(audio_data).astype(np.float32) / 32768.0
@@ -1191,6 +1295,9 @@ def main():
     current_t0       = None
     last_error       = ""
     drop_chunks_after_wake = 0
+    expected_chunk_ms = (CHUNK / RATE) * 1000.0
+    vad_prev_active = False
+    wakeword_prev_detected = False
 
     dispatch({"type": "system", "event": "startup",
               "device": dev_name,
@@ -1201,7 +1308,11 @@ def main():
 
     while True:
         try:
+            read_started = time.perf_counter()
             data = stream.read(CHUNK, exception_on_overflow=False)
+            read_ms = (time.perf_counter() - read_started) * 1000.0
+            if read_ms > max(250.0, expected_chunk_ms * 4.0):
+                logger.warning(f"[audio] stream.read blocked for {read_ms:.0f}ms")
             if last_error:
                 logger.info("Recovered.")
                 last_error = ""
@@ -1308,17 +1419,23 @@ def main():
                 continue
 
             chunk = np.frombuffer(data, dtype=np.int16)
+            chunk_rms = float(np.sqrt(np.mean(chunk.astype(np.float32) ** 2))) if len(chunk) else 0.0
 
             with mode_lock:
                 sleeping = mode_state["sleeping"]
             if sleeping:
                 if is_recording or recording_buffer:
+                    debug_log("[audio] clearing active buffers while sleeping")
                     ring_buffer.clear()
                     recording_buffer = []
                     is_recording = False
                     silence_counter = 0
                     current_t0 = None
-                if detect_wakeword(chunk):
+                wake_detected = detect_wakeword(chunk)
+                if wake_detected and not wakeword_prev_detected:
+                    debug_log(f"[wake] detected word={WAKEWORD} rms={chunk_rms:.1f}")
+                wakeword_prev_detected = wake_detected
+                if wake_detected:
                     set_sleeping(False, reason=f"wake:{WAKEWORD}")
                     drop_chunks_after_wake = int(max(0.0, WAKEWORD_DROP_SECONDS) * RATE / CHUNK)
                     ring_buffer.clear()
@@ -1326,15 +1443,34 @@ def main():
                     is_recording = False
                     silence_counter = 0
                     current_t0 = None
+                    debug_log(f"[wake] dropping_chunks_after_wake={drop_chunks_after_wake}")
+                else:
+                    debug_log_every(
+                        "sleeping_heartbeat",
+                        DEBUG_HEARTBEAT_SECONDS,
+                        f"[heartbeat] mode=sleeping rms={chunk_rms:.1f} read_ms={read_ms:.1f}"
+                    )
                 continue
 
             if drop_chunks_after_wake > 0:
                 drop_chunks_after_wake -= 1
+                debug_log_every(
+                    "wake_drop_heartbeat",
+                    1.0,
+                    f"[wake] dropping post-wake audio remaining={drop_chunks_after_wake}"
+                )
                 continue
 
             prob  = vad.is_speech(chunk.astype(np.float32) / 32768.0)
+            vad_active = prob > VAD_THRESHOLD
+            if vad_active != vad_prev_active:
+                debug_log(
+                    f"[vad] transition active={vad_active} prob={prob:.3f} "
+                    f"threshold={VAD_THRESHOLD:.3f} rms={chunk_rms:.1f}"
+                )
+                vad_prev_active = vad_active
 
-            if prob > VAD_THRESHOLD:
+            if vad_active:
                 silence_counter = 0
                 if not is_recording:
                     with state_lock:
@@ -1346,6 +1482,10 @@ def main():
                     recording_buffer = list(ring_buffer)
                     ring_buffer.clear()
                     is_recording = True
+                    debug_log(
+                        f"[speech] start epoch={epoch} preroll_chunks={len(recording_buffer)} "
+                        f"rt_queue={rt_queue.qsize()} final_queue={final_queue.qsize()}"
+                    )
                     dispatch({"type": "status", "value": "recording"})
                 recording_buffer.append(chunk)
             else:
@@ -1356,6 +1496,10 @@ def main():
                         with state_lock: epoch = state['speech_epoch']
                         is_recording = False
                         final_queue.put((epoch, current_t0, list(recording_buffer)))
+                        debug_log(
+                            f"[speech] finalize epoch={epoch} chunks={len(recording_buffer)} "
+                            f"silence_counter={silence_counter} final_queue={final_queue.qsize()}"
+                        )
                         recording_buffer = []
                         current_t0 = None
                         dispatch({"type": "status", "value": "idle"})
@@ -1370,12 +1514,36 @@ def main():
                 if fin < ep and MIN_CHUNKS <= n <= MAX_CHUNKS:
                     try:
                         rt_queue.put_nowait((ep, current_t0, list(recording_buffer)))
+                        debug_log(
+                            f"[realtime_queue] enqueue epoch={ep} chunks={n} pending_rt={rt_queue.qsize()}"
+                        )
                     except queue.Full:
                         try:
                             rt_queue.get_nowait(); rt_queue.task_done()
                             rt_queue.put_nowait((ep, current_t0, list(recording_buffer)))
-                        except: pass
+                            debug_log(
+                                f"[realtime_queue] drop_oldest_and_enqueue epoch={ep} "
+                                f"chunks={n} pending_rt={rt_queue.qsize()}"
+                            )
+                        except Exception as queue_error:
+                            debug_log(f"[realtime_queue] enqueue_failed epoch={ep} error={queue_error}")
+                else:
+                    debug_log_every(
+                        "realtime_window_skip",
+                        1.0,
+                        f"[realtime_queue] skip epoch={ep} fin={fin} chunks={n} "
+                        f"window={MIN_CHUNKS}-{MAX_CHUNKS}"
+                    )
                 last_rt_update = time.time()
+
+            debug_log_every(
+                "working_heartbeat",
+                DEBUG_HEARTBEAT_SECONDS,
+                f"[heartbeat] mode=working read_ms={read_ms:.1f} rms={chunk_rms:.1f} "
+                f"vad={prob:.3f} recording={is_recording} ring={len(ring_buffer)} "
+                f"recording_chunks={len(recording_buffer)} silence_counter={silence_counter} "
+                f"rt_queue={rt_queue.qsize()} final_queue={final_queue.qsize()}"
+            )
 
         except (OSError, IOError) as e:
             err = str(e)
@@ -1407,7 +1575,6 @@ def main():
             logger.error(f"Unexpected: {e}")
             break
 
-    import os
     logger.info("Shutting down...")
     try: stream.stop_stream(); stream.close()
     except: pass
