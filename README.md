@@ -12,6 +12,7 @@ In working mode, you speak naturally. Silero VAD tracks speech vs silence:
 - speech starts/continues an utterance buffer
 - silence timeout closes the utterance
 - final transcription runs after that pause
+- if audio capture stalls mid-utterance (for example device mute/disconnect), the active utterance is dropped instead of being resumed later
 
 This is why it is hands-free: no key press required to start/stop an utterance.
 

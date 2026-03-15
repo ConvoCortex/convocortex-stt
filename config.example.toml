@@ -34,6 +34,7 @@ chunk           = 512    # audio frames per VAD check — lower = more responsiv
 vad_threshold   = 0.4   # Silero VAD sensitivity 0–1 (lower = more sensitive, picks up more speech)
 buffer_seconds  = 1.0   # ring buffer before speech start — captures audio before VAD triggers
 silence_timeout = 0.8   # seconds of silence before ending an utterance and firing final transcription
+input_stall_reset_seconds = 1.5 # if audio capture stalls this long mid-utterance, drop buffered speech instead of resuming it later
 # startup input device override by exact device name; empty = use remembered device then OS default
 input_device    = ""
 

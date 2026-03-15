@@ -83,6 +83,7 @@ CHUNK           = cfg["audio"]["chunk"]
 VAD_THRESHOLD   = cfg["audio"]["vad_threshold"]
 BUFFER_SECONDS  = cfg["audio"]["buffer_seconds"]
 SILENCE_TIMEOUT = cfg["audio"]["silence_timeout"]
+INPUT_STALL_RESET_SECONDS = float(cfg["audio"].get("input_stall_reset_seconds", 1.5))
 PREFERRED_INPUT_DEVICE = str(cfg["audio"].get("input_device", "")).strip()
 
 # ── Realtime ──────────────────────────────────────────────────────────────────
@@ -1416,6 +1417,36 @@ def main():
     print("STT Ready!")
     sys.stdout.flush()
 
+    def reset_active_utterance(reason: str):
+        nonlocal recording_buffer, is_recording, silence_counter, current_t0, last_rt_update
+        had_audio = bool(is_recording or recording_buffer)
+        ring_buffer.clear()
+        recording_buffer = []
+        is_recording = False
+        silence_counter = 0
+        current_t0 = None
+        last_rt_update = 0.0
+        rt_cancel.set()
+        with state_lock:
+            state["speech_epoch"] += 1
+            state["finalized_epoch"] = state["speech_epoch"]
+            epoch = state["speech_epoch"]
+        if had_audio:
+            logger.info(f"[speech] reset active utterance epoch={epoch} reason={reason}")
+            dispatch({"type": "status", "value": "idle"})
+        try:
+            while True:
+                rt_queue.get_nowait()
+                rt_queue.task_done()
+        except queue.Empty:
+            pass
+        try:
+            while True:
+                final_queue.get_nowait()
+                final_queue.task_done()
+        except queue.Empty:
+            pass
+
     while True:
         try:
             read_started = time.perf_counter()
@@ -1423,6 +1454,8 @@ def main():
             read_ms = (time.perf_counter() - read_started) * 1000.0
             if read_ms > max(250.0, EXPECTED_CHUNK_MS * 4.0):
                 logger.warning(f"[audio] stream.read blocked for {read_ms:.0f}ms")
+            if is_recording and read_ms >= INPUT_STALL_RESET_SECONDS * 1000.0:
+                reset_active_utterance(reason=f"input_stall:{read_ms/1000.0:.2f}s")
             if last_error:
                 logger.info("Recovered.")
                 last_error = ""
@@ -1536,11 +1569,7 @@ def main():
             if sleeping:
                 if is_recording or recording_buffer:
                     debug_log("[audio] clearing active buffers while sleeping")
-                    ring_buffer.clear()
-                    recording_buffer = []
-                    is_recording = False
-                    silence_counter = 0
-                    current_t0 = None
+                    reset_active_utterance(reason="sleeping")
                 wake_detected = detect_wakeword(chunk)
                 if wake_detected and not wakeword_prev_detected:
                     debug_log(f"[wake] detected word={WAKEWORD} rms={chunk_rms:.1f}")
@@ -1548,11 +1577,7 @@ def main():
                 if wake_detected:
                     set_sleeping(False, reason=f"wake:{WAKEWORD}")
                     drop_chunks_after_wake = int(max(0.0, WAKEWORD_DROP_SECONDS) * RATE / CHUNK)
-                    ring_buffer.clear()
-                    recording_buffer = []
-                    is_recording = False
-                    silence_counter = 0
-                    current_t0 = None
+                    reset_active_utterance(reason="wake_transition")
                     debug_log(f"[wake] dropping_chunks_after_wake={drop_chunks_after_wake}")
                 else:
                     debug_log_every(
@@ -1660,6 +1685,8 @@ def main():
             if err != last_error:
                 logger.warning(f"Stream error: {err}. Retrying...")
             last_error = err
+            if is_recording or recording_buffer:
+                reset_active_utterance(reason=f"stream_error:{err}")
             time.sleep(0.5)
             try:
                 stream.stop_stream()
@@ -1675,6 +1702,8 @@ def main():
                 ring_buffer.clear()
                 recording_buffer.clear()
                 is_recording = False
+                silence_counter = 0
+                current_t0 = None
                 last_error = ""
             except Exception as e2:
                 logger.warning(f"[device] Recovery failed: {e2}")
