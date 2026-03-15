@@ -46,6 +46,7 @@ Current built-in command types:
 - type-at-cursor toggle words
 - enter trigger words
 - file-buffer release words
+- file-buffer clear words
 
 Commands are matched from partials (fast path) and finals (reliable path), using normalized exact matching for configured command phrases.
 
@@ -169,6 +170,7 @@ Relevant settings:
 - `output.file_buffer.clear_after_release`: clear the file after the `buffer` command types it
 - `voice_commands.buffer_release.words`: exact phrases that trigger release
 - `voice_commands.buffer_release.press_enter_after`: optionally press Enter after typing the buffer
+- `voice_commands.buffer_clear.words`: exact phrases that clear the buffer without typing it
 
 ### Debug logging
 

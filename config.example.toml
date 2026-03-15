@@ -124,6 +124,9 @@ words   = ["typing"] # Detected at the start of utterance
 enabled = false
 words   = ["buffer"] # Exact command: types the current file buffer at the cursor.
 press_enter_after = false
+[voice_commands.buffer_clear]
+enabled = false
+words   = ["clear"] # Exact command: clears the current file buffer without typing it.
 
 # ── Sleep / Wake ─────────────────────────────────────────────────────────────
 # Two modes:

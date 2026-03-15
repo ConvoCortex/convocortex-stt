@@ -123,7 +123,10 @@ words   = ["typing"] # Detected at the start of utterance
 [voice_commands.buffer_release]
 enabled = true
 words   = ["buffer"]
-press_enter_after = false
+press_enter_after = true
+[voice_commands.buffer_clear]
+enabled = true
+words   = ["clear"]
 
 # ── Sleep / Wake ─────────────────────────────────────────────────────────────
 # Two modes:

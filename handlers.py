@@ -93,6 +93,11 @@ def make_file_buffer(cfg: dict):
             combined = (existing + sep + text) if existing else text
             _write_buffer(combined)
 
+    def _clear_buffer():
+        with lock:
+            _write_buffer("")
+        logger.info("[file_buffer] cleared")
+
     def _release_buffer(press_enter_after: bool = False):
         if keyboard is None:
             logger.warning("[file_buffer] Release ignored: keyboard not installed.")
@@ -111,6 +116,9 @@ def make_file_buffer(cfg: dict):
 
     def file_buffer(event: dict):
         actions = event.get("actions", {}) or {}
+        if actions.get("clear_file_buffer"):
+            _clear_buffer()
+            return
         if actions.get("release_file_buffer"):
             _release_buffer(bool(actions.get("press_enter_after")))
             return
@@ -120,7 +128,7 @@ def make_file_buffer(cfg: dict):
         _append_buffer(text)
 
     file_buffer.__name__ = "file_buffer"
-    return file_buffer
+    return file_buffer, _clear_buffer
 
 
 # ── Clipboard replace ─────────────────────────────────────────────────────────
@@ -291,7 +299,11 @@ def register_all(cfg: dict, register) -> dict:
         logger.info(f"[handler] file_overwrite -> {out['file_overwrite']['path']}")
 
     if out["file_buffer"]["enabled"]:
-        register(make_file_buffer(cfg))
+        result = make_file_buffer(cfg)
+        if result:
+            fn, reset = result
+            register(fn)
+            extras["file_buffer_clear"] = reset
         logger.info(f"[handler] file_buffer -> {out['file_buffer']['path']}")
 
     if out["clipboard_replace"]["enabled"]:
