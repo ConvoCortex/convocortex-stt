@@ -255,6 +255,10 @@ class FeedbackAudio:
         self.output_device = output_device
         self._persisted_output_device_name = str(persisted_output_device_name or "").strip()
         self._persisted_output_device_host_api = persisted_output_device_host_api
+        self._preferred_output_device_name = str(output_device or "").strip() or self._persisted_output_device_name
+        self._preferred_output_device_host_api = (
+            None if str(output_device or "").strip() else persisted_output_device_host_api
+        )
         self._p_sfx = None
         self._p_silence = None
         self._output_device_index = None
@@ -346,13 +350,9 @@ class FeedbackAudio:
         if not self.enabled or self._p_sfx is None:
             return
 
-        desired_name = str(self.output_device or "").strip()
-        desired_host_api = None
-        source = "config"
-        if not desired_name:
-            desired_name = str(self._persisted_output_device_name or "").strip()
-            desired_host_api = self._persisted_output_device_host_api
-            source = "persisted"
+        desired_name = str(self._preferred_output_device_name or "").strip()
+        desired_host_api = self._preferred_output_device_host_api
+        source = "config" if str(self.output_device or "").strip() else "persisted"
 
         info = None
         if desired_name:
@@ -377,6 +377,18 @@ class FeedbackAudio:
     def get_output_device_state(self) -> dict:
         return {
             "idx": self._output_device_index,
+            "name": self._output_device_name,
+            "host_api": self._output_device_host_api,
+        }
+
+    def get_output_device_preference(self) -> dict:
+        preferred_name = str(self._preferred_output_device_name or "").strip()
+        if preferred_name:
+            return {
+                "name": preferred_name,
+                "host_api": self._preferred_output_device_host_api,
+            }
+        return {
             "name": self._output_device_name,
             "host_api": self._output_device_host_api,
         }
@@ -417,6 +429,8 @@ class FeedbackAudio:
             self._output_device_index = int(device_index)
             self._output_device_name = str(device_name or "").strip()
             self._output_device_host_api = host_api
+            self._preferred_output_device_name = self._output_device_name
+            self._preferred_output_device_host_api = host_api
         return True
 
     def _load_clip(self, torchaudio, path: str, volume: float = 1.0):
@@ -785,13 +799,18 @@ def main():
             sleeping = mode_state["sleeping"]
         with typing_lock:
             typing_enabled = typing_state["enabled"]
+        output_preference = (
+            feedback.get_output_device_preference()
+            if getattr(feedback, "enabled", False)
+            else {"name": "", "host_api": None}
+        )
         state_store.save({
             "sleeping": sleeping,
             "type_at_cursor_enabled": typing_enabled,
             "last_input_device_name": current_device_state[0]["name"],
             "last_input_device_host_api": current_device_state[0]["host_api"],
-            "last_output_device_name": current_output_device_state[0].get("name", ""),
-            "last_output_device_host_api": current_output_device_state[0].get("host_api", None),
+            "last_output_device_name": output_preference.get("name", ""),
+            "last_output_device_host_api": output_preference.get("host_api", None),
         })
 
     def set_sleeping(sleeping: bool, reason: str = ""):

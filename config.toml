@@ -79,11 +79,11 @@ clear_after_release = true
 
 # use either output.clipboard_replace or output.clipboard_accumulate, not both at once
 [output.clipboard_replace]
-enabled = true
+enabled = false
 
 # output.clipboard_accumulate accumulates text into clipboard until clipboard_accumulate_cycle hotkey is pressed, at which point it empties clipboard and starts accumulating again
 [output.clipboard_accumulate]
-enabled   = false
+enabled   = true
 separator = ""
 
 [output.type_at_cursor]
