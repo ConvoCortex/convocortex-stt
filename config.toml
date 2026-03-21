@@ -31,7 +31,7 @@ language       = "en"
 [audio]
 rate            = 16000  # sample rate — Whisper requires 16000, do not change
 chunk           = 512    # audio frames per VAD check — lower = more responsive, higher = more stable
-vad_threshold   = 0.4   # Silero VAD sensitivity 0–1 (lower = more sensitive, picks up more speech)
+vad_threshold   = 0.5   # Silero VAD sensitivity 0–1 (lower = more sensitive, picks up more speech)
 buffer_seconds  = 1.0   # ring buffer before speech start — captures audio before VAD triggers
 silence_timeout = 0.8   # seconds of silence before ending an utterance and firing final transcription
 input_stall_reset_seconds = 1.5 # if audio capture stalls this long mid-utterance, drop buffered speech instead of resuming it later
@@ -57,7 +57,7 @@ queue_size       = 10
 # Exact phrases to swallow completely from both partial and final output.
 # Matching is case-insensitive, ignores trailing punctuation, and treats hyphens like spaces.
 [filters]
-ignored_exact_phrases = ["you", "thank you", "okay", "ok", "hmm", "mm-hmm"]
+ignored_exact_phrases = ["you", "oh", "thank you", "okay", "ok", "hmm", "mm-hmm"]
 
 # ── Logging / Debugging ──────────────────────────────────────────────────────
 [logging]
@@ -163,7 +163,7 @@ stop_words = ["sleep", "mufasa"]
 
 [hotkeys]
 sleep_toggle         = "`"         # toggles sleeping <-> working
-sleep_toggle_suppress = false       # if true, swallows the sleep_toggle key so it does not reach other apps
+sleep_toggle_suppress = true       # if true, swallows the sleep_toggle key so it does not reach other apps
 typing_toggle        = "shift+f5"  # toggles type_at_cursor output
 input_device_cycle   = "shift+f6"  # cycles input device
 output_device_cycle  = "shift+f7"  # cycles audio feedback output device
