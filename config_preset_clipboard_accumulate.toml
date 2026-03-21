@@ -75,8 +75,8 @@ path    = "watched.txt"
 enabled = true
 path    = "buffer.txt"
 separator = ""
-clear_after_release = false
-reset_after_each_message = true
+clear_after_release = true
+reset_after_each_message = false
 
 # use either output.clipboard_replace or output.clipboard_accumulate, not both at once
 [output.clipboard_replace]
@@ -84,7 +84,7 @@ enabled = false
 
 # output.clipboard_accumulate accumulates text into clipboard until clipboard_accumulate_cycle hotkey is pressed, at which point it empties clipboard and starts accumulating again
 [output.clipboard_accumulate]
-enabled   = false
+enabled   = true
 separator = ""
 
 [output.type_at_cursor]
@@ -125,7 +125,7 @@ words   = ["typing"] # Detected at the start of utterance
 [voice_commands.buffer_release]
 enabled = true
 words   = ["buffer"]
-press_enter_after = false
+press_enter_after = true
 [voice_commands.buffer_clear]
 enabled = true
 words   = ["clear"]

@@ -70,6 +70,7 @@ def make_file_buffer(cfg: dict):
     path = Path(bcfg["path"])
     sep = bcfg["separator"]
     clear_after_release = bool(bcfg.get("clear_after_release", True))
+    reset_after_each_message = bool(bcfg.get("reset_after_each_message", False))
     lock = threading.Lock()
 
     try:
@@ -89,7 +90,7 @@ def make_file_buffer(cfg: dict):
 
     def _append_buffer(text: str):
         with lock:
-            existing = _read_buffer()
+            existing = "" if reset_after_each_message else _read_buffer()
             combined = (existing + sep + text) if existing else text
             _write_buffer(combined)
 

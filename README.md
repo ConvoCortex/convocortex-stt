@@ -169,6 +169,7 @@ This gives you a plain text working buffer you can keep open in an editor, adjus
 Relevant settings:
 - `output.file_buffer.separator`: separator inserted between finalized utterances
 - `output.file_buffer.clear_after_release`: clear the file after the `buffer` command types it
+- `output.file_buffer.reset_after_each_message`: clear the existing buffer before writing each new finalized utterance
 - `voice_commands.buffer_release.words`: exact phrases that trigger release
 - `voice_commands.buffer_release.press_enter_after`: optionally press Enter after typing the buffer
 - `voice_commands.buffer_clear.words`: exact phrases that clear the buffer without typing it

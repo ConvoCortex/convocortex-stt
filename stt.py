@@ -600,11 +600,36 @@ def main():
             logger.info("Initializing PyAudio...")
             p = pyaudio.PyAudio()
             resources['p_instance'] = p
+            host_api_names = {}
+            try:
+                for i in range(p.get_host_api_count()):
+                    api_info = p.get_host_api_info_by_index(i)
+                    host_api_names[i] = str(api_info.get("name", "")).strip()
+            except Exception:
+                host_api_names = {}
+
             def _iter_input_devices():
                 for i in range(p.get_device_count()):
                     info = p.get_device_info_by_index(i)
                     if info.get("maxInputChannels", 0) > 0:
                         yield info
+
+            def _host_api_label(host_api: int | None) -> str:
+                if host_api is None:
+                    return "unknown"
+                label = host_api_names.get(int(host_api), "")
+                return f"{label}#{host_api}" if label else str(host_api)
+
+            def _describe_input_device(info: dict | None) -> str:
+                if not info:
+                    return "<missing>"
+                name = str(info.get("name", "")).strip() or "<unnamed>"
+                index = info.get("index", "?")
+                host_api = _host_api_label(info.get("hostApi"))
+                default_rate = info.get("defaultSampleRate")
+                if default_rate:
+                    return f"{name} [idx={index} host={host_api} default_rate={default_rate:.0f}]"
+                return f"{name} [idx={index} host={host_api}]"
 
             def _find_device_by_name(name: str, host_api: int | None = None):
                 target = name.strip().lower()
@@ -672,7 +697,13 @@ def main():
             info = None
             stream = None
             startup_candidates = []
+            startup_failures = []
             seen_candidate_indices = set()
+
+            available_inputs = list(_iter_input_devices())
+            logger.debug("[device] Available input devices:")
+            for available_info in available_inputs:
+                logger.debug(f"[device]   {_describe_input_device(available_info)}")
 
             def _push_candidate(source: str, candidate: dict | None, missing_name: str = ""):
                 if candidate is None:
@@ -702,7 +733,9 @@ def main():
 
             for source, candidate in startup_candidates:
                 if not _supports_format(candidate):
+                    reason = f"unsupported at {RATE}Hz mono int16"
                     logger.warning(f"[device] {source} startup device unsupported: {candidate['name']}")
+                    startup_failures.append((source, candidate, reason))
                     continue
                 try:
                     stream, probe_read_ms, probe_rms = _open_and_probe_input(candidate)
@@ -714,9 +747,29 @@ def main():
                     break
                 except Exception as probe_error:
                     logger.warning(f"[device] {source} startup device rejected ({candidate['name']}): {probe_error}")
+                    startup_failures.append((source, candidate, str(probe_error)))
 
             if info is None or stream is None:
-                raise RuntimeError("No usable input device found at startup.")
+                summary_parts = []
+                for source, candidate, reason in startup_failures[:8]:
+                    summary_parts.append(
+                        f"{source.lower()} {_describe_input_device(candidate)} -> {reason}"
+                    )
+                if len(startup_failures) > 8:
+                    summary_parts.append(f"... {len(startup_failures) - 8} more")
+                if startup_failures and all(
+                    ("Unanticipated host error" in reason) or ("Invalid device" in reason)
+                    for _, _, reason in startup_failures
+                ):
+                    summary_parts.append(
+                        "Windows is exposing input devices but PortAudio cannot open any of them; "
+                        "check microphone privacy permissions, device busy/exclusive-mode conflicts, "
+                        "Bluetooth hands-free routing, or reconnect the device."
+                    )
+                raise RuntimeError(
+                    "No usable input device found at startup. "
+                    + ("; ".join(summary_parts) if summary_parts else "No startup candidates were available.")
+                )
 
             resources['stream'] = stream
             resources['dev_name'] = info['name']
