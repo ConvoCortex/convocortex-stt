@@ -49,6 +49,12 @@ max_chunks       = 50
 # queue_size: max pending partial jobs — oldest dropped if full (keeps latency low)
 queue_size       = 10
 
+# ── Transcript filters ───────────────────────────────────────────────────────
+# Exact phrases to swallow completely from both partial and final output.
+# Matching is case-insensitive, ignores trailing punctuation, and treats hyphens like spaces.
+[filters]
+ignored_exact_phrases = ["you", "thank you", "okay", "ok", "hmm", "mm-hmm"]
+
 # ── Logging / Debugging ──────────────────────────────────────────────────────
 [logging]
 # debug: when true, detailed runtime traces are written to `file`

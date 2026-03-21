@@ -44,6 +44,12 @@ def _normalize_command_phrase(value: str) -> str:
     return str(value).strip().lower().strip(".,!?;:")
 
 
+def _normalize_ignored_transcript(value: str) -> str:
+    normalized = str(value).strip().lower().replace("-", " ")
+    normalized = re.sub(r"\s+", " ", normalized)
+    return normalized.strip(" \t\r\n.,!?;:'\"()[]{}")
+
+
 cfg = config.load()
 
 # ── Logging ───────────────────────────────────────────────────────────────────
@@ -210,6 +216,14 @@ FEEDBACK_OUTPUT_DEVICE = str(_fb_cfg.get("output_device", "")).strip()
 EXPECTED_CHUNK_MS = (CHUNK / RATE) * 1000.0
 INPUT_PROBE_READ_LIMIT_MS = max(400.0, EXPECTED_CHUNK_MS * 8.0)
 INPUT_PROBE_READS = 2
+IGNORED_TRANSCRIPTS = {
+    normalized
+    for normalized in (
+        _normalize_ignored_transcript(w)
+        for w in cfg.get("filters", {}).get("ignored_exact_phrases", [])
+    )
+    if normalized
+}
 
 # ── Voice commands (minimal) ──────────────────────────────────────────────────
 VOICE_COMMANDS_ENABLED = bool(cfg.get("voice_commands", {}).get("enabled", False))
@@ -1256,6 +1270,11 @@ def main(args=None):
 
         return False
 
+    def should_ignore_transcript(text: str) -> bool:
+        if not IGNORED_TRANSCRIPTS:
+            return False
+        return _normalize_ignored_transcript(text) in IGNORED_TRANSCRIPTS
+
     def final_worker():
         while True:
             try:
@@ -1278,6 +1297,8 @@ def main(args=None):
                 t = time.time() - t0
 
                 if apply_exact_voice_command(raw_text, epoch, t, inf_ms, source="final"):
+                    continue
+                if should_ignore_transcript(raw_text):
                     continue
 
                 text, actions = apply_voice_commands(raw_text)
@@ -1374,6 +1395,8 @@ def main(args=None):
                         continue
 
                 if apply_exact_voice_command(text, epoch, t, inf_ms, source="partial"):
+                    continue
+                if should_ignore_transcript(text):
                     continue
 
                 if text:
