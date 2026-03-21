@@ -181,6 +181,7 @@ RT_QUEUE_SIZE     = cfg["realtime"]["queue_size"]
 _sw_cfg = cfg.get("sleep_wake", {})
 SLEEP_START_SLEEPING = bool(_sw_cfg.get("start_sleeping", True))
 SLEEP_HOTKEY_TOGGLE = str(cfg["hotkeys"].get("sleep_toggle", "")).strip()
+SLEEP_HOTKEY_SUPPRESS = bool(cfg["hotkeys"].get("sleep_toggle_suppress", False))
 TYPE_TOGGLE_HOTKEY = str(cfg["hotkeys"].get("typing_toggle", "")).strip()
 CONSOLE_TOGGLE_HOTKEY = str(cfg["hotkeys"].get("console_toggle", "")).strip()
 SLEEP_STOP_WORDS = [
@@ -1419,8 +1420,11 @@ def main(args=None):
                 with mode_lock:
                     sleeping = mode_state["sleeping"]
                 set_sleeping(not sleeping, reason="hotkey")
-            kb.add_hotkey(SLEEP_HOTKEY_TOGGLE, _sleep_toggle)
-            logger.info(f"[hotkey] sleep_toggle = {SLEEP_HOTKEY_TOGGLE}")
+            kb.add_hotkey(SLEEP_HOTKEY_TOGGLE, _sleep_toggle, suppress=SLEEP_HOTKEY_SUPPRESS)
+            logger.info(
+                f"[hotkey] sleep_toggle = {SLEEP_HOTKEY_TOGGLE}"
+                f" suppress={SLEEP_HOTKEY_SUPPRESS}"
+            )
 
         if TYPE_TOGGLE_HOTKEY:
             kb.add_hotkey(TYPE_TOGGLE_HOTKEY, lambda: toggle_typing_enabled(reason="hotkey"))

@@ -157,6 +157,7 @@ stop_words = ["sleep", "mufasa"]
 
 [hotkeys]
 sleep_toggle         = "`"         # toggles sleeping <-> working
+sleep_toggle_suppress = false       # if true, swallows the sleep_toggle key so it does not reach other apps
 typing_toggle        = "shift+f5"  # toggles type_at_cursor output
 input_device_cycle   = "shift+f6"  # cycles input device
 output_device_cycle  = "shift+f7"  # cycles audio feedback output device

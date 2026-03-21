@@ -152,6 +152,7 @@ uv run python stt.py --background
 ```
 
 On Windows, the default `hotkeys.console_toggle = "shift+f8"` hides/shows that same console window. When you bring it back, `Ctrl+C` kills the process as usual.
+If you want the default backtick sleep hotkey to be intercepted instead of typed into the active app, set `hotkeys.sleep_toggle_suppress = true`.
 
 ## Windows Startup Shortcut
 
