@@ -35,8 +35,11 @@ vad_threshold   = 0.4   # Silero VAD sensitivity 0–1 (lower = more sensitive, 
 buffer_seconds  = 1.0   # ring buffer before speech start — captures audio before VAD triggers
 silence_timeout = 0.8   # seconds of silence before ending an utterance and firing final transcription
 input_stall_reset_seconds = 1.5 # if audio capture stalls this long mid-utterance, drop buffered speech instead of resuming it later
-# startup input device override by exact device name; empty = use remembered device then OS default
+# startup input device override by exact device name; empty = use device profiles/remembered device/default
 input_device    = ""
+device_profiles_file = "device-profiles.json"
+# auto = prompt only when the profiles file is missing, always = prompt every startup, never = skip the prompt
+device_setup_mode = "auto"
 
 [realtime]
 # check_interval: how often (seconds) a partial transcription is triggered during speech

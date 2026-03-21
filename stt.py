@@ -14,12 +14,27 @@ import threading
 import logging
 import os
 from collections import deque
+from pathlib import Path
 
 import numpy as np
 import pyaudio
 import pvporcupine
 from faster_whisper import WhisperModel
 
+from audio_devices import (
+    ALIAS_DEVICE_NAMES,
+    available_input_devices,
+    available_output_devices,
+    describe_device,
+    host_api_names,
+    load_profiles,
+    matches_any_profile,
+    open_input_session,
+    order_devices_by_profiles,
+    probe_output_device,
+    profile_matches,
+    save_profiles,
+)
 import config
 import state as state_store
 
@@ -85,6 +100,10 @@ BUFFER_SECONDS  = cfg["audio"]["buffer_seconds"]
 SILENCE_TIMEOUT = cfg["audio"]["silence_timeout"]
 INPUT_STALL_RESET_SECONDS = float(cfg["audio"].get("input_stall_reset_seconds", 1.5))
 PREFERRED_INPUT_DEVICE = str(cfg["audio"].get("input_device", "")).strip()
+DEVICE_PROFILES_PATH = Path(str(cfg["audio"].get("device_profiles_file", "device-profiles.json")).strip() or "device-profiles.json")
+DEVICE_SETUP_MODE = str(cfg["audio"].get("device_setup_mode", "auto")).strip().lower()
+if DEVICE_SETUP_MODE not in {"auto", "always", "never"}:
+    DEVICE_SETUP_MODE = "auto"
 
 # ── Realtime ──────────────────────────────────────────────────────────────────
 RT_CHECK_INTERVAL = cfg["realtime"]["check_interval"]
@@ -194,6 +213,129 @@ def debug_log_every(key: str, seconds: float, message: str):
     if now - _debug_timestamps.get(key, 0.0) >= seconds:
         _debug_timestamps[key] = now
         logger.debug(message)
+
+
+
+def _prompt_profile_selection(label: str, candidates: list[dict], existing_profiles: list[dict]) -> list[dict]:
+    existing_indexes = []
+    for idx, candidate in enumerate(candidates, start=1):
+        if any(profile_matches(candidate["info"], profile) for profile in existing_profiles):
+            existing_indexes.append(str(idx))
+    default_text = ",".join(existing_indexes)
+
+    print()
+    print(f"[device-setup] Select {label} devices to allow for startup/cycling.")
+    print("[device-setup] Enter comma-separated numbers in your preferred cycle order.")
+    print("[device-setup] Press Enter to keep the current selection. Enter 'none' for no devices.")
+    for idx, candidate in enumerate(candidates, start=1):
+        status = "usable" if candidate.get("usable", True) else f"unusable: {candidate.get('reason', 'unknown')}"
+        print(f"  {idx}. {candidate['description']} [{status}]")
+
+    while True:
+        prompt = f"{label} selection"
+        if default_text:
+            prompt += f" [{default_text}]"
+        prompt += ": "
+        try:
+            raw = input(prompt)
+        except EOFError:
+            return existing_profiles
+        raw = raw.strip()
+        if not raw:
+            if default_text:
+                raw = default_text
+            else:
+                print(f"[device-setup] No {label} devices selected.")
+                return []
+        if raw.lower() in {"none", "off", "disable"}:
+            return []
+        parts = [part.strip() for part in raw.split(",") if part.strip()]
+        chosen = []
+        seen = set()
+        ok = True
+        for part in parts:
+            if not part.isdigit():
+                ok = False
+                break
+            pos = int(part)
+            if pos < 1 or pos > len(candidates):
+                ok = False
+                break
+            if pos in seen:
+                continue
+            seen.add(pos)
+            chosen.append(candidates[pos - 1]["profile"])
+        if ok:
+            return chosen
+        print("[device-setup] Invalid selection. Use numbers like 1,3")
+
+
+def _maybe_run_device_setup() -> dict:
+    profiles = load_profiles(DEVICE_PROFILES_PATH)
+    needs_setup = (
+        DEVICE_SETUP_MODE == "always"
+        or (DEVICE_SETUP_MODE == "auto" and not DEVICE_PROFILES_PATH.exists())
+    )
+    if not needs_setup:
+        return profiles
+
+    logger.info(f"[device-setup] Starting interactive device setup ({DEVICE_SETUP_MODE}).")
+    p = pyaudio.PyAudio()
+    try:
+        api_names = host_api_names(p)
+        existing_inputs = profiles.get("inputs", [])
+        existing_outputs = profiles.get("outputs", [])
+        input_candidates = []
+        for info in available_input_devices(p):
+            reason = "ok"
+            usable = True
+            try:
+                session, _, _ = open_input_session(
+                    p,
+                    info,
+                    stt_rate=RATE,
+                    chunk_frames=CHUNK,
+                    probe_reads=1,
+                    probe_limit_ms=INPUT_PROBE_READ_LIMIT_MS,
+                )
+                session.close()
+            except Exception as exc:
+                usable = False
+                reason = str(exc)
+            input_candidates.append({
+                "info": info,
+                "profile": {"name": str(info.get("name", "")).strip(), "host_api": info.get("hostApi")},
+                "description": describe_device(info, api_names),
+                "usable": usable,
+                "reason": reason,
+            })
+        output_candidates = []
+        for info in available_output_devices(p):
+            usable, reason = probe_output_device(p, info)
+            output_candidates.append({
+                "info": info,
+                "profile": {"name": str(info.get("name", "")).strip(), "host_api": info.get("hostApi")},
+                "description": describe_device(info, api_names),
+                "usable": usable,
+                "reason": reason,
+            })
+
+        selected_inputs = _prompt_profile_selection("input", input_candidates, existing_inputs)
+        selected_outputs = _prompt_profile_selection("output", output_candidates, existing_outputs)
+        profiles = {"inputs": selected_inputs, "outputs": selected_outputs}
+        save_profiles(DEVICE_PROFILES_PATH, profiles)
+        logger.info(f"[device-setup] Saved profiles to {DEVICE_PROFILES_PATH}")
+        return profiles
+    finally:
+        try:
+            p.terminate()
+        except Exception:
+            pass
+
+
+DEVICE_PROFILES = _maybe_run_device_setup()
+APPROVED_INPUT_PROFILES = DEVICE_PROFILES.get("inputs", [])
+APPROVED_OUTPUT_PROFILES = DEVICE_PROFILES.get("outputs", [])
 
 # ── Event dispatch ────────────────────────────────────────────────────────────
 # Handlers are registered at startup. Each receives every event dict.
@@ -600,110 +742,33 @@ def main():
             logger.info("Initializing PyAudio...")
             p = pyaudio.PyAudio()
             resources['p_instance'] = p
-            host_api_names = {}
-            try:
-                for i in range(p.get_host_api_count()):
-                    api_info = p.get_host_api_info_by_index(i)
-                    host_api_names[i] = str(api_info.get("name", "")).strip()
-            except Exception:
-                host_api_names = {}
-
-            def _iter_input_devices():
-                for i in range(p.get_device_count()):
-                    info = p.get_device_info_by_index(i)
-                    if info.get("maxInputChannels", 0) > 0:
-                        yield info
-
-            def _host_api_label(host_api: int | None) -> str:
-                if host_api is None:
-                    return "unknown"
-                label = host_api_names.get(int(host_api), "")
-                return f"{label}#{host_api}" if label else str(host_api)
-
-            def _describe_input_device(info: dict | None) -> str:
-                if not info:
-                    return "<missing>"
-                name = str(info.get("name", "")).strip() or "<unnamed>"
-                index = info.get("index", "?")
-                host_api = _host_api_label(info.get("hostApi"))
-                default_rate = info.get("defaultSampleRate")
-                if default_rate:
-                    return f"{name} [idx={index} host={host_api} default_rate={default_rate:.0f}]"
-                return f"{name} [idx={index} host={host_api}]"
+            api_names = host_api_names(p)
 
             def _find_device_by_name(name: str, host_api: int | None = None):
-                target = name.strip().lower()
+                target = str(name or "").strip().lower()
                 if not target:
                     return None
-                for info in _iter_input_devices():
-                    if host_api is not None and info.get("hostApi") != host_api:
+                for candidate_info in available_inputs:
+                    if host_api is not None and candidate_info.get("hostApi") != host_api:
                         continue
-                    if str(info.get("name", "")).strip().lower() == target:
-                        return info
+                    if str(candidate_info.get("name", "")).strip().lower() == target:
+                        return candidate_info
                 return None
 
-            def _supports_format(info: dict) -> bool:
-                try:
-                    p.is_format_supported(
-                        RATE,
-                        input_device=int(info["index"]),
-                        input_channels=1,
-                        input_format=pyaudio.paInt16
-                    )
-                    return True
-                except Exception:
-                    return False
+            available_inputs = list(available_input_devices(p, include_alias=True))
+            logger.debug("[device] Available input devices:")
+            for available_info in available_inputs:
+                logger.debug(f"[device]   {describe_device(available_info, api_names)}")
 
-            def _open_and_probe_input(info: dict):
-                stream = None
-                open_kwargs = dict(
-                    format=pyaudio.paInt16,
-                    channels=1,
-                    rate=RATE,
-                    input=True,
-                    frames_per_buffer=CHUNK,
-                    input_device_index=int(info["index"]),
-                )
-                try:
-                    stream = p.open(**open_kwargs)
-                    max_read_ms = 0.0
-                    last_chunk = None
-                    for _ in range(INPUT_PROBE_READS):
-                        started = time.perf_counter()
-                        probe_data = stream.read(CHUNK, exception_on_overflow=False)
-                        read_ms = (time.perf_counter() - started) * 1000.0
-                        max_read_ms = max(max_read_ms, read_ms)
-                        last_chunk = probe_data
-                    rms = 0
-                    if last_chunk:
-                        probe_chunk = np.frombuffer(last_chunk, dtype=np.int16).astype(np.float32)
-                        if len(probe_chunk):
-                            rms = int(np.sqrt(np.mean(probe_chunk ** 2)))
-                    if max_read_ms > INPUT_PROBE_READ_LIMIT_MS:
-                        raise RuntimeError(
-                            f"probe read too slow ({max_read_ms:.0f}ms > {INPUT_PROBE_READ_LIMIT_MS:.0f}ms)"
-                        )
-                    return stream, max_read_ms, rms
-                except Exception:
-                    try:
-                        if stream is not None:
-                            stream.stop_stream()
-                            stream.close()
-                    except Exception:
-                        pass
-                    raise
-
-            default_info = p.get_default_input_device_info()
+            try:
+                default_info = p.get_default_input_device_info()
+            except Exception:
+                default_info = None
             info = None
-            stream = None
+            input_session = None
             startup_candidates = []
             startup_failures = []
             seen_candidate_indices = set()
-
-            available_inputs = list(_iter_input_devices())
-            logger.debug("[device] Available input devices:")
-            for available_info in available_inputs:
-                logger.debug(f"[device]   {_describe_input_device(available_info)}")
 
             def _push_candidate(source: str, candidate: dict | None, missing_name: str = ""):
                 if candidate is None:
@@ -716,44 +781,57 @@ def main():
                 seen_candidate_indices.add(idx)
                 startup_candidates.append((source, candidate))
 
-            if PREFERRED_INPUT_DEVICE:
-                _push_candidate("Configured", _find_device_by_name(PREFERRED_INPUT_DEVICE), PREFERRED_INPUT_DEVICE)
-            else:
-                persisted_name = str(_persisted.get("last_input_device_name") or "").strip()
-                persisted_host_api = _persisted.get("last_input_device_host_api")
+            persisted_name = str(_persisted.get("last_input_device_name") or "").strip()
+            persisted_host_api = _persisted.get("last_input_device_host_api")
+            if APPROVED_INPUT_PROFILES:
+                approved_infos = order_devices_by_profiles(available_inputs, APPROVED_INPUT_PROFILES)
                 if persisted_name:
+                    persisted_info = _find_device_by_name(persisted_name, persisted_host_api)
+                    if persisted_info and matches_any_profile(persisted_info, APPROVED_INPUT_PROFILES):
+                        _push_candidate("Persisted", persisted_info, persisted_name)
+                for approved_info in approved_infos:
+                    _push_candidate("Profile", approved_info)
+            else:
+                if PREFERRED_INPUT_DEVICE:
+                    _push_candidate("Configured", _find_device_by_name(PREFERRED_INPUT_DEVICE), PREFERRED_INPUT_DEVICE)
+                elif persisted_name:
                     persisted_info = _find_device_by_name(persisted_name, persisted_host_api)
                     if not persisted_info:
                         persisted_info = _find_device_by_name(persisted_name)
                     _push_candidate("Persisted", persisted_info, persisted_name)
-
-            _push_candidate("Default", default_info)
-            for extra_info in _iter_input_devices():
-                _push_candidate("Fallback", extra_info)
+                _push_candidate("Default", default_info)
+                for extra_info in available_inputs:
+                    _push_candidate("Fallback", extra_info)
 
             for source, candidate in startup_candidates:
-                if not _supports_format(candidate):
-                    reason = f"unsupported at {RATE}Hz mono int16"
-                    logger.warning(f"[device] {source} startup device unsupported: {candidate['name']}")
-                    startup_failures.append((source, candidate, reason))
-                    continue
                 try:
-                    stream, probe_read_ms, probe_rms = _open_and_probe_input(candidate)
+                    candidate_session, probe_read_ms, probe_rms = open_input_session(
+                        p,
+                        candidate,
+                        stt_rate=RATE,
+                        chunk_frames=CHUNK,
+                        probe_reads=INPUT_PROBE_READS,
+                        probe_limit_ms=INPUT_PROBE_READ_LIMIT_MS,
+                    )
+                    input_session = candidate_session
                     info = candidate
+                    capture_note = ""
+                    if int(candidate_session.capture_rate) != int(RATE):
+                        capture_note = f" capture_rate={candidate_session.capture_rate}"
                     logger.info(
                         f"[device] Startup from {source.lower()}: {candidate['name']} "
-                        f"(probe_read_ms={probe_read_ms:.0f}, rms={probe_rms})"
+                        f"(probe_read_ms={probe_read_ms:.0f}, rms={probe_rms}{capture_note})"
                     )
                     break
                 except Exception as probe_error:
                     logger.warning(f"[device] {source} startup device rejected ({candidate['name']}): {probe_error}")
                     startup_failures.append((source, candidate, str(probe_error)))
 
-            if info is None or stream is None:
+            if info is None or input_session is None:
                 summary_parts = []
                 for source, candidate, reason in startup_failures[:8]:
                     summary_parts.append(
-                        f"{source.lower()} {_describe_input_device(candidate)} -> {reason}"
+                        f"{source.lower()} {describe_device(candidate, api_names)} -> {reason}"
                     )
                 if len(startup_failures) > 8:
                     summary_parts.append(f"... {len(startup_failures) - 8} more")
@@ -771,11 +849,15 @@ def main():
                     + ("; ".join(summary_parts) if summary_parts else "No startup candidates were available.")
                 )
 
-            resources['stream'] = stream
+            resources['input_session'] = input_session
+            resources['stream'] = input_session.stream
             resources['dev_name'] = info['name']
             resources['dev_idx'] = int(info['index'])
             resources['host_api'] = info['hostApi']
-            logger.info(f"Audio: {info['name']}")
+            resources['capture_rate'] = int(input_session.capture_rate)
+            logger.info(
+                f"Audio: {info['name']} (capture_rate={int(input_session.capture_rate)}Hz -> stt_rate={RATE}Hz)"
+            )
         except Exception as e:
             record_load_error(f"Audio stack error: {e}")
 
@@ -795,6 +877,7 @@ def main():
     final_model = resources['final_model']
     rt_model    = resources['realtime_model']
     vad         = resources['vad']
+    input_session = resources['input_session']
     stream      = resources['stream']
     p_instance  = resources['p_instance']
     dev_name    = resources['dev_name']
@@ -818,6 +901,31 @@ def main():
         persisted_output_device_name=persisted_output_name,
         persisted_output_device_host_api=persisted_output_host_api,
     )
+
+    if getattr(feedback, "enabled", False) and APPROVED_OUTPUT_PROFILES:
+        approved_output_infos = order_devices_by_profiles(
+            available_output_devices(p_instance, include_alias=True),
+            APPROVED_OUTPUT_PROFILES,
+        )
+        preferred_output_infos = []
+        for candidate_info in approved_output_infos:
+            if (
+                str(candidate_info.get("name", "")).strip() == persisted_output_name
+                and candidate_info.get("hostApi") == persisted_output_host_api
+            ):
+                preferred_output_infos.append(candidate_info)
+                break
+        for candidate_info in approved_output_infos:
+            if candidate_info not in preferred_output_infos:
+                preferred_output_infos.append(candidate_info)
+        for candidate_info in preferred_output_infos:
+            if feedback.try_set_output_device_index(
+                int(candidate_info["index"]),
+                str(candidate_info.get("name", "")),
+                candidate_info.get("hostApi"),
+            ):
+                logger.info(f"[feedback] Approved output selected: {candidate_info['name']}")
+                break
 
     # ── State ─────────────────────────────────────────────────────────────────
     final_queue   = queue.Queue()
@@ -1318,125 +1426,73 @@ def main():
     # The hotkey thread only writes to _pending_device; the main loop consumes it.
 
     current_device_idx = [resources['dev_idx']]
-    _pending_device    = [None]   # (idx, name) set by hotkey, consumed by main loop
-    _host_api          = resources['host_api']  # only cycle within this host API
-    _bad_devices       = set()    # device indices that failed to open; skipped in cycle
-    _ALIAS_NAMES       = {'Primary Sound Capture Driver', 'Microsoft Sound Mapper',
-                          'Microsoft Sound Mapper - Input', 'Microsoft Sound Mapper - Output'}
+    current_capture_rate = [resources.get('capture_rate', RATE)]
+    _pending_device    = [None]   # (idx, name, info) set by hotkey, consumed by main loop
+    _bad_devices       = set()    # (name, host_api) tuples that failed to open; skipped in cycle
     _bad_output_devices = set()
-    _pending_output_device = [None]  # (idx, name) set by hotkey, consumed by main loop
+    _pending_output_device = [None]  # (idx, name, info) set by hotkey, consumed by main loop
 
     def _enumerate_input_devices():
         """Read-only enumeration — safe to call from any thread."""
+        infos = available_input_devices(p_instance, include_alias=True)
+        if APPROVED_INPUT_PROFILES:
+            infos = order_devices_by_profiles(infos, APPROVED_INPUT_PROFILES)
         devices = []
-        seen_names = set()
-        for i in range(p_instance.get_device_count()):
-            info = p_instance.get_device_info_by_index(i)
-            if info['maxInputChannels'] <= 0:
+        seen = set()
+        for info in infos:
+            key = (str(info.get('name', '')).strip(), info.get('hostApi'))
+            if key in _bad_devices:
                 continue
-            if info['hostApi'] != _host_api:
+            if not APPROVED_INPUT_PROFILES and key[0] in ALIAS_DEVICE_NAMES:
                 continue
-            name = info['name']
-            if name in _ALIAS_NAMES or name in seen_names or i in _bad_devices:
+            if key in seen:
                 continue
-            try:
-                p_instance.is_format_supported(
-                    RATE, input_device=i,
-                    input_channels=1, input_format=pyaudio.paInt16
-                )
-            except Exception:
-                continue
-            seen_names.add(name)
-            devices.append((i, name))
+            seen.add(key)
+            devices.append((int(info['index']), key[0], info))
         return devices
 
     def _enumerate_output_devices():
         """Read-only enumeration — safe to call from any thread."""
-        if not getattr(feedback, "enabled", False):
+        if not getattr(feedback, 'enabled', False):
             return []
+        infos = available_output_devices(p_instance, include_alias=True)
+        if APPROVED_OUTPUT_PROFILES:
+            infos = order_devices_by_profiles(infos, APPROVED_OUTPUT_PROFILES)
         devices = []
-        seen_names = set()
-        probe = None
-        try:
-            probe = feedback.get_probe_format()
-        except Exception:
-            probe = None
-        probe_rate = int(probe[0]) if probe else 44100
-        probe_channels = int(probe[1]) if probe else 2
-        out_state = current_output_device_state[0] if current_output_device_state else {}
-        out_host_api = out_state.get("host_api", None)
-        if out_host_api is None:
-            try:
-                out_host_api = p_instance.get_default_output_device_info().get("hostApi")
-            except Exception:
-                out_host_api = None
-        for i in range(p_instance.get_device_count()):
-            info = p_instance.get_device_info_by_index(i)
-            if info.get("maxOutputChannels", 0) <= 0:
+        seen = set()
+        probe_format = feedback.get_probe_format() if hasattr(feedback, 'get_probe_format') else None
+        for info in infos:
+            key = (str(info.get('name', '')).strip(), info.get('hostApi'))
+            if key in _bad_output_devices:
                 continue
-            if out_host_api is not None and info.get("hostApi") != out_host_api:
+            if not APPROVED_OUTPUT_PROFILES and key[0] in ALIAS_DEVICE_NAMES:
                 continue
-            name = info.get("name", "")
-            if name in _ALIAS_NAMES or name in seen_names or i in _bad_output_devices:
+            if key in seen:
                 continue
-            try:
-                p_instance.is_format_supported(
-                    probe_rate,
-                    output_device=i,
-                    output_channels=probe_channels,
-                    output_format=pyaudio.paFloat32
-                )
-            except Exception:
+            usable, _ = probe_output_device(p_instance, info, probe_format)
+            if not usable:
                 continue
-            seen_names.add(name)
-            devices.append((i, name))
+            seen.add(key)
+            devices.append((int(info['index']), key[0], info))
         return devices
 
-    def _open_and_probe_runtime_input(device_index: int, device_name: str):
-        stream_handle = None
-        try:
-            stream_handle = p_instance.open(
-                format=pyaudio.paInt16,
-                channels=1,
-                rate=RATE,
-                input=True,
-                frames_per_buffer=CHUNK,
-                input_device_index=int(device_index),
-            )
-            max_read_ms = 0.0
-            last_chunk = None
-            for _ in range(INPUT_PROBE_READS):
-                started = time.perf_counter()
-                probe_data = stream_handle.read(CHUNK, exception_on_overflow=False)
-                read_ms = (time.perf_counter() - started) * 1000.0
-                max_read_ms = max(max_read_ms, read_ms)
-                last_chunk = probe_data
-            rms = 0
-            if last_chunk:
-                probe_chunk = np.frombuffer(last_chunk, dtype=np.int16).astype(np.float32)
-                if len(probe_chunk):
-                    rms = int(np.sqrt(np.mean(probe_chunk ** 2)))
-            if max_read_ms > INPUT_PROBE_READ_LIMIT_MS:
-                raise RuntimeError(
-                    f"probe read too slow ({max_read_ms:.0f}ms > {INPUT_PROBE_READ_LIMIT_MS:.0f}ms)"
-                )
-            return stream_handle, max_read_ms, rms
-        except Exception:
-            try:
-                if stream_handle is not None:
-                    stream_handle.stop_stream()
-                    stream_handle.close()
-            except Exception:
-                pass
-            raise
+    def _open_and_probe_runtime_input(info: dict):
+        return open_input_session(
+            p_instance,
+            info,
+            stt_rate=RATE,
+            chunk_frames=CHUNK,
+            probe_reads=INPUT_PROBE_READS,
+            probe_limit_ms=INPUT_PROBE_READ_LIMIT_MS,
+        )
 
     def cycle_input_device():
         """Hotkey handler — only signals the main loop, never touches the stream."""
         if _pending_device[0] is not None:
-            return  # previous cycle not yet consumed
+            return
         devices = _enumerate_input_devices()
         if len(devices) <= 1:
-            logger.info("[device] Only one input device available.")
+            logger.info('[device] Only one input device available.')
             return
         idxs = [d[0] for d in devices]
         try:
@@ -1447,20 +1503,20 @@ def main():
 
     def cycle_output_device():
         """Hotkey handler — only signals the main loop, never touches PyAudio."""
-        if not getattr(feedback, "enabled", False):
-            logger.info("[feedback] Output device cycle ignored (feedback disabled).")
+        if not getattr(feedback, 'enabled', False):
+            logger.info('[feedback] Output device cycle ignored (feedback disabled).')
             return
         if _pending_output_device[0] is not None:
-            return  # previous cycle not yet consumed
+            return
         devices = _enumerate_output_devices()
         if len(devices) <= 1:
-            logger.info("[feedback] Only one output device available.")
+            logger.info('[feedback] Only one output device available.')
             return
         idxs = [d[0] for d in devices]
-        cur_idx = current_output_device_state[0].get("idx", None)
+        cur_idx = current_output_device_state[0].get('idx', None)
         if cur_idx is None:
             try:
-                cur_idx = int(p_instance.get_default_output_device_info().get("index"))
+                cur_idx = int(p_instance.get_default_output_device_info().get('index'))
             except Exception:
                 cur_idx = None
         try:
@@ -1521,9 +1577,7 @@ def main():
 
     while True:
         try:
-            read_started = time.perf_counter()
-            data = stream.read(CHUNK, exception_on_overflow=False)
-            read_ms = (time.perf_counter() - read_started) * 1000.0
+            data, read_ms = input_session.read_chunk()
             if read_ms > max(250.0, EXPECTED_CHUNK_MS * 4.0):
                 logger.warning(f"[audio] stream.read blocked for {read_ms:.0f}ms")
             if is_recording and read_ms >= INPUT_STALL_RESET_SECONDS * 1000.0:
@@ -1546,20 +1600,29 @@ def main():
                 )
                 for _attempt in range(len(_all_devices)):
                     target_pos = (_start_pos + _attempt) % len(_all_devices)
-                    next_idx, next_name = _all_devices[target_pos]
+                    next_idx, next_name, next_info = _all_devices[target_pos]
                     if next_idx in _tried:
                         continue
                     _tried.add(next_idx)
                     prev_idx = current_device_idx[0]
+                    prev_info = None
                     try:
-                        stream.stop_stream()
-                        stream.close()
-                        stream, probe_read_ms, rms = _open_and_probe_runtime_input(next_idx, next_name)
+                        prev_info = p_instance.get_device_info_by_index(int(prev_idx))
+                    except Exception:
+                        prev_info = None
+                    try:
+                        input_session.close()
+                        input_session, probe_read_ms, rms = _open_and_probe_runtime_input(next_info)
+                        stream = input_session.stream
                         current_device_idx[0] = next_idx
-                        current_device_state[0] = {"name": next_name, "host_api": _host_api}
+                        current_capture_rate[0] = int(input_session.capture_rate)
+                        current_device_state[0] = {"name": next_name, "host_api": next_info.get("hostApi")}
                         wakeword_buffer = np.array([], dtype=np.int16)
                         ring_buffer.clear(); recording_buffer.clear(); is_recording = False
-                        logger.info(f"[device] Cycled to: {next_name} (probe_read_ms={probe_read_ms:.0f}, rms={rms})")
+                        logger.info(
+                            f"[device] Cycled to: {next_name} "
+                            f"(probe_read_ms={probe_read_ms:.0f}, rms={rms}, capture_rate={input_session.capture_rate})"
+                        )
                         dispatch({"type": "system", "event": "device_changed", "device": next_name})
                         if target_pos == 0:
                             feedback.play_off()
@@ -1568,21 +1631,16 @@ def main():
                         persist()
                         break
                     except Exception as e:
-                        _bad_devices.add(next_idx)
+                        _bad_devices.add((str(next_name), next_info.get("hostApi")))
                         logger.warning(f"[device] Skipping {next_name}: {e}")
-                        try: stream.stop_stream(); stream.close()
-                        except: pass
                         try:
-                            stream = p_instance.open(
-                                format=pyaudio.paInt16,
-                                channels=1,
-                                rate=RATE,
-                                input=True,
-                                frames_per_buffer=CHUNK,
-                                input_device_index=prev_idx,
-                            )
-                            current_device_idx[0] = prev_idx
-                        except: pass
+                            if prev_info is not None:
+                                input_session, _, _ = _open_and_probe_runtime_input(prev_info)
+                                stream = input_session.stream
+                                current_device_idx[0] = prev_idx
+                                current_capture_rate[0] = int(input_session.capture_rate)
+                        except Exception:
+                            pass
                 continue
 
             # ── Feedback output device switch (signalled by hotkey thread) ────
@@ -1605,12 +1663,8 @@ def main():
                 switched = False
                 for _attempt in range(len(_all_devices)):
                     target_pos = (_start_pos + _attempt) % len(_all_devices)
-                    next_idx, next_name = _all_devices[target_pos]
-                    try:
-                        next_info = p_instance.get_device_info_by_index(int(next_idx))
-                        next_host_api = next_info.get("hostApi")
-                    except Exception:
-                        next_host_api = None
+                    next_idx, next_name, next_info = _all_devices[target_pos]
+                    next_host_api = next_info.get("hostApi") if next_info else None
                     ok = False
                     try:
                         ok = feedback.try_set_output_device_index(int(next_idx), str(next_name), next_host_api)
@@ -1627,7 +1681,7 @@ def main():
                         persist()
                         switched = True
                         break
-                    _bad_output_devices.add(int(next_idx))
+                    _bad_output_devices.add((str(next_name), next_host_api))
                     logger.warning(f"[feedback] Skipping output {next_name}")
                 if not switched:
                     logger.warning("[feedback] Output device cycle failed (all candidates rejected).")
@@ -1761,15 +1815,13 @@ def main():
                 reset_active_utterance(reason=f"stream_error:{err}")
             time.sleep(0.5)
             try:
-                stream.stop_stream()
-                stream.close()
-            except: pass
+                input_session.close()
+            except Exception:
+                pass
             try:
-                stream = p_instance.open(
-                    format=pyaudio.paInt16, channels=1, rate=RATE,
-                    input=True, frames_per_buffer=CHUNK,
-                    input_device_index=current_device_idx[0]
-                )
+                recovery_info = p_instance.get_device_info_by_index(int(current_device_idx[0]))
+                input_session, _, _ = _open_and_probe_runtime_input(recovery_info)
+                stream = input_session.stream
                 wakeword_buffer = np.array([], dtype=np.int16)
                 ring_buffer.clear()
                 recording_buffer.clear()
@@ -1787,8 +1839,10 @@ def main():
             break
 
     logger.info("Shutting down...")
-    try: stream.stop_stream(); stream.close()
-    except: pass
+    try:
+        input_session.close()
+    except Exception:
+        pass
     try:
         if wakeword_engine is not None:
             wakeword_engine.delete()

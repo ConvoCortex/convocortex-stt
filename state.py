@@ -21,6 +21,9 @@ _DEFAULTS = {
     "last_input_device_host_api": None,
     "last_output_device_name": "",
     "last_output_device_host_api": None,
+    "approved_input_devices": [],
+    "approved_output_devices": [],
+    "device_setup_completed": False,
 }
 
 
