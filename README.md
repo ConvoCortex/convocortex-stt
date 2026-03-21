@@ -145,6 +145,42 @@ Copy-Item config.example.toml config.toml
 uv run python stt.py
 ```
 
+To start normally and hide the console once the runtime is ready:
+
+```bash
+uv run python stt.py --background
+```
+
+On Windows, the default `hotkeys.console_toggle = "shift+f8"` hides/shows that same console window. When you bring it back, `Ctrl+C` kills the process as usual.
+
+## Windows Startup Shortcut
+
+If you want this to come up automatically in the background after you log in on Windows:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\install-startup-shortcut.ps1
+```
+
+That creates a shortcut in:
+
+```text
+C:\Users\user\AppData\Roaming\Microsoft\Windows\Start Menu\Programs\Startup
+```
+
+The shortcut launches:
+
+```text
+.venv\Scripts\python.exe stt.py --background
+```
+
+This is the simpler Windows logon path and fits this app better because it relies on an interactive desktop session for global hotkeys and for restoring the console window to the foreground.
+
+To remove the shortcut:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\uninstall-startup-shortcut.ps1
+```
+
 ## Configuration
 
 All runtime settings live in `config.toml` and are loaded at startup.
@@ -258,6 +294,7 @@ Commercial licensing is available for proprietary use; contact the maintainer.
 
 Contributions require signing the [Individual Contributor License Agreement](CLA.md).
 See [CONTRIBUTING.md](CONTRIBUTING.md).
+
 
 
 

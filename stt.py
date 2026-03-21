@@ -6,6 +6,7 @@ accurate GPU model for final results after silence.
 Output via configurable local handlers. NATS optional.
 """
 
+import argparse
 import sys
 import time
 import queue
@@ -84,6 +85,73 @@ logger = _setup_logging()
 state_store.init(cfg)
 _persisted = state_store.load()
 
+
+class WindowsConsoleController:
+    SW_HIDE = 0
+    SW_SHOW = 5
+    SW_RESTORE = 9
+
+    def __init__(self):
+        self._lock = threading.RLock()
+        self._user32 = None
+        self._kernel32 = None
+        self._available = False
+        if os.name != "nt":
+            return
+        try:
+            import ctypes
+
+            self._user32 = ctypes.windll.user32
+            self._kernel32 = ctypes.windll.kernel32
+            self._available = bool(self._console_hwnd())
+        except Exception as exc:
+            logger.warning(f"[console] Windows console control unavailable: {exc}")
+
+    def _console_hwnd(self) -> int:
+        if not self._kernel32:
+            return 0
+        try:
+            return int(self._kernel32.GetConsoleWindow())
+        except Exception:
+            return 0
+
+    @property
+    def available(self) -> bool:
+        return bool(self._available and self._console_hwnd())
+
+    def is_visible(self) -> bool:
+        hwnd = self._console_hwnd()
+        if not hwnd or not self._user32:
+            return False
+        return bool(self._user32.IsWindowVisible(hwnd))
+
+    def show(self, reason: str = "") -> bool:
+        with self._lock:
+            hwnd = self._console_hwnd()
+            if not hwnd or not self._user32:
+                logger.warning("[console] No console window available to show.")
+                return False
+            self._user32.ShowWindow(hwnd, self.SW_RESTORE)
+            self._user32.ShowWindow(hwnd, self.SW_SHOW)
+            self._user32.SetForegroundWindow(hwnd)
+            logger.info(f"[console] Shown" + (f" ({reason})" if reason else ""))
+            return True
+
+    def hide(self, reason: str = "") -> bool:
+        with self._lock:
+            hwnd = self._console_hwnd()
+            if not hwnd or not self._user32:
+                logger.warning("[console] No console window available to hide.")
+                return False
+            self._user32.ShowWindow(hwnd, self.SW_HIDE)
+            logger.info(f"[console] Hidden" + (f" ({reason})" if reason else ""))
+            return True
+
+    def toggle(self, reason: str = "") -> bool:
+        if self.is_visible():
+            return self.hide(reason=reason)
+        return self.show(reason=reason)
+
 # ── Models ────────────────────────────────────────────────────────────────────
 FINAL_MODEL        = cfg["models"]["final"]
 FINAL_DEVICE       = cfg["models"]["final_device"]
@@ -114,6 +182,7 @@ _sw_cfg = cfg.get("sleep_wake", {})
 SLEEP_START_SLEEPING = bool(_sw_cfg.get("start_sleeping", True))
 SLEEP_HOTKEY_TOGGLE = str(cfg["hotkeys"].get("sleep_toggle", "")).strip()
 TYPE_TOGGLE_HOTKEY = str(cfg["hotkeys"].get("typing_toggle", "")).strip()
+CONSOLE_TOGGLE_HOTKEY = str(cfg["hotkeys"].get("console_toggle", "")).strip()
 SLEEP_STOP_WORDS = [
     _normalize_command_phrase(w)
     for w in _sw_cfg.get("stop_words", ["stop", "pause"])
@@ -727,8 +796,10 @@ class FeedbackAudio:
             pass
 
 
-def main():
+def main(args=None):
     import signal
+    if args is None:
+        args = argparse.Namespace(background=False)
     def _sigterm(_s, _f):
         raise KeyboardInterrupt
     signal.signal(signal.SIGTERM, _sigterm)
@@ -1073,6 +1144,8 @@ def main():
         with typing_lock:
             return typing_state["enabled"]
 
+    console_controller = WindowsConsoleController()
+
     # ── Workers ───────────────────────────────────────────────────────────────
 
     def apply_voice_commands(final_text: str) -> tuple[str, dict]:
@@ -1353,6 +1426,13 @@ def main():
             kb.add_hotkey(TYPE_TOGGLE_HOTKEY, lambda: toggle_typing_enabled(reason="hotkey"))
             logger.info(f"[hotkey] typing_toggle = {TYPE_TOGGLE_HOTKEY}")
 
+        if CONSOLE_TOGGLE_HOTKEY:
+            if console_controller.available:
+                kb.add_hotkey(CONSOLE_TOGGLE_HOTKEY, lambda: console_controller.toggle(reason="hotkey"))
+                logger.info(f"[hotkey] console_toggle = {CONSOLE_TOGGLE_HOTKEY}")
+            else:
+                logger.warning("[hotkey] console_toggle requested but no Windows console is available.")
+
 
     setup_hotkeys()
     persist()
@@ -1599,6 +1679,11 @@ def main():
     dispatch({"type": "status", "value": "sleeping" if mode_state["sleeping"] else "working"})
     print("STT Ready!")
     sys.stdout.flush()
+    if getattr(args, "background", False):
+        if console_controller.available:
+            console_controller.hide(reason="startup")
+        else:
+            logger.warning("[console] Background mode requested but no Windows console is available.")
 
     def reset_active_utterance(reason: str):
         nonlocal recording_buffer, is_recording, silence_counter, current_t0, last_rt_update
@@ -1915,4 +2000,10 @@ def main():
 
 
 if __name__ == '__main__':
-    main()
+    parser = argparse.ArgumentParser(description="Convocortex STT runtime")
+    parser.add_argument(
+        "--background",
+        action="store_true",
+        help="Start normally, then hide the console after STT finishes startup.",
+    )
+    main(parser.parse_args())
