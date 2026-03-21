@@ -37,9 +37,10 @@ silence_timeout = 0.8   # seconds of silence before ending an utterance and firi
 input_stall_reset_seconds = 1.5 # if audio capture stalls this long mid-utterance, drop buffered speech instead of resuming it later
 # startup input device override by exact device name; empty = use device profiles/remembered device/default
 input_device    = ""
+# selected startup/cycling devices are stored here after first-run setup
 device_profiles_file = "device-profiles.json"
-# auto = prompt only when the profiles file is missing, always = prompt every startup, never = skip the prompt
-device_setup_mode = "auto"
+# false = run the interactive device setup on next startup, then flip back to true
+device_setup_initialized = true
 
 [realtime]
 # check_interval: how often (seconds) a partial transcription is triggered during speech

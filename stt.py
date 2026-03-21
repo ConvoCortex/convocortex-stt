@@ -101,9 +101,7 @@ SILENCE_TIMEOUT = cfg["audio"]["silence_timeout"]
 INPUT_STALL_RESET_SECONDS = float(cfg["audio"].get("input_stall_reset_seconds", 1.5))
 PREFERRED_INPUT_DEVICE = str(cfg["audio"].get("input_device", "")).strip()
 DEVICE_PROFILES_PATH = Path(str(cfg["audio"].get("device_profiles_file", "device-profiles.json")).strip() or "device-profiles.json")
-DEVICE_SETUP_MODE = str(cfg["audio"].get("device_setup_mode", "auto")).strip().lower()
-if DEVICE_SETUP_MODE not in {"auto", "always", "never"}:
-    DEVICE_SETUP_MODE = "auto"
+DEVICE_SETUP_INITIALIZED = bool(cfg["audio"].get("device_setup_initialized", False))
 
 # ── Realtime ──────────────────────────────────────────────────────────────────
 RT_CHECK_INTERVAL = cfg["realtime"]["check_interval"]
@@ -216,7 +214,13 @@ def debug_log_every(key: str, seconds: float, message: str):
 
 
 
-def _prompt_profile_selection(label: str, candidates: list[dict], existing_profiles: list[dict]) -> list[dict]:
+def _prompt_profile_selection(
+    label: str,
+    candidates: list[dict],
+    existing_profiles: list[dict],
+    *,
+    allow_none: bool,
+) -> list[dict]:
     existing_indexes = []
     for idx, candidate in enumerate(candidates, start=1):
         if any(profile_matches(candidate["info"], profile) for profile in existing_profiles):
@@ -226,7 +230,10 @@ def _prompt_profile_selection(label: str, candidates: list[dict], existing_profi
     print()
     print(f"[device-setup] Select {label} devices to allow for startup/cycling.")
     print("[device-setup] Enter comma-separated numbers in your preferred cycle order.")
-    print("[device-setup] Press Enter to keep the current selection. Enter 'none' for no devices.")
+    if allow_none:
+        print("[device-setup] Press Enter to keep the current selection. Enter 'none' for no devices.")
+    else:
+        print("[device-setup] Press Enter to keep the current selection. Choose at least one device.")
     for idx, candidate in enumerate(candidates, start=1):
         status = "usable" if candidate.get("usable", True) else f"unusable: {candidate.get('reason', 'unknown')}"
         print(f"  {idx}. {candidate['description']} [{status}]")
@@ -245,10 +252,16 @@ def _prompt_profile_selection(label: str, candidates: list[dict], existing_profi
             if default_text:
                 raw = default_text
             else:
-                print(f"[device-setup] No {label} devices selected.")
-                return []
+                if allow_none:
+                    print(f"[device-setup] No {label} devices selected.")
+                    return []
+                print(f"[device-setup] Select at least one {label} device.")
+                continue
         if raw.lower() in {"none", "off", "disable"}:
-            return []
+            if allow_none:
+                return []
+            print(f"[device-setup] Select at least one {label} device.")
+            continue
         parts = [part.strip() for part in raw.split(",") if part.strip()]
         chosen = []
         seen = set()
@@ -270,16 +283,46 @@ def _prompt_profile_selection(label: str, candidates: list[dict], existing_profi
         print("[device-setup] Invalid selection. Use numbers like 1,3")
 
 
+def _set_device_setup_initialized(value: bool):
+    try:
+        config_path = config.CONFIG_PATH
+    except Exception:
+        return
+    try:
+        text = Path(config_path).read_text(encoding="utf-8")
+    except Exception as e:
+        logger.warning(f"[device-setup] Could not read config for initialization flag update: {e}")
+        return
+
+    lines = text.splitlines()
+    in_audio = False
+    updated = False
+    for idx, line in enumerate(lines):
+        stripped = line.strip()
+        if stripped.startswith("[") and stripped.endswith("]"):
+            in_audio = stripped == "[audio]"
+            continue
+        if in_audio and stripped.startswith("device_setup_initialized"):
+            lines[idx] = f"device_setup_initialized = {'true' if value else 'false'}"
+            updated = True
+            break
+    if not updated:
+        logger.warning("[device-setup] Could not find device_setup_initialized in config.toml")
+        return
+    try:
+        Path(config_path).write_text("\n".join(lines) + "\n", encoding="utf-8")
+    except Exception as e:
+        logger.warning(f"[device-setup] Could not update initialization flag: {e}")
+
+
+
 def _maybe_run_device_setup() -> dict:
     profiles = load_profiles(DEVICE_PROFILES_PATH)
-    needs_setup = (
-        DEVICE_SETUP_MODE == "always"
-        or (DEVICE_SETUP_MODE == "auto" and not DEVICE_PROFILES_PATH.exists())
-    )
+    needs_setup = (not DEVICE_SETUP_INITIALIZED) or (not DEVICE_PROFILES_PATH.exists())
     if not needs_setup:
         return profiles
 
-    logger.info(f"[device-setup] Starting interactive device setup ({DEVICE_SETUP_MODE}).")
+    logger.info("[device-setup] Starting interactive device setup.")
     p = pyaudio.PyAudio()
     try:
         api_names = host_api_names(p)
@@ -320,11 +363,23 @@ def _maybe_run_device_setup() -> dict:
                 "reason": reason,
             })
 
-        selected_inputs = _prompt_profile_selection("input", input_candidates, existing_inputs)
-        selected_outputs = _prompt_profile_selection("output", output_candidates, existing_outputs)
+        selected_inputs = _prompt_profile_selection(
+            "input",
+            input_candidates,
+            existing_inputs,
+            allow_none=False,
+        )
+        selected_outputs = _prompt_profile_selection(
+            "output",
+            output_candidates,
+            existing_outputs,
+            allow_none=not FEEDBACK_ENABLED,
+        )
         profiles = {"inputs": selected_inputs, "outputs": selected_outputs}
         save_profiles(DEVICE_PROFILES_PATH, profiles)
+        _set_device_setup_initialized(True)
         logger.info(f"[device-setup] Saved profiles to {DEVICE_PROFILES_PATH}")
+        logger.info("[device-setup] Initialization complete. Set audio.device_setup_initialized = false to rerun.")
         return profiles
     finally:
         try:
