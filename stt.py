@@ -1271,9 +1271,15 @@ def main(args=None):
         return False
 
     def should_ignore_transcript(text: str) -> bool:
+        raw = str(text).strip()
+        if not raw:
+            return False
+        normalized = _normalize_ignored_transcript(raw)
+        if not normalized:
+            return True
         if not IGNORED_TRANSCRIPTS:
             return False
-        return _normalize_ignored_transcript(text) in IGNORED_TRANSCRIPTS
+        return normalized in IGNORED_TRANSCRIPTS
 
     def final_worker():
         while True:

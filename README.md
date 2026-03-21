@@ -1,8 +1,40 @@
 # convocortex-stt
 
-Hands-free speech-to-text for ambient use with voice commands, wake-word, VAD, feedback, realtime partials and NATS integration.
+Ambient speech-to-text for desktop use: leave it running, wake it when needed, speak naturally, and have final text routed to files, clipboard, a live buffer, NATS, or directly into the active cursor.
 
-It is designed to run continuously in the background, transcribe on pause, and expose events/controls over NATS so you can plug it into a larger voice system.
+It is built for daily background use rather than one-shot dictation: wake/sleep modes, VAD-gated utterances, realtime partials, accurate finals, device cycling, audio feedback, hotkeys, and a simple integration boundary over NATS.
+
+## Quick start
+
+```bash
+git clone https://github.com/ConvoCortex/convocortex-stt
+cd convocortex-stt
+uv sync
+uv run python stt.py
+```
+
+On Windows, if you want it to start hidden once the runtime is ready:
+
+```bash
+uv run python stt.py --background
+```
+
+Before first real use, open `config.toml` and set the bits you actually care about:
+- `models.final_device` / `models.realtime_device`
+- `sleep_wake.wake_word`
+- `output.type_at_cursor.enabled`
+- `hotkeys.sleep_toggle`
+
+Optional presets live in:
+- `config_preset_buffer_reset_after_each.toml`
+- `config_preset_clipboard_accumulate.toml`
+
+## Why this repo is useful
+
+- It is hands-free. VAD starts and ends utterances from speech and silence, not button presses.
+- It separates low-latency partials from higher-accuracy finals, which makes it usable both for responsiveness and for actual text output.
+- It already handles the ugly desktop details: wake/sleep state, audio feedback, hotkeys, device switching, reconnect behavior, and persisted runtime state.
+- It works as a standalone local tool and also as a component inside a larger voice system through NATS.
 
 ## How it actually works
 
@@ -127,17 +159,7 @@ uv sync
 
 NATS Python client dependency is included by default.
 
-Create your local config from the example:
-
-```bash
-cp config.example.toml config.toml
-```
-
-On Windows PowerShell:
-
-```powershell
-Copy-Item config.example.toml config.toml
-```
+Edit `config.toml` directly, or replace it with one of the included preset configs and then adjust it.
 
 ## Running
 
@@ -283,7 +305,7 @@ Send JSON to `nats.subject_control`:
 
 ## Acknowledgments
 
-This project builds on top of the RealTimeSTT ecosystem and uses faster-whisper/ctranslate2 under the hood.
+This repository uses the same general stack as the RealTimeSTT ecosystem, but the runtime loop in this project is custom and lives in `stt.py`. The main transcription path here is built around PyAudio, Silero VAD, and faster-whisper/ctranslate2.
 
 ## License
 

@@ -1,7 +1,7 @@
 [project]
 name = "convocortex-stt"
 version = "0.1.0"
-description = "Speech-to-text engine with real-time partial results and NATS event output"
+description = "Ambient desktop speech-to-text with wake word, VAD, realtime partials, final output routing, and NATS control"
 license = { text = "AGPL-3.0-only" }
 requires-python = ">=3.10"
 dependencies = [
