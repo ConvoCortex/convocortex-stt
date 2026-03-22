@@ -300,6 +300,24 @@ UNDO_COMMAND_WORDS = [
     for w in cfg.get("voice_commands", {}).get("undo", {}).get("words", [])
     if _normalize_command_phrase(w)
 ]
+INPUT_DEVICE_CYCLE_COMMAND_ENABLED = (
+    VOICE_COMMANDS_ENABLED
+    and bool(cfg.get("voice_commands", {}).get("input_device_cycle", {}).get("enabled", False))
+)
+INPUT_DEVICE_CYCLE_COMMAND_WORDS = [
+    _normalize_command_phrase(w)
+    for w in cfg.get("voice_commands", {}).get("input_device_cycle", {}).get("words", [])
+    if _normalize_command_phrase(w)
+]
+OUTPUT_DEVICE_CYCLE_COMMAND_ENABLED = (
+    VOICE_COMMANDS_ENABLED
+    and bool(cfg.get("voice_commands", {}).get("output_device_cycle", {}).get("enabled", False))
+)
+OUTPUT_DEVICE_CYCLE_COMMAND_WORDS = [
+    _normalize_command_phrase(w)
+    for w in cfg.get("voice_commands", {}).get("output_device_cycle", {}).get("words", [])
+    if _normalize_command_phrase(w)
+]
 BUFFER_RELEASE_COMMAND_ENABLED = (
     VOICE_COMMANDS_ENABLED
     and bool(cfg.get("output", {}).get("file_buffer", {}).get("enabled", False))
@@ -329,6 +347,8 @@ ENTER_COMMAND_WORDS_EXACT = [
     if _normalize_command_phrase(w)
 ]
 UNDO_COMMAND_WORDS_EXACT = UNDO_COMMAND_WORDS
+INPUT_DEVICE_CYCLE_COMMAND_WORDS_EXACT = INPUT_DEVICE_CYCLE_COMMAND_WORDS
+OUTPUT_DEVICE_CYCLE_COMMAND_WORDS_EXACT = OUTPUT_DEVICE_CYCLE_COMMAND_WORDS
 BUFFER_RELEASE_COMMAND_WORDS_EXACT = BUFFER_RELEASE_COMMAND_WORDS
 BUFFER_CLEAR_COMMAND_WORDS_EXACT = BUFFER_CLEAR_COMMAND_WORDS
 
@@ -1360,6 +1380,20 @@ def main(args=None):
                     "t": round(t, 3),
                     "inference_ms": inf_ms,
                 })
+                feedback.play_on()
+            return True
+
+        if INPUT_DEVICE_CYCLE_COMMAND_ENABLED and normalized in INPUT_DEVICE_CYCLE_COMMAND_WORDS_EXACT:
+            if _mark_voice_command_seen(epoch, f"input_device_cycle:{normalized}"):
+                logger.info(f"[{source.upper()} +{t:.2f}s] → CMD input_device_cycle ({inf_ms}ms)")
+                cycle_input_device()
+                feedback.play_on()
+            return True
+
+        if OUTPUT_DEVICE_CYCLE_COMMAND_ENABLED and normalized in OUTPUT_DEVICE_CYCLE_COMMAND_WORDS_EXACT:
+            if _mark_voice_command_seen(epoch, f"output_device_cycle:{normalized}"):
+                logger.info(f"[{source.upper()} +{t:.2f}s] → CMD output_device_cycle ({inf_ms}ms)")
+                cycle_output_device()
                 feedback.play_on()
             return True
 
