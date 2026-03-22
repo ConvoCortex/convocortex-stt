@@ -57,7 +57,7 @@ queue_size       = 10
 # Exact phrases to swallow completely from both partial and final output.
 # Matching is case-insensitive, ignores trailing punctuation, and treats hyphens like spaces.
 [filters]
-ignored_exact_phrases = ["you", "oh", "thank you", "okay", "ok", "hmm", "mm-hmm", "i'll see you next time", "i don't know", "let's see", "oh, oh, oh", "hi, yo", "mmm", "whew", "um", "er", "ah", "mm-mm-mm"]
+ignored_exact_phrases = ["bumblebee", "you", "oh", "thank you", "okay", "ok", "hmm", "mm-hmm", "i'll see you next time", "i don't know", "let's see", "oh, oh, oh", "hi, yo", "mmm", "whew", "um", "er", "ah", "mm-mm-mm"]
 # Optional whole-word/phrase stripping inside otherwise valid transcripts.
 # This is separate from `ignored_exact_phrases`: the utterance still passes through after removal and punctuation cleanup.
 disfluency_words = ["uh", "um", "er", "ah", "oh", "fucking"]
