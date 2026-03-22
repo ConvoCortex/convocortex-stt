@@ -148,9 +148,18 @@ words   = ["input"] # Exact match only; same behavior as the input-device cycle 
 [voice_commands.output_device_cycle]
 enabled = true
 words   = ["output"] # Exact match only; same behavior as the output-device cycle hotkey
-[voice_commands.output_mode_cycle]
+[voice_commands.output_mode_default]
 enabled = true
-words   = ["mode"] # Exact match only; cycles between the built-in output modes
+words   = ["default mode"] # Exact match only; selects config-default output mode
+[voice_commands.output_mode_cursor]
+enabled = true
+words   = ["cursor mode"] # Exact match only; selects direct-cursor output mode
+[voice_commands.output_mode_draft]
+enabled = true
+words   = ["draft mode"] # Exact match only; selects draft-buffer output mode
+[voice_commands.output_mode_clipboard]
+enabled = true
+words   = ["clipboard mode"] # Exact match only; selects cursor-with-clipboard-last output mode
 [voice_commands.buffer_release]
 enabled = true
 words   = ["buffer"]

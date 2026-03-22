@@ -81,7 +81,7 @@ Current built-in command types:
 - type-at-cursor undo words
 - input device cycle words
 - output device cycle words
-- output mode cycle words
+- output mode selection words
 - enter trigger words
 - file-buffer release words
 - file-buffer clear words
@@ -249,7 +249,7 @@ Those focused presets are provided as small snippets under `presets/output-modes
 
 At runtime, output mode is treated as state, not as a config rewrite. By default:
 - hotkey `shift+f9` cycles output modes
-- exact voice command `mode` cycles output modes
+- exact voice commands `default mode`, `cursor mode`, `draft mode`, and `clipboard mode` select output modes directly
 
 The built-in runtime modes are:
 - `config-default`: whatever `config.toml` says for the output handlers

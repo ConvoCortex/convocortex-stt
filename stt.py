@@ -319,13 +319,40 @@ OUTPUT_DEVICE_CYCLE_COMMAND_WORDS = [
     for w in cfg.get("voice_commands", {}).get("output_device_cycle", {}).get("words", [])
     if _normalize_command_phrase(w)
 ]
-OUTPUT_MODE_CYCLE_COMMAND_ENABLED = (
+OUTPUT_MODE_DEFAULT_COMMAND_ENABLED = (
     VOICE_COMMANDS_ENABLED
-    and bool(cfg.get("voice_commands", {}).get("output_mode_cycle", {}).get("enabled", False))
+    and bool(cfg.get("voice_commands", {}).get("output_mode_default", {}).get("enabled", False))
 )
-OUTPUT_MODE_CYCLE_COMMAND_WORDS = [
+OUTPUT_MODE_DEFAULT_COMMAND_WORDS = [
     _normalize_command_phrase(w)
-    for w in cfg.get("voice_commands", {}).get("output_mode_cycle", {}).get("words", [])
+    for w in cfg.get("voice_commands", {}).get("output_mode_default", {}).get("words", [])
+    if _normalize_command_phrase(w)
+]
+OUTPUT_MODE_CURSOR_COMMAND_ENABLED = (
+    VOICE_COMMANDS_ENABLED
+    and bool(cfg.get("voice_commands", {}).get("output_mode_cursor", {}).get("enabled", False))
+)
+OUTPUT_MODE_CURSOR_COMMAND_WORDS = [
+    _normalize_command_phrase(w)
+    for w in cfg.get("voice_commands", {}).get("output_mode_cursor", {}).get("words", [])
+    if _normalize_command_phrase(w)
+]
+OUTPUT_MODE_DRAFT_COMMAND_ENABLED = (
+    VOICE_COMMANDS_ENABLED
+    and bool(cfg.get("voice_commands", {}).get("output_mode_draft", {}).get("enabled", False))
+)
+OUTPUT_MODE_DRAFT_COMMAND_WORDS = [
+    _normalize_command_phrase(w)
+    for w in cfg.get("voice_commands", {}).get("output_mode_draft", {}).get("words", [])
+    if _normalize_command_phrase(w)
+]
+OUTPUT_MODE_CLIPBOARD_COMMAND_ENABLED = (
+    VOICE_COMMANDS_ENABLED
+    and bool(cfg.get("voice_commands", {}).get("output_mode_clipboard", {}).get("enabled", False))
+)
+OUTPUT_MODE_CLIPBOARD_COMMAND_WORDS = [
+    _normalize_command_phrase(w)
+    for w in cfg.get("voice_commands", {}).get("output_mode_clipboard", {}).get("words", [])
     if _normalize_command_phrase(w)
 ]
 BUFFER_RELEASE_COMMAND_ENABLED = (
@@ -359,7 +386,10 @@ ENTER_COMMAND_WORDS_EXACT = [
 UNDO_COMMAND_WORDS_EXACT = UNDO_COMMAND_WORDS
 INPUT_DEVICE_CYCLE_COMMAND_WORDS_EXACT = INPUT_DEVICE_CYCLE_COMMAND_WORDS
 OUTPUT_DEVICE_CYCLE_COMMAND_WORDS_EXACT = OUTPUT_DEVICE_CYCLE_COMMAND_WORDS
-OUTPUT_MODE_CYCLE_COMMAND_WORDS_EXACT = OUTPUT_MODE_CYCLE_COMMAND_WORDS
+OUTPUT_MODE_DEFAULT_COMMAND_WORDS_EXACT = OUTPUT_MODE_DEFAULT_COMMAND_WORDS
+OUTPUT_MODE_CURSOR_COMMAND_WORDS_EXACT = OUTPUT_MODE_CURSOR_COMMAND_WORDS
+OUTPUT_MODE_DRAFT_COMMAND_WORDS_EXACT = OUTPUT_MODE_DRAFT_COMMAND_WORDS
+OUTPUT_MODE_CLIPBOARD_COMMAND_WORDS_EXACT = OUTPUT_MODE_CLIPBOARD_COMMAND_WORDS
 BUFFER_RELEASE_COMMAND_WORDS_EXACT = BUFFER_RELEASE_COMMAND_WORDS
 BUFFER_CLEAR_COMMAND_WORDS_EXACT = BUFFER_CLEAR_COMMAND_WORDS
 
@@ -1496,10 +1526,31 @@ def main(args=None):
                 feedback.play_on()
             return True
 
-        if OUTPUT_MODE_CYCLE_COMMAND_ENABLED and normalized in OUTPUT_MODE_CYCLE_COMMAND_WORDS_EXACT:
-            if _mark_voice_command_seen(epoch, f"output_mode_cycle:{normalized}"):
-                logger.info(f"[{source.upper()} +{t:.2f}s] → CMD output_mode_cycle ({inf_ms}ms)")
-                cycle_output_mode(reason=f"voice:{normalized}")
+        if OUTPUT_MODE_DEFAULT_COMMAND_ENABLED and normalized in OUTPUT_MODE_DEFAULT_COMMAND_WORDS_EXACT:
+            if _mark_voice_command_seen(epoch, f"output_mode_default:{normalized}"):
+                logger.info(f"[{source.upper()} +{t:.2f}s] → CMD output_mode=config-default ({inf_ms}ms)")
+                apply_output_mode("config-default", reason=f"voice:{normalized}")
+                feedback.play_on()
+            return True
+
+        if OUTPUT_MODE_CURSOR_COMMAND_ENABLED and normalized in OUTPUT_MODE_CURSOR_COMMAND_WORDS_EXACT:
+            if _mark_voice_command_seen(epoch, f"output_mode_cursor:{normalized}"):
+                logger.info(f"[{source.upper()} +{t:.2f}s] → CMD output_mode=direct-cursor ({inf_ms}ms)")
+                apply_output_mode("direct-cursor", reason=f"voice:{normalized}")
+                feedback.play_on()
+            return True
+
+        if OUTPUT_MODE_DRAFT_COMMAND_ENABLED and normalized in OUTPUT_MODE_DRAFT_COMMAND_WORDS_EXACT:
+            if _mark_voice_command_seen(epoch, f"output_mode_draft:{normalized}"):
+                logger.info(f"[{source.upper()} +{t:.2f}s] → CMD output_mode=draft-buffer ({inf_ms}ms)")
+                apply_output_mode("draft-buffer", reason=f"voice:{normalized}")
+                feedback.play_on()
+            return True
+
+        if OUTPUT_MODE_CLIPBOARD_COMMAND_ENABLED and normalized in OUTPUT_MODE_CLIPBOARD_COMMAND_WORDS_EXACT:
+            if _mark_voice_command_seen(epoch, f"output_mode_clipboard:{normalized}"):
+                logger.info(f"[{source.upper()} +{t:.2f}s] → CMD output_mode=cursor-with-clipboard-last ({inf_ms}ms)")
+                apply_output_mode("cursor-with-clipboard-last", reason=f"voice:{normalized}")
                 feedback.play_on()
             return True
 
