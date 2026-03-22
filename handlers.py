@@ -204,8 +204,14 @@ def make_type_at_cursor(cfg: dict):
         logger.warning("[type_at_cursor] keyboard not installed, handler disabled.")
         return None
 
+    tcfg = cfg["output"]["type_at_cursor"]
     enabled_lock = threading.Lock()
-    enabled_state = [bool(cfg["output"]["type_at_cursor"]["enabled"])]
+    enabled_state = [bool(tcfg["enabled"])]
+    undo_mode = str(tcfg.get("undo_mode", "off")).strip().lower()
+    if undo_mode not in {"off", "ctrl+z", "backspace"}:
+        logger.warning(f"[type_at_cursor] Invalid undo_mode={undo_mode!r}; using 'off'.")
+        undo_mode = "off"
+    undo_backspace_count = max(1, int(tcfg.get("undo_backspace_count", 24)))
 
     def set_enabled(enabled: bool):
         with enabled_lock:
@@ -220,10 +226,25 @@ def make_type_at_cursor(cfg: dict):
         with enabled_lock:
             return enabled_state[0]
 
+    def undo_last():
+        if undo_mode == "off":
+            logger.info("[type_at_cursor] Undo ignored (undo_mode=off).")
+            return
+        if undo_mode == "ctrl+z":
+            keyboard.press_and_release("ctrl+z")
+            logger.info("[type_at_cursor] Undo sent via ctrl+z")
+            return
+        for _ in range(undo_backspace_count):
+            keyboard.press_and_release("backspace")
+        logger.info(f"[type_at_cursor] Undo sent via {undo_backspace_count} backspaces")
+
     def type_at_cursor(event: dict):
+        actions = event.get("actions", {}) or {}
+        if actions.get("undo_type_at_cursor"):
+            undo_last()
+            return
         if not is_enabled():
             return
-        actions = event.get("actions", {}) or {}
         if actions.get("release_file_buffer"):
             return
         text = _final_text(event, cfg)

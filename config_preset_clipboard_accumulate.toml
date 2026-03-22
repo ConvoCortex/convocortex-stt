@@ -98,6 +98,10 @@ separator = ""
 
 [output.type_at_cursor]
 enabled = true
+# type-at-cursor undo behavior for the built-in "undo" voice command:
+# "ctrl+z" = send Ctrl+Z once, "backspace" = send N backspaces, "off" = do nothing
+undo_mode = "ctrl+z"
+undo_backspace_count = 24
 
 [output.trailing_char]
 enabled = true
@@ -131,6 +135,9 @@ words   = ["enter", "simba"] # Detected at the start and at the end of utterance
 [voice_commands.type_at_cursor_toggle]
 enabled = true
 words   = ["typing"] # Detected at the start of utterance
+[voice_commands.undo]
+enabled = true
+words   = ["undo"] # Exact match only; routed to type_at_cursor undo behavior
 [voice_commands.buffer_release]
 enabled = true
 words   = ["buffer"]

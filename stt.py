@@ -291,6 +291,15 @@ TYPE_TOGGLE_COMMAND_WORDS = [
     for w in cfg.get("voice_commands", {}).get("type_at_cursor_toggle", {}).get("words", [])
     if _normalize_command_phrase(w)
 ]
+UNDO_COMMAND_ENABLED = (
+    VOICE_COMMANDS_ENABLED
+    and bool(cfg.get("voice_commands", {}).get("undo", {}).get("enabled", False))
+)
+UNDO_COMMAND_WORDS = [
+    _normalize_command_phrase(w)
+    for w in cfg.get("voice_commands", {}).get("undo", {}).get("words", [])
+    if _normalize_command_phrase(w)
+]
 BUFFER_RELEASE_COMMAND_ENABLED = (
     VOICE_COMMANDS_ENABLED
     and bool(cfg.get("output", {}).get("file_buffer", {}).get("enabled", False))
@@ -319,6 +328,7 @@ ENTER_COMMAND_WORDS_EXACT = [
     for w in ENTER_COMMAND_WORDS
     if _normalize_command_phrase(w)
 ]
+UNDO_COMMAND_WORDS_EXACT = UNDO_COMMAND_WORDS
 BUFFER_RELEASE_COMMAND_WORDS_EXACT = BUFFER_RELEASE_COMMAND_WORDS
 BUFFER_CLEAR_COMMAND_WORDS_EXACT = BUFFER_CLEAR_COMMAND_WORDS
 
@@ -1335,6 +1345,22 @@ def main(args=None):
         if TYPE_TOGGLE_COMMAND_ENABLED and normalized in TYPE_TOGGLE_COMMAND_WORDS:
             if _mark_voice_command_seen(epoch, f"typing_toggle:{normalized}"):
                 toggle_typing_enabled(reason=f"voice:{normalized}")
+            return True
+
+        if UNDO_COMMAND_ENABLED and normalized in UNDO_COMMAND_WORDS_EXACT:
+            if _mark_voice_command_seen(epoch, f"undo:{normalized}"):
+                logger.info(f"[{source.upper()} +{t:.2f}s] → CMD undo ({inf_ms}ms)")
+                dispatch({
+                    "type": "final",
+                    "text": "",
+                    "actions": {
+                        "undo_type_at_cursor": True,
+                    },
+                    "epoch": epoch,
+                    "t": round(t, 3),
+                    "inference_ms": inf_ms,
+                })
+                feedback.play_on()
             return True
 
         if ENTER_COMMAND_ENABLED and normalized in ENTER_COMMAND_WORDS_EXACT:

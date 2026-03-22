@@ -77,6 +77,7 @@ Built-in voice commands are intentionally minimal and convenience-oriented.
 Current built-in command types:
 - sleep/stop words
 - type-at-cursor toggle words
+- type-at-cursor undo words
 - enter trigger words
 - file-buffer release words
 - file-buffer clear words
@@ -220,6 +221,17 @@ Important areas:
 - `sleep_wake`: wake word backend + stop words + startup mode
 - `hotkeys`: optional runtime controls
 - `nats`: URL/subjects + enable toggle
+
+### Type-at-cursor undo
+
+If `output.type_at_cursor.enabled = true`, the built-in exact voice command `undo` can send a best-effort undo action to the active app.
+
+Relevant settings:
+- `voice_commands.undo.words`: exact phrases that trigger the undo action
+- `output.type_at_cursor.undo_mode`: `ctrl+z`, `backspace`, or `off`
+- `output.type_at_cursor.undo_backspace_count`: number of backspaces to send when using `backspace` mode
+
+This is intentionally app-dependent. `ctrl+z` works in many GUI text fields, while terminals and some apps may require `backspace` mode or `off`.
 
 ### File buffer workflow
 
