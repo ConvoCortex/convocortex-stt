@@ -81,6 +81,7 @@ Current built-in command types:
 - type-at-cursor undo words
 - input device cycle words
 - output device cycle words
+- output mode cycle words
 - enter trigger words
 - file-buffer release words
 - file-buffer clear words
@@ -110,6 +111,7 @@ For a proper, richer voice command engine, use the emitted NATS events and imple
   - typing toggle
   - input device cycle
   - output device cycle
+  - output mode cycle
   - clipboard-accumulate reset cycle
 - NATS integration:
   - event stream (`partial`, `final`, `status`, `system`)
@@ -233,7 +235,17 @@ The repo currently has three output workflows that make sense as first-class set
 - `draft-buffer`: keep the buffer workflow explicit. Typical loop is `typing` to disable direct typing, `clear`, speak, `buffer`, repeat.
 - `cursor-with-clipboard-last`: type immediately, but also mirror the last finalized utterance into the clipboard so you can manually paste/recover it.
 
-Those focused presets are provided as small snippets under `presets/output-modes/`. They are intentionally not full duplicate configs. Copy the relevant blocks into `config.toml` when you want one of those behaviors.
+Those focused presets are provided as small snippets under `presets/output-modes/`. They describe the built-in runtime output modes.
+
+At runtime, output mode is treated as state, not as a config rewrite. By default:
+- hotkey `shift+f9` cycles output modes
+- exact voice command `mode` cycles output modes
+
+The built-in runtime modes are:
+- `config-default`: whatever `config.toml` says for the output handlers
+- `direct-cursor`
+- `draft-buffer`
+- `cursor-with-clipboard-last`
 
 `clipboard_accumulate` is still available, but it is more niche and less coherent as a default workflow than the three sets above.
 
@@ -319,6 +331,7 @@ Send JSON to `nats.subject_control`:
 {"cmd": "typing_toggle"}
 {"cmd": "typing_enable"}
 {"cmd": "typing_disable"}
+{"cmd": "output_mode_cycle"}
 {"cmd": "input_device_cycle"}
 {"cmd": "output_device_cycle"}
 {"cmd": "status_query"}

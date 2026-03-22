@@ -72,6 +72,8 @@ def make_file_buffer(cfg: dict):
     clear_after_release = bool(bcfg.get("clear_after_release", True))
     reset_after_each_message = bool(bcfg.get("reset_after_each_message", False))
     lock = threading.Lock()
+    enabled_lock = threading.Lock()
+    enabled_state = [bool(bcfg.get("enabled", False))]
 
     try:
         import keyboard
@@ -93,6 +95,14 @@ def make_file_buffer(cfg: dict):
             existing = "" if reset_after_each_message else _read_buffer()
             combined = (existing + sep + text) if existing else text
             _write_buffer(combined)
+
+    def set_enabled(enabled: bool):
+        with enabled_lock:
+            enabled_state[0] = bool(enabled)
+
+    def is_enabled() -> bool:
+        with enabled_lock:
+            return enabled_state[0]
 
     def _clear_buffer():
         with lock:
@@ -118,10 +128,18 @@ def make_file_buffer(cfg: dict):
     def file_buffer(event: dict):
         actions = event.get("actions", {}) or {}
         if actions.get("clear_file_buffer"):
+            if not is_enabled():
+                logger.info("[file_buffer] Clear ignored (disabled).")
+                return
             _clear_buffer()
             return
         if actions.get("release_file_buffer"):
+            if not is_enabled():
+                logger.info("[file_buffer] Release ignored (disabled).")
+                return
             _release_buffer(bool(actions.get("press_enter_after")))
+            return
+        if not is_enabled():
             return
         text = _final_text(event, cfg)
         if text is None:
@@ -129,7 +147,7 @@ def make_file_buffer(cfg: dict):
         _append_buffer(text)
 
     file_buffer.__name__ = "file_buffer"
-    return file_buffer, _clear_buffer
+    return file_buffer, _clear_buffer, set_enabled, is_enabled
 
 
 # ── Clipboard replace ─────────────────────────────────────────────────────────
@@ -141,7 +159,20 @@ def make_clipboard_replace(cfg: dict):
         logger.warning("[clipboard_replace] pywin32 not installed, handler disabled.")
         return None
 
+    enabled_lock = threading.Lock()
+    enabled_state = [bool(cfg["output"]["clipboard_replace"].get("enabled", False))]
+
+    def set_enabled(enabled: bool):
+        with enabled_lock:
+            enabled_state[0] = bool(enabled)
+
+    def is_enabled() -> bool:
+        with enabled_lock:
+            return enabled_state[0]
+
     def clipboard_replace(event: dict):
+        if not is_enabled():
+            return
         text = _final_text(event, cfg)
         if text is None:
             return
@@ -153,7 +184,7 @@ def make_clipboard_replace(cfg: dict):
             win32clipboard.CloseClipboard()
 
     clipboard_replace.__name__ = "clipboard_replace"
-    return clipboard_replace
+    return clipboard_replace, set_enabled, is_enabled
 
 
 # ── Clipboard accumulate ──────────────────────────────────────────────────────
@@ -166,8 +197,20 @@ def make_clipboard_accumulate(cfg: dict):
         return None
 
     sep = cfg["output"]["clipboard_accumulate"]["separator"]
+    enabled_lock = threading.Lock()
+    enabled_state = [bool(cfg["output"]["clipboard_accumulate"].get("enabled", False))]
+
+    def set_enabled(enabled: bool):
+        with enabled_lock:
+            enabled_state[0] = bool(enabled)
+
+    def is_enabled() -> bool:
+        with enabled_lock:
+            return enabled_state[0]
 
     def clipboard_accumulate(event: dict):
+        if not is_enabled():
+            return
         text = _final_text(event, cfg)
         if text is None:
             return
@@ -184,6 +227,9 @@ def make_clipboard_accumulate(cfg: dict):
             win32clipboard.CloseClipboard()
 
     def clipboard_accumulate_reset():
+        if not is_enabled():
+            logger.info("[clipboard_accumulate] reset ignored (disabled)")
+            return
         try:
             win32clipboard.OpenClipboard()
             win32clipboard.EmptyClipboard()
@@ -192,7 +238,7 @@ def make_clipboard_accumulate(cfg: dict):
         logger.info("[clipboard_accumulate] reset")
 
     clipboard_accumulate.__name__ = "clipboard_accumulate"
-    return clipboard_accumulate, clipboard_accumulate_reset
+    return clipboard_accumulate, clipboard_accumulate_reset, set_enabled, is_enabled
 
 
 # ── Type at cursor ────────────────────────────────────────────────────────────
@@ -320,37 +366,40 @@ def register_all(cfg: dict, register) -> dict:
         register(make_file_overwrite(cfg))
         logger.info(f"[handler] file_overwrite -> {out['file_overwrite']['path']}")
 
-    if out["file_buffer"]["enabled"]:
-        result = make_file_buffer(cfg)
-        if result:
-            fn, reset = result
-            register(fn)
-            extras["file_buffer_clear"] = reset
+    result = make_file_buffer(cfg)
+    if result:
+        fn, reset, set_enabled, is_enabled = result
+        register(fn)
+        extras["file_buffer_clear"] = reset
+        extras["file_buffer_set_enabled"] = set_enabled
+        extras["file_buffer_is_enabled"] = is_enabled
         logger.info(f"[handler] file_buffer -> {out['file_buffer']['path']}")
 
-    if out["clipboard_replace"]["enabled"]:
-        fn = make_clipboard_replace(cfg)
-        if fn:
-            register(fn)
-            logger.info("[handler] clipboard_replace")
+    result = make_clipboard_replace(cfg)
+    if result:
+        fn, set_enabled, is_enabled = result
+        register(fn)
+        extras["clipboard_replace_set_enabled"] = set_enabled
+        extras["clipboard_replace_is_enabled"] = is_enabled
+        logger.info("[handler] clipboard_replace")
 
-    if out["clipboard_accumulate"]["enabled"]:
-        result = make_clipboard_accumulate(cfg)
-        if result:
-            fn, reset = result
-            register(fn)
-            extras["clipboard_accumulate_reset"] = reset
-            logger.info("[handler] clipboard_accumulate")
+    result = make_clipboard_accumulate(cfg)
+    if result:
+        fn, reset, set_enabled, is_enabled = result
+        register(fn)
+        extras["clipboard_accumulate_reset"] = reset
+        extras["clipboard_accumulate_set_enabled"] = set_enabled
+        extras["clipboard_accumulate_is_enabled"] = is_enabled
+        logger.info("[handler] clipboard_accumulate")
 
-    if out["type_at_cursor"]["enabled"]:
-        result = make_type_at_cursor(cfg)
-        if result:
-            fn, set_enabled, toggle_enabled, is_enabled = result
-            register(fn)
-            extras["type_at_cursor_set_enabled"] = set_enabled
-            extras["type_at_cursor_toggle"] = toggle_enabled
-            extras["type_at_cursor_is_enabled"] = is_enabled
-            logger.info("[handler] type_at_cursor")
+    result = make_type_at_cursor(cfg)
+    if result:
+        fn, set_enabled, toggle_enabled, is_enabled = result
+        register(fn)
+        extras["type_at_cursor_set_enabled"] = set_enabled
+        extras["type_at_cursor_toggle"] = toggle_enabled
+        extras["type_at_cursor_is_enabled"] = is_enabled
+        logger.info("[handler] type_at_cursor")
 
     if cfg["nats"]["enabled"]:
         fn = make_nats_publisher(cfg)

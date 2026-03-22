@@ -148,6 +148,9 @@ words   = ["input"] # Exact match only; same behavior as the input-device cycle 
 [voice_commands.output_device_cycle]
 enabled = true
 words   = ["output"] # Exact match only; same behavior as the output-device cycle hotkey
+[voice_commands.output_mode_cycle]
+enabled = true
+words   = ["mode"] # Exact match only; cycles between the built-in output modes
 [voice_commands.buffer_release]
 enabled = true
 words   = ["buffer"]
@@ -184,6 +187,7 @@ typing_toggle        = "shift+f5"  # toggles type_at_cursor output
 input_device_cycle   = "shift+f6"  # cycles input device
 output_device_cycle  = "shift+f7"  # cycles audio feedback output device
 console_toggle       = "shift+f8"  # hides/shows the STT console so you can bring it back and Ctrl+C it
+output_mode_cycle    = "shift+f9"  # cycles runtime output mode presets without editing config.toml
 clipboard_accumulate_cycle = "ctrl+b"   # if output.clipboard_accumulate is enabled, clears clipboard and starts fresh accumulation
 
 # ── NATS ─────────────────────────────────────────────────────────────────────

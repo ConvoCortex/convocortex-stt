@@ -17,6 +17,7 @@ _path: Path | None = None
 _DEFAULTS = {
     "sleeping": True,
     "type_at_cursor_enabled": True,
+    "output_mode": "config-default",
     "last_input_device_name": "",
     "last_input_device_host_api": None,
     "last_output_device_name": "",

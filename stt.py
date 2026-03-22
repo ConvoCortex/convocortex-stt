@@ -217,6 +217,7 @@ SLEEP_START_SLEEPING = bool(_sw_cfg.get("start_sleeping", True))
 SLEEP_HOTKEY_TOGGLE = str(cfg["hotkeys"].get("sleep_toggle", "")).strip()
 SLEEP_HOTKEY_SUPPRESS = bool(cfg["hotkeys"].get("sleep_toggle_suppress", False))
 TYPE_TOGGLE_HOTKEY = str(cfg["hotkeys"].get("typing_toggle", "")).strip()
+OUTPUT_MODE_CYCLE_HOTKEY = str(cfg["hotkeys"].get("output_mode_cycle", "")).strip()
 CONSOLE_TOGGLE_HOTKEY = str(cfg["hotkeys"].get("console_toggle", "")).strip()
 SLEEP_STOP_WORDS = [
     _normalize_command_phrase(w)
@@ -318,6 +319,15 @@ OUTPUT_DEVICE_CYCLE_COMMAND_WORDS = [
     for w in cfg.get("voice_commands", {}).get("output_device_cycle", {}).get("words", [])
     if _normalize_command_phrase(w)
 ]
+OUTPUT_MODE_CYCLE_COMMAND_ENABLED = (
+    VOICE_COMMANDS_ENABLED
+    and bool(cfg.get("voice_commands", {}).get("output_mode_cycle", {}).get("enabled", False))
+)
+OUTPUT_MODE_CYCLE_COMMAND_WORDS = [
+    _normalize_command_phrase(w)
+    for w in cfg.get("voice_commands", {}).get("output_mode_cycle", {}).get("words", [])
+    if _normalize_command_phrase(w)
+]
 BUFFER_RELEASE_COMMAND_ENABLED = (
     VOICE_COMMANDS_ENABLED
     and bool(cfg.get("output", {}).get("file_buffer", {}).get("enabled", False))
@@ -349,8 +359,16 @@ ENTER_COMMAND_WORDS_EXACT = [
 UNDO_COMMAND_WORDS_EXACT = UNDO_COMMAND_WORDS
 INPUT_DEVICE_CYCLE_COMMAND_WORDS_EXACT = INPUT_DEVICE_CYCLE_COMMAND_WORDS
 OUTPUT_DEVICE_CYCLE_COMMAND_WORDS_EXACT = OUTPUT_DEVICE_CYCLE_COMMAND_WORDS
+OUTPUT_MODE_CYCLE_COMMAND_WORDS_EXACT = OUTPUT_MODE_CYCLE_COMMAND_WORDS
 BUFFER_RELEASE_COMMAND_WORDS_EXACT = BUFFER_RELEASE_COMMAND_WORDS
 BUFFER_CLEAR_COMMAND_WORDS_EXACT = BUFFER_CLEAR_COMMAND_WORDS
+
+OUTPUT_MODE_NAMES = [
+    "config-default",
+    "direct-cursor",
+    "draft-buffer",
+    "cursor-with-clipboard-last",
+]
 
 def _clamp_volume(v: float) -> float:
     return max(0.0, min(2.0, float(v)))
@@ -957,6 +975,10 @@ def main(args=None):
             kb.add_hotkey(TYPE_TOGGLE_HOTKEY, lambda: invoke_hotkey_target("typing_toggle"))
             logger.info(f"[hotkey] typing_toggle = {TYPE_TOGGLE_HOTKEY}")
 
+        if OUTPUT_MODE_CYCLE_HOTKEY:
+            kb.add_hotkey(OUTPUT_MODE_CYCLE_HOTKEY, lambda: invoke_hotkey_target("output_mode_cycle"))
+            logger.info(f"[hotkey] output_mode_cycle = {OUTPUT_MODE_CYCLE_HOTKEY}")
+
         if CONSOLE_TOGGLE_HOTKEY:
             if console_controller.available:
                 kb.add_hotkey(CONSOLE_TOGGLE_HOTKEY, lambda: invoke_hotkey_target("console_toggle"))
@@ -1229,6 +1251,11 @@ def main(args=None):
     typing_state = {
         "enabled": bool(_persisted.get("type_at_cursor_enabled", default_typing_enabled))
     }
+    output_mode_lock = threading.Lock()
+    persisted_output_mode = str(_persisted.get("output_mode", "config-default") or "config-default").strip().lower()
+    if persisted_output_mode not in OUTPUT_MODE_NAMES:
+        persisted_output_mode = "config-default"
+    output_mode_state = {"name": persisted_output_mode}
     voice_command_lock = threading.Lock()
     voice_command_seen_by_epoch: dict[int, set[str]] = {}
 
@@ -1237,6 +1264,37 @@ def main(args=None):
         type_set_enabled(typing_state["enabled"])
     else:
         typing_state["enabled"] = False
+
+    file_buffer_set_enabled = handler_extras.get("file_buffer_set_enabled")
+    clipboard_replace_set_enabled = handler_extras.get("clipboard_replace_set_enabled")
+    clipboard_accumulate_set_enabled = handler_extras.get("clipboard_accumulate_set_enabled")
+
+    output_mode_profiles = {
+        "config-default": {
+            "type_at_cursor": bool(cfg["output"]["type_at_cursor"]["enabled"]),
+            "file_buffer": bool(cfg["output"]["file_buffer"]["enabled"]),
+            "clipboard_replace": bool(cfg["output"]["clipboard_replace"]["enabled"]),
+            "clipboard_accumulate": bool(cfg["output"]["clipboard_accumulate"]["enabled"]),
+        },
+        "direct-cursor": {
+            "type_at_cursor": True,
+            "file_buffer": False,
+            "clipboard_replace": False,
+            "clipboard_accumulate": False,
+        },
+        "draft-buffer": {
+            "type_at_cursor": False,
+            "file_buffer": True,
+            "clipboard_replace": False,
+            "clipboard_accumulate": False,
+        },
+        "cursor-with-clipboard-last": {
+            "type_at_cursor": True,
+            "file_buffer": False,
+            "clipboard_replace": True,
+            "clipboard_accumulate": False,
+        },
+    }
 
     # ── State persistence helper ──────────────────────────────────────────────
     current_device_state = [{"name": dev_name, "host_api": resources['host_api']}]
@@ -1249,6 +1307,8 @@ def main(args=None):
             sleeping = mode_state["sleeping"]
         with typing_lock:
             typing_enabled = typing_state["enabled"]
+        with output_mode_lock:
+            output_mode_name = output_mode_state["name"]
         output_preference = (
             feedback.get_output_device_preference()
             if getattr(feedback, "enabled", False)
@@ -1257,11 +1317,50 @@ def main(args=None):
         state_store.save({
             "sleeping": sleeping,
             "type_at_cursor_enabled": typing_enabled,
+            "output_mode": output_mode_name,
             "last_input_device_name": current_device_state[0]["name"],
             "last_input_device_host_api": current_device_state[0]["host_api"],
             "last_output_device_name": output_preference.get("name", ""),
             "last_output_device_host_api": output_preference.get("host_api", None),
         })
+
+    def apply_output_mode(mode_name: str, *, reason: str = "", announce: bool = True) -> str:
+        normalized = str(mode_name or "").strip().lower()
+        if normalized not in output_mode_profiles:
+            normalized = "config-default"
+        profile = output_mode_profiles[normalized]
+
+        if file_buffer_set_enabled:
+            file_buffer_set_enabled(profile["file_buffer"])
+        if clipboard_replace_set_enabled:
+            clipboard_replace_set_enabled(profile["clipboard_replace"])
+        if clipboard_accumulate_set_enabled:
+            clipboard_accumulate_set_enabled(profile["clipboard_accumulate"])
+        if type_set_enabled:
+            type_set_enabled(profile["type_at_cursor"])
+            with typing_lock:
+                typing_state["enabled"] = bool(profile["type_at_cursor"])
+
+        with output_mode_lock:
+            previous = output_mode_state["name"]
+            output_mode_state["name"] = normalized
+
+        persist()
+
+        if announce and previous != normalized:
+            logger.info(f"[output_mode] {normalized}" + (f" ({reason})" if reason else ""))
+            dispatch({"type": "system", "event": "output_mode_changed", "mode": normalized})
+        return normalized
+
+    def cycle_output_mode(reason: str = "hotkey") -> str:
+        with output_mode_lock:
+            current = output_mode_state["name"]
+        try:
+            pos = OUTPUT_MODE_NAMES.index(current)
+        except ValueError:
+            pos = -1
+        next_mode = OUTPUT_MODE_NAMES[(pos + 1) % len(OUTPUT_MODE_NAMES)]
+        return apply_output_mode(next_mode, reason=reason)
 
     def set_sleeping(sleeping: bool, reason: str = ""):
         with mode_lock:
@@ -1394,6 +1493,13 @@ def main(args=None):
             if _mark_voice_command_seen(epoch, f"output_device_cycle:{normalized}"):
                 logger.info(f"[{source.upper()} +{t:.2f}s] → CMD output_device_cycle ({inf_ms}ms)")
                 cycle_output_device()
+                feedback.play_on()
+            return True
+
+        if OUTPUT_MODE_CYCLE_COMMAND_ENABLED and normalized in OUTPUT_MODE_CYCLE_COMMAND_WORDS_EXACT:
+            if _mark_voice_command_seen(epoch, f"output_mode_cycle:{normalized}"):
+                logger.info(f"[{source.upper()} +{t:.2f}s] → CMD output_mode_cycle ({inf_ms}ms)")
+                cycle_output_mode(reason=f"voice:{normalized}")
                 feedback.play_on()
             return True
 
@@ -1625,10 +1731,12 @@ def main(args=None):
             sleeping = mode_state["sleeping"]
         set_sleeping(not sleeping, reason="hotkey")
 
+    apply_output_mode(output_mode_state["name"], reason="startup", announce=False)
     set_hotkey_target("sleep_toggle", _sleep_toggle)
     set_hotkey_target("typing_toggle", lambda: toggle_typing_enabled(reason="hotkey"))
     set_hotkey_target("input_device_cycle", cycle_input_device)
     set_hotkey_target("output_device_cycle", cycle_output_device)
+    set_hotkey_target("output_mode_cycle", lambda: cycle_output_mode(reason="hotkey"))
     persist()
 
     # ── NATS control surface ──────────────────────────────────────────────────
@@ -1675,15 +1783,20 @@ def main(args=None):
                     set_typing_enabled(True, reason="nats:typing_enable")
                 elif cmd == "typing_disable":
                     set_typing_enabled(False, reason="nats:typing_disable")
+                elif cmd == "output_mode_cycle":
+                    cycle_output_mode(reason="nats:output_mode_cycle")
                 elif cmd == "status_query":
                     with mode_lock:
                         sleeping = mode_state["sleeping"]
                     with typing_lock:
                         typing_enabled = typing_state["enabled"]
+                    with output_mode_lock:
+                        output_mode_name = output_mode_state["name"]
                     reply = {
                         "sleeping": sleeping,
                         "mode": "sleeping" if sleeping else "working",
                         "typing_at_cursor_enabled": typing_enabled,
+                        "output_mode": output_mode_name,
                     }
                     if msg.reply:
                         await nc.publish(msg.reply, json.dumps(reply).encode())
@@ -1869,7 +1982,8 @@ def main(args=None):
 
     dispatch({"type": "system", "event": "startup",
               "device": dev_name,
-              "models": {"final": FINAL_MODEL, "realtime": REALTIME_MODEL}})
+              "models": {"final": FINAL_MODEL, "realtime": REALTIME_MODEL},
+              "output_mode": output_mode_state["name"]})
     dispatch({"type": "status", "value": "sleeping" if mode_state["sleeping"] else "working"})
     print("STT Ready!")
     sys.stdout.flush()
