@@ -212,7 +212,8 @@ Important areas:
 - `models`: realtime/final models and device choices
 - `audio`: VAD behavior + silence timeout + preferred input
 - `realtime`: partial cadence/window limits
-- `filters`: exact junk-phrase suppression before partial/final output is shown or dispatched
+- `filters.ignored_exact_phrases`: drops matching utterances entirely before partial/final output is shown or dispatched
+- `filters.disfluency_words`: strips configured filler/profanity words from otherwise valid transcripts, then cleans spacing/punctuation
 - `logging`: toggleable debug traces written to a file for freeze/debug analysis
 - `output`: handler toggles and paths, including editable `file_buffer`
 - `voice_commands`: built-in convenience command words

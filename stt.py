@@ -50,7 +50,35 @@ def _normalize_ignored_transcript(value: str) -> str:
     return normalized.strip(" \t\r\n.,!?;:'\"()[]{}")
 
 
+def _normalize_disfluency_phrase(value: str) -> str:
+    normalized = str(value).strip().lower().replace("-", " ")
+    normalized = re.sub(r"\s+", " ", normalized)
+    return normalized.strip(" \t\r\n.,!?;:'\"()[]{}")
+
+
+def _phrase_pattern(phrase: str) -> str:
+    parts = [re.escape(part) for part in phrase.split() if part]
+    return r"(?:[\s-]+)".join(parts)
+
+
+def _cleanup_transcript_text(text: str) -> str:
+    cleaned = re.sub(r"\s+", " ", str(text)).strip()
+    if not cleaned:
+        return ""
+
+    cleaned = re.sub(r"\s+([,.;:!?])", r"\1", cleaned)
+    cleaned = re.sub(r"([(\[{])\s+", r"\1", cleaned)
+    cleaned = re.sub(r"\s+([)\]}])", r"\1", cleaned)
+    cleaned = re.sub(r"\(\s*\)", "", cleaned)
+    cleaned = re.sub(r"\[\s*\]", "", cleaned)
+    cleaned = re.sub(r"\{\s*\}", "", cleaned)
+    cleaned = re.sub(r"^[,;:!?.\-]+", "", cleaned)
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    return cleaned
+
+
 cfg = config.load()
+FILTERS_CFG = cfg.get("filters", {})
 
 # ── Logging ───────────────────────────────────────────────────────────────────
 _log_cfg = cfg.get("logging", {})
@@ -220,10 +248,28 @@ IGNORED_TRANSCRIPTS = {
     normalized
     for normalized in (
         _normalize_ignored_transcript(w)
-        for w in cfg.get("filters", {}).get("ignored_exact_phrases", [])
+        for w in FILTERS_CFG.get("ignored_exact_phrases", [])
     )
     if normalized
 }
+DISFLUENCY_PATTERNS = [
+    re.compile(
+        rf"(?ix)(?:(?<=^)|(?<=[\s(\[{{\"'])){_phrase_pattern(phrase)}"
+        rf"(?:\s*[.,!?;:]+)?(?:(?=$)|(?=[\s)\]}}\"']))"
+    )
+    for phrase in sorted(
+        {
+            normalized
+            for normalized in (
+                _normalize_disfluency_phrase(w)
+                for w in FILTERS_CFG.get("disfluency_words", [])
+            )
+            if normalized
+        },
+        key=len,
+        reverse=True,
+    )
+]
 
 # ── Voice commands (minimal) ──────────────────────────────────────────────────
 VOICE_COMMANDS_ENABLED = bool(cfg.get("voice_commands", {}).get("enabled", False))
@@ -1281,6 +1327,16 @@ def main(args=None):
             return False
         return normalized in IGNORED_TRANSCRIPTS
 
+    def strip_disfluencies(text: str) -> str:
+        cleaned = str(text).strip()
+        if not cleaned or not DISFLUENCY_PATTERNS:
+            return cleaned
+
+        for pattern in DISFLUENCY_PATTERNS:
+            cleaned = pattern.sub(" ", cleaned)
+
+        return _cleanup_transcript_text(cleaned)
+
     def final_worker():
         while True:
             try:
@@ -1307,7 +1363,11 @@ def main(args=None):
                 if should_ignore_transcript(raw_text):
                     continue
 
-                text, actions = apply_voice_commands(raw_text)
+                cleaned_text = strip_disfluencies(raw_text)
+                if cleaned_text and apply_exact_voice_command(cleaned_text, epoch, t, inf_ms, source="final"):
+                    continue
+
+                text, actions = apply_voice_commands(cleaned_text)
                 if text or actions:
                     ev = {
                         "type": "final",
@@ -1405,10 +1465,15 @@ def main(args=None):
                 if should_ignore_transcript(text):
                     continue
 
-                if text:
+                cleaned_text = strip_disfluencies(text)
+                if cleaned_text and apply_exact_voice_command(cleaned_text, epoch, t, inf_ms, source="partial"):
+                    continue
+
+                if cleaned_text:
                     ev = {"type": "partial", "text": text, "epoch": epoch,
                           "t": round(t, 3), "inference_ms": inf_ms}
-                    logger.info(f"[PARTIAL +{t:.2f}s] → OUT  '{text}' ({inf_ms}ms)")
+                    ev["text"] = cleaned_text
+                    logger.info(f"[PARTIAL +{t:.2f}s] → OUT  '{cleaned_text}' ({inf_ms}ms)")
                     dispatch(ev)
             except Exception as e:
                 logger.error(f"[realtime_worker] {e}")
