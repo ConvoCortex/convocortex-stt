@@ -90,6 +90,16 @@ Commands are matched from partials (fast path) and finals (reliable path), using
 
 For a proper, richer voice command engine, use the emitted NATS events and implement command logic externally.
 
+### Practical device workflow
+
+One useful pattern is to keep two approved input devices and switch between them by voice:
+
+- use the desk microphone while you are at the PC, because it can sound better and it does not force bluetooth headphones into hands-free mic mode
+- say `input` when you want to walk away and switch to the headset microphone
+- say `input` again when you come back and want the desk microphone again
+
+This is a good fit for the built-in input-device cycle command because it lets you move between a higher-quality stationary mic and a mobile headset mic without touching the keyboard.
+
 ## Features
 
 - No GUI

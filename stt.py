@@ -1734,8 +1734,6 @@ def main(args=None):
     apply_output_mode(output_mode_state["name"], reason="startup", announce=False)
     set_hotkey_target("sleep_toggle", _sleep_toggle)
     set_hotkey_target("typing_toggle", lambda: toggle_typing_enabled(reason="hotkey"))
-    set_hotkey_target("input_device_cycle", cycle_input_device)
-    set_hotkey_target("output_device_cycle", cycle_output_device)
     set_hotkey_target("output_mode_cycle", lambda: cycle_output_mode(reason="hotkey"))
     persist()
 
@@ -1966,6 +1964,9 @@ def main(args=None):
         except Exception:
             pos = -1
         _pending_output_device[0] = devices[(pos + 1) % len(devices)]
+
+    set_hotkey_target("input_device_cycle", cycle_input_device)
+    set_hotkey_target("output_device_cycle", cycle_output_device)
 
     # ── Main loop ─────────────────────────────────────────────────────────────
     ring_buffer      = deque(maxlen=int(BUFFER_SECONDS * RATE / CHUNK))
