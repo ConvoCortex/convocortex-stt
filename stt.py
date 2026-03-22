@@ -865,6 +865,78 @@ def main(args=None):
         raise KeyboardInterrupt
     signal.signal(signal.SIGTERM, _sigterm)
 
+    console_controller = WindowsConsoleController()
+    hotkey_targets: dict[str, list] = {}
+    hotkey_not_ready_logged: set[str] = set()
+
+    def set_hotkey_target(name: str, func):
+        if name not in hotkey_targets:
+            hotkey_targets[name] = [None]
+        hotkey_targets[name][0] = func
+        hotkey_not_ready_logged.discard(name)
+
+    def invoke_hotkey_target(name: str):
+        target_ref = hotkey_targets.get(name)
+        target = target_ref[0] if target_ref else None
+        if target is None:
+            if name not in hotkey_not_ready_logged:
+                hotkey_not_ready_logged.add(name)
+                logger.info(f"[hotkey] {name} ignored during startup (not ready yet).")
+            return
+        target()
+
+    try:
+        import keyboard as kb
+    except ImportError:
+        kb = None
+        logger.warning("[hotkeys] keyboard not installed, hotkeys disabled.")
+
+    def register_hotkeys():
+        if kb is None:
+            return
+
+        hk = cfg["hotkeys"]
+
+        clipboard_cycle_hotkey = str(hk.get("clipboard_accumulate_cycle", "")).strip()
+        if clipboard_cycle_hotkey:
+            kb.add_hotkey(clipboard_cycle_hotkey, lambda: invoke_hotkey_target("clipboard_accumulate_cycle"))
+            logger.info(f"[hotkey] clipboard_accumulate_cycle = {clipboard_cycle_hotkey}")
+
+        input_cycle_hotkey = str(hk.get("input_device_cycle", "")).strip()
+        if input_cycle_hotkey:
+            kb.add_hotkey(input_cycle_hotkey, lambda: invoke_hotkey_target("input_device_cycle"))
+            logger.info(f"[hotkey] input_device_cycle = {input_cycle_hotkey}")
+
+        output_cycle_hotkey = str(hk.get("output_device_cycle", "")).strip()
+        if output_cycle_hotkey:
+            kb.add_hotkey(output_cycle_hotkey, lambda: invoke_hotkey_target("output_device_cycle"))
+            logger.info(f"[hotkey] output_device_cycle = {output_cycle_hotkey}")
+
+        if SLEEP_HOTKEY_TOGGLE:
+            kb.add_hotkey(
+                SLEEP_HOTKEY_TOGGLE,
+                lambda: invoke_hotkey_target("sleep_toggle"),
+                suppress=SLEEP_HOTKEY_SUPPRESS,
+            )
+            logger.info(
+                f"[hotkey] sleep_toggle = {SLEEP_HOTKEY_TOGGLE}"
+                f" suppress={SLEEP_HOTKEY_SUPPRESS}"
+            )
+
+        if TYPE_TOGGLE_HOTKEY:
+            kb.add_hotkey(TYPE_TOGGLE_HOTKEY, lambda: invoke_hotkey_target("typing_toggle"))
+            logger.info(f"[hotkey] typing_toggle = {TYPE_TOGGLE_HOTKEY}")
+
+        if CONSOLE_TOGGLE_HOTKEY:
+            if console_controller.available:
+                kb.add_hotkey(CONSOLE_TOGGLE_HOTKEY, lambda: invoke_hotkey_target("console_toggle"))
+                logger.info(f"[hotkey] console_toggle = {CONSOLE_TOGGLE_HOTKEY}")
+            else:
+                logger.warning("[hotkey] console_toggle requested but no Windows console is available.")
+
+    set_hotkey_target("console_toggle", lambda: console_controller.toggle(reason="hotkey"))
+    register_hotkeys()
+
     print(f"Initializing STT (Realtime: {REALTIME_DEVICE}, Final: {FINAL_DEVICE})...")
     sys.stdout.flush()
     debug_log(
@@ -1205,8 +1277,6 @@ def main(args=None):
         with typing_lock:
             return typing_state["enabled"]
 
-    console_controller = WindowsConsoleController()
-
     # ── Workers ───────────────────────────────────────────────────────────────
 
     def apply_voice_commands(final_text: str) -> tuple[str, dict]:
@@ -1487,52 +1557,18 @@ def main(args=None):
 
     # ── Hotkeys ───────────────────────────────────────────────────────────────
 
-    def setup_hotkeys():
-        try:
-            import keyboard as kb
-        except ImportError:
-            logger.warning("[hotkeys] keyboard not installed, hotkeys disabled.")
-            return
+    if "clipboard_accumulate_reset" in handler_extras:
+        set_hotkey_target("clipboard_accumulate_cycle", handler_extras["clipboard_accumulate_reset"])
 
-        hk = cfg["hotkeys"]
+    def _sleep_toggle():
+        with mode_lock:
+            sleeping = mode_state["sleeping"]
+        set_sleeping(not sleeping, reason="hotkey")
 
-        if hk.get("clipboard_accumulate_cycle") and "clipboard_accumulate_reset" in handler_extras:
-            kb.add_hotkey(hk["clipboard_accumulate_cycle"], handler_extras["clipboard_accumulate_reset"])
-            logger.info(f"[hotkey] clipboard_accumulate_cycle = {hk['clipboard_accumulate_cycle']}")
-
-        input_cycle_hotkey = str(hk.get("input_device_cycle", "")).strip()
-        if input_cycle_hotkey:
-            kb.add_hotkey(input_cycle_hotkey, lambda: cycle_input_device())
-            logger.info(f"[hotkey] input_device_cycle = {input_cycle_hotkey}")
-
-        if hk.get("output_device_cycle"):
-            kb.add_hotkey(hk["output_device_cycle"], lambda: cycle_output_device())
-            logger.info(f"[hotkey] output_device_cycle = {hk['output_device_cycle']}")
-
-        if SLEEP_HOTKEY_TOGGLE:
-            def _sleep_toggle():
-                with mode_lock:
-                    sleeping = mode_state["sleeping"]
-                set_sleeping(not sleeping, reason="hotkey")
-            kb.add_hotkey(SLEEP_HOTKEY_TOGGLE, _sleep_toggle, suppress=SLEEP_HOTKEY_SUPPRESS)
-            logger.info(
-                f"[hotkey] sleep_toggle = {SLEEP_HOTKEY_TOGGLE}"
-                f" suppress={SLEEP_HOTKEY_SUPPRESS}"
-            )
-
-        if TYPE_TOGGLE_HOTKEY:
-            kb.add_hotkey(TYPE_TOGGLE_HOTKEY, lambda: toggle_typing_enabled(reason="hotkey"))
-            logger.info(f"[hotkey] typing_toggle = {TYPE_TOGGLE_HOTKEY}")
-
-        if CONSOLE_TOGGLE_HOTKEY:
-            if console_controller.available:
-                kb.add_hotkey(CONSOLE_TOGGLE_HOTKEY, lambda: console_controller.toggle(reason="hotkey"))
-                logger.info(f"[hotkey] console_toggle = {CONSOLE_TOGGLE_HOTKEY}")
-            else:
-                logger.warning("[hotkey] console_toggle requested but no Windows console is available.")
-
-
-    setup_hotkeys()
+    set_hotkey_target("sleep_toggle", _sleep_toggle)
+    set_hotkey_target("typing_toggle", lambda: toggle_typing_enabled(reason="hotkey"))
+    set_hotkey_target("input_device_cycle", cycle_input_device)
+    set_hotkey_target("output_device_cycle", cycle_output_device)
     persist()
 
     # ── NATS control surface ──────────────────────────────────────────────────
