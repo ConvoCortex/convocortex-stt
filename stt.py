@@ -7,6 +7,7 @@ Output via configurable local handlers. NATS optional.
 """
 
 import argparse
+import copy
 import sys
 import time
 import queue
@@ -301,6 +302,15 @@ UNDO_COMMAND_WORDS = [
     for w in cfg.get("voice_commands", {}).get("undo", {}).get("words", [])
     if _normalize_command_phrase(w)
 ]
+REDO_COMMAND_ENABLED = (
+    VOICE_COMMANDS_ENABLED
+    and bool(cfg.get("voice_commands", {}).get("redo", {}).get("enabled", False))
+)
+REDO_COMMAND_WORDS = [
+    _normalize_command_phrase(w)
+    for w in cfg.get("voice_commands", {}).get("redo", {}).get("words", [])
+    if _normalize_command_phrase(w)
+]
 INPUT_DEVICE_CYCLE_COMMAND_ENABLED = (
     VOICE_COMMANDS_ENABLED
     and bool(cfg.get("voice_commands", {}).get("input_device_cycle", {}).get("enabled", False))
@@ -384,6 +394,7 @@ ENTER_COMMAND_WORDS_EXACT = [
     if _normalize_command_phrase(w)
 ]
 UNDO_COMMAND_WORDS_EXACT = UNDO_COMMAND_WORDS
+REDO_COMMAND_WORDS_EXACT = REDO_COMMAND_WORDS
 INPUT_DEVICE_CYCLE_COMMAND_WORDS_EXACT = INPUT_DEVICE_CYCLE_COMMAND_WORDS
 OUTPUT_DEVICE_CYCLE_COMMAND_WORDS_EXACT = OUTPUT_DEVICE_CYCLE_COMMAND_WORDS
 OUTPUT_MODE_DEFAULT_COMMAND_WORDS_EXACT = OUTPUT_MODE_DEFAULT_COMMAND_WORDS
@@ -1288,6 +1299,7 @@ def main(args=None):
     output_mode_state = {"name": persisted_output_mode}
     voice_command_lock = threading.Lock()
     voice_command_seen_by_epoch: dict[int, set[str]] = {}
+    last_replayable_final_event = [None]
 
     type_set_enabled = handler_extras.get("type_at_cursor_set_enabled")
     if type_set_enabled:
@@ -1391,6 +1403,20 @@ def main(args=None):
             pos = -1
         next_mode = OUTPUT_MODE_NAMES[(pos + 1) % len(OUTPUT_MODE_NAMES)]
         return apply_output_mode(next_mode, reason=reason)
+
+    def replay_last_final_event(epoch: int, t: float, inf_ms: int, source: str) -> bool:
+        event = last_replayable_final_event[0]
+        if not event:
+            logger.info(f"[{source.upper()} +{t:.2f}s] → CMD redo ignored (no replayable final event)")
+            return False
+        replay = copy.deepcopy(event)
+        replay["epoch"] = epoch
+        replay["t"] = round(t, 3)
+        replay["inference_ms"] = inf_ms
+        replay["replayed"] = True
+        logger.info(f"[{source.upper()} +{t:.2f}s] → CMD redo ({inf_ms}ms)")
+        dispatch(replay)
+        return True
 
     def set_sleeping(sleeping: bool, reason: str = ""):
         with mode_lock:
@@ -1510,6 +1536,12 @@ def main(args=None):
                     "inference_ms": inf_ms,
                 })
                 feedback.play_on()
+            return True
+
+        if REDO_COMMAND_ENABLED and normalized in REDO_COMMAND_WORDS_EXACT:
+            if _mark_voice_command_seen(epoch, f"redo:{normalized}"):
+                if replay_last_final_event(epoch, t, inf_ms, source):
+                    feedback.play_on()
             return True
 
         if INPUT_DEVICE_CYCLE_COMMAND_ENABLED and normalized in INPUT_DEVICE_CYCLE_COMMAND_WORDS_EXACT:
@@ -1665,6 +1697,8 @@ def main(args=None):
                     }
                     if actions:
                         ev["actions"] = actions
+                    if text:
+                        last_replayable_final_event[0] = copy.deepcopy(ev)
                     with mode_lock:
                         currently_sleeping = mode_state["sleeping"]
                     if currently_sleeping:

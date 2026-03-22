@@ -142,6 +142,9 @@ words   = ["typing"] # Detected at the start of utterance
 [voice_commands.undo]
 enabled = true
 words   = ["undo"] # Exact match only; routed to type_at_cursor undo behavior
+[voice_commands.redo]
+enabled = true
+words   = ["redo"] # Exact match only; re-emits the last replayable final event through current outputs
 [voice_commands.input_device_cycle]
 enabled = true
 words   = ["input"] # Exact match only; same behavior as the input-device cycle hotkey
