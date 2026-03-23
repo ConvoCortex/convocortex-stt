@@ -228,6 +228,7 @@ All runtime settings live in `config.toml` and are loaded at startup.
 
 Important areas:
 - `models`: realtime/final models and device choices
+- `models.no_speech_threshold` / `models.log_prob_threshold`: Whisper-side silence / low-confidence rejection for reducing spurious transcripts
 - `audio`: VAD behavior + silence timeout + preferred input
 - `startup`: whether startup restores last runtime state or uses config defaults for output mode and devices
 - `realtime`: partial cadence/window limits
@@ -272,7 +273,7 @@ The built-in runtime modes are:
 
 ### Type-at-cursor undo
 
-If `output.type_at_cursor.enabled = true`, the built-in exact voice command `undo` can send a best-effort undo action to the active app.
+If cursor typing is the active output path, the built-in exact voice command `undo` can send a best-effort undo action to the active app.
 
 Relevant settings:
 - `voice_commands.undo.words`: exact phrases that trigger the undo action
@@ -291,9 +292,12 @@ Relevant settings:
 - `output.file_buffer.separator`: separator inserted between finalized utterances
 - `output.file_buffer.clear_after_release`: clear the file after the `buffer` command types it
 - `output.file_buffer.reset_after_each_message`: clear the existing buffer before writing each new finalized utterance
+- `output.file_buffer.undo_history_limit`: in-memory cap for one-step-at-a-time buffer undos triggered by the exact `undo` voice command while file-buffer mode is active
 - `voice_commands.buffer_release.words`: exact phrases that trigger release
 - `voice_commands.buffer_release.press_enter_after`: optionally press Enter after typing the buffer
 - `voice_commands.buffer_clear.words`: exact phrases that clear the buffer without typing it
+
+In `draft-buffer` mode, `undo` rewinds `buffer.txt` one saved state at a time instead of sending a cursor undo. The default history cap is `10` buffer states and is not persisted across restarts.
 
 ### Debug logging
 
@@ -368,6 +372,19 @@ Send JSON to `nats.subject_control`:
 ## Acknowledgments
 
 This repository uses the same general stack as the RealTimeSTT ecosystem, but the runtime loop in this project is custom and lives in `stt.py`. The main transcription path here is built around PyAudio, Silero VAD, and faster-whisper/ctranslate2.
+
+## Responsible use
+
+This project is a general-purpose speech-to-text tool for local and networked desktop workflows.
+
+You are responsible for using it lawfully, including complying with rules that may apply to:
+- audio recording or monitoring
+- notice and consent
+- handling of personal, confidential, or sensitive data
+
+Do not use this software to violate privacy, confidentiality, platform terms, or applicable law.
+
+This README is not legal advice. Warranty and liability terms for the software itself are governed by the project license.
 
 ## License
 

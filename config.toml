@@ -27,6 +27,15 @@ final_compute  = "float16"
 # language: BCP-47 code e.g. "en", "fr", "de", "ja" — or remove/set to "" for auto-detect (slower)
 # auto-detect analyzes first 30s of audio. English-only models always use "en" regardless.
 language       = "en"
+# Whisper skip/silence gating.
+# faster-whisper library defaults for reference:
+#   no_speech_threshold = 0.6
+#   log_prob_threshold = -1.0
+# Tuned slightly stricter here to prefer dropping dubious audio over hallucinating text.
+# lower no_speech_threshold = more willing to treat weak audio as silence
+# higher log_prob_threshold = more willing to reject low-confidence decodes
+no_speech_threshold = 0.45
+log_prob_threshold = -0.8
 
 [audio]
 rate            = 16000  # sample rate — Whisper requires 16000, do not change
@@ -96,6 +105,7 @@ path    = "buffer.txt"
 separator = ""
 clear_after_release = true
 reset_after_each_message = false
+undo_history_limit = 10
 
 # use either output.clipboard_replace or output.clipboard_accumulate, not both at once
 [output.clipboard_replace]

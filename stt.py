@@ -194,6 +194,8 @@ FINAL_COMPUTE      = cfg["models"]["final_compute"]
 REALTIME_MODEL     = cfg["models"]["realtime"]
 REALTIME_DEVICE    = cfg["models"]["realtime_device"]
 LANGUAGE           = cfg["models"]["language"]
+WHISPER_NO_SPEECH_THRESHOLD = float(cfg["models"].get("no_speech_threshold", 0.6))
+WHISPER_LOG_PROB_THRESHOLD = float(cfg["models"].get("log_prob_threshold", -1.0))
 
 # ── Audio ─────────────────────────────────────────────────────────────────────
 RATE            = cfg["audio"]["rate"]
@@ -1019,7 +1021,9 @@ def main(args=None):
         "[startup] "
         f"rate={RATE} chunk={CHUNK} vad_threshold={VAD_THRESHOLD} "
         f"silence_timeout={SILENCE_TIMEOUT} rt_interval={RT_CHECK_INTERVAL} "
-        f"rt_queue_size={RT_QUEUE_SIZE} start_sleeping={SLEEP_START_SLEEPING}"
+        f"rt_queue_size={RT_QUEUE_SIZE} start_sleeping={SLEEP_START_SLEEPING} "
+        f"whisper_no_speech_threshold={WHISPER_NO_SPEECH_THRESHOLD} "
+        f"whisper_log_prob_threshold={WHISPER_LOG_PROB_THRESHOLD}"
     )
 
     resources = {}
@@ -1037,7 +1041,12 @@ def main(args=None):
         try:
             logger.info(f"Loading {FINAL_MODEL} ({FINAL_DEVICE})...")
             m = WhisperModel(FINAL_MODEL, device=FINAL_DEVICE, compute_type=FINAL_COMPUTE)
-            m.transcribe(warmup_audio, beam_size=1)
+            m.transcribe(
+                warmup_audio,
+                beam_size=1,
+                no_speech_threshold=WHISPER_NO_SPEECH_THRESHOLD,
+                log_prob_threshold=WHISPER_LOG_PROB_THRESHOLD,
+            )
             resources['final_model'] = m
             logger.info("Final model ready.")
         except Exception as e:
@@ -1052,7 +1061,12 @@ def main(args=None):
             logger.info(f"Loading {REALTIME_MODEL} ({REALTIME_DEVICE})...")
             compute = "default" if REALTIME_DEVICE == "cpu" else FINAL_COMPUTE
             m = WhisperModel(REALTIME_MODEL, device=REALTIME_DEVICE, compute_type=compute)
-            m.transcribe(warmup_audio, beam_size=1)
+            m.transcribe(
+                warmup_audio,
+                beam_size=1,
+                no_speech_threshold=WHISPER_NO_SPEECH_THRESHOLD,
+                log_prob_threshold=WHISPER_LOG_PROB_THRESHOLD,
+            )
             resources['realtime_model'] = m
             logger.info("Realtime model ready.")
         except Exception as e:
@@ -1292,12 +1306,14 @@ def main(args=None):
     last_replayable_final_event = [None]
 
     type_set_enabled = handler_extras.get("type_at_cursor_set_enabled")
+    type_is_enabled = handler_extras.get("type_at_cursor_is_enabled")
     if type_set_enabled:
         type_set_enabled(typing_state["enabled"])
     else:
         typing_state["enabled"] = False
 
     file_buffer_set_enabled = handler_extras.get("file_buffer_set_enabled")
+    file_buffer_is_enabled = handler_extras.get("file_buffer_is_enabled")
     clipboard_replace_set_enabled = handler_extras.get("clipboard_replace_set_enabled")
     clipboard_accumulate_set_enabled = handler_extras.get("clipboard_accumulate_set_enabled")
 
@@ -1514,13 +1530,19 @@ def main(args=None):
 
         if UNDO_COMMAND_ENABLED and normalized in UNDO_COMMAND_WORDS_EXACT:
             if _mark_voice_command_seen(epoch, f"undo:{normalized}"):
+                undo_actions = {}
+                if file_buffer_is_enabled and file_buffer_is_enabled():
+                    undo_actions["undo_file_buffer"] = True
+                elif type_is_enabled and type_is_enabled():
+                    undo_actions["undo_type_at_cursor"] = True
+                else:
+                    logger.info(f"[{source.upper()} +{t:.2f}s] → CMD undo ignored (no active undo target) ({inf_ms}ms)")
+                    return True
                 logger.info(f"[{source.upper()} +{t:.2f}s] → CMD undo ({inf_ms}ms)")
                 dispatch({
                     "type": "final",
                     "text": "",
-                    "actions": {
-                        "undo_type_at_cursor": True,
-                    },
+                    "actions": undo_actions,
                     "epoch": epoch,
                     "t": round(t, 3),
                     "inference_ms": inf_ms,
@@ -1676,7 +1698,13 @@ def main(args=None):
                 logger.info(f"[FINAL] Processing {len(audio)/RATE:.2f}s audio...")
 
                 t_start = time.time()
-                segs, _ = final_model.transcribe(audio, language=LANGUAGE, beam_size=5)
+                segs, _ = final_model.transcribe(
+                    audio,
+                    language=LANGUAGE,
+                    beam_size=5,
+                    no_speech_threshold=WHISPER_NO_SPEECH_THRESHOLD,
+                    log_prob_threshold=WHISPER_LOG_PROB_THRESHOLD,
+                )
                 raw_text = " ".join(s.text for s in segs).strip()
                 inf_ms = int((time.time() - t_start) * 1000)
                 t = time.time() - t0
@@ -1771,7 +1799,13 @@ def main(args=None):
 
                 audio = np.concatenate(audio_data).astype(np.float32) / 32768.0
                 t_start = time.time()
-                segs, _ = rt_model.transcribe(audio, language=LANGUAGE, beam_size=1)
+                segs, _ = rt_model.transcribe(
+                    audio,
+                    language=LANGUAGE,
+                    beam_size=1,
+                    no_speech_threshold=WHISPER_NO_SPEECH_THRESHOLD,
+                    log_prob_threshold=WHISPER_LOG_PROB_THRESHOLD,
+                )
                 text = " ".join(s.text for s in segs).strip()
                 inf_ms = int((time.time() - t_start) * 1000)
                 t = time.time() - t0

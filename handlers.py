@@ -8,6 +8,7 @@ Handlers are registered at startup based on config.
 
 import logging
 import threading
+from collections import deque
 from pathlib import Path
 
 logger = logging.getLogger("STT")
@@ -71,9 +72,11 @@ def make_file_buffer(cfg: dict):
     sep = bcfg["separator"]
     clear_after_release = bool(bcfg.get("clear_after_release", True))
     reset_after_each_message = bool(bcfg.get("reset_after_each_message", False))
+    undo_history_limit = max(0, int(bcfg.get("undo_history_limit", 10)))
     lock = threading.Lock()
     enabled_lock = threading.Lock()
     enabled_state = [bool(bcfg.get("enabled", False))]
+    undo_history = deque(maxlen=undo_history_limit) if undo_history_limit > 0 else None
 
     try:
         import keyboard
@@ -90,10 +93,22 @@ def make_file_buffer(cfg: dict):
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(content, encoding="utf-8")
 
+    def _remember_undo(previous: str, next_content: str):
+        if undo_history is None or previous == next_content:
+            return
+        undo_history.append(previous)
+
+    def _set_buffer(content: str):
+        with lock:
+            previous = _read_buffer()
+            _remember_undo(previous, content)
+            _write_buffer(content)
+
     def _append_buffer(text: str):
         with lock:
             existing = "" if reset_after_each_message else _read_buffer()
             combined = (existing + sep + text) if existing else text
+            _remember_undo(existing, combined)
             _write_buffer(combined)
 
     def set_enabled(enabled: bool):
@@ -105,9 +120,20 @@ def make_file_buffer(cfg: dict):
             return enabled_state[0]
 
     def _clear_buffer():
-        with lock:
-            _write_buffer("")
+        _set_buffer("")
         logger.info("[file_buffer] cleared")
+
+    def _undo_buffer():
+        if undo_history is None:
+            logger.info("[file_buffer] Undo ignored (undo_history_limit=0).")
+            return
+        with lock:
+            if not undo_history:
+                logger.info("[file_buffer] Undo ignored (history empty).")
+                return
+            restored = undo_history.pop()
+            _write_buffer(restored)
+        logger.info(f"[file_buffer] undo restored {len(restored)} chars")
 
     def _release_buffer(press_enter_after: bool = False):
         if keyboard is None:
@@ -116,6 +142,7 @@ def make_file_buffer(cfg: dict):
         with lock:
             content = _read_buffer()
             if clear_after_release:
+                _remember_undo(content, "")
                 _write_buffer("")
         if not content:
             logger.info("[file_buffer] Release ignored: buffer is empty.")
@@ -127,6 +154,12 @@ def make_file_buffer(cfg: dict):
 
     def file_buffer(event: dict):
         actions = event.get("actions", {}) or {}
+        if actions.get("undo_file_buffer"):
+            if not is_enabled():
+                logger.info("[file_buffer] Undo ignored (disabled).")
+                return
+            _undo_buffer()
+            return
         if actions.get("clear_file_buffer"):
             if not is_enabled():
                 logger.info("[file_buffer] Clear ignored (disabled).")
