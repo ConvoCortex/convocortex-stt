@@ -970,9 +970,12 @@ def main(args=None):
             return
 
         hk = cfg["hotkeys"]
+        clipboard_accumulate_enabled = bool(
+            cfg.get("output", {}).get("clipboard_accumulate", {}).get("enabled", False)
+        )
 
         clipboard_cycle_hotkey = str(hk.get("clipboard_accumulate_cycle", "")).strip()
-        if clipboard_cycle_hotkey:
+        if clipboard_cycle_hotkey and clipboard_accumulate_enabled:
             kb.add_hotkey(clipboard_cycle_hotkey, lambda: invoke_hotkey_target("clipboard_accumulate_cycle"))
             logger.info(f"[hotkey] clipboard_accumulate_cycle = {clipboard_cycle_hotkey}")
 
