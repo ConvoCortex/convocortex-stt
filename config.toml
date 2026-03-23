@@ -162,7 +162,7 @@ enabled = true
 words   = ["default mode"] # Exact match only; selects config-default output mode
 [voice_commands.output_mode_cursor]
 enabled = true
-words   = ["cursor mode"] # Exact match only; selects direct-cursor output mode
+words   = ["cursor mode", "Courser mode", "Corsair mode", "Coarser mode"] # Exact match only; selects direct-cursor output mode
 [voice_commands.output_mode_draft]
 enabled = true
 words   = ["draft mode"] # Exact match only; selects draft-buffer output mode
