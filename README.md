@@ -82,11 +82,13 @@ Current built-in command types:
 - input device cycle words
 - output device cycle words
 - output mode selection words
+- console show/hide words
 - enter trigger words
 - file-buffer release words
 - file-buffer clear words
 
 Commands are matched from partials (fast path) and finals (reliable path), using normalized exact matching for configured command phrases.
+If a command has no configured `words`, it is treated as disabled and is not loaded.
 
 For a proper, richer voice command engine, use the emitted NATS events and implement command logic externally.
 
@@ -227,6 +229,7 @@ All runtime settings live in `config.toml` and are loaded at startup.
 Important areas:
 - `models`: realtime/final models and device choices
 - `audio`: VAD behavior + silence timeout + preferred input
+- `startup`: whether startup restores last runtime state or uses config defaults for output mode and devices
 - `realtime`: partial cadence/window limits
 - `filters.ignored_exact_phrases`: drops matching utterances entirely before partial/final output is shown or dispatched
 - `filters.disfluency_words`: strips configured filler/profanity words from otherwise valid transcripts, then cleans spacing/punctuation
@@ -247,9 +250,17 @@ The repo currently has three output workflows that make sense as first-class set
 
 Those focused presets are provided as small snippets under `presets/output-modes/`. They describe the built-in runtime output modes.
 
-At runtime, output mode is treated as state, not as a config rewrite. By default:
+At runtime, output mode is treated as state, not as a config rewrite. Startup behavior is controlled by `startup.output_mode_source`:
 - hotkey `shift+f9` cycles output modes
 - exact voice commands `default mode`, `cursor mode`, `draft mode`, and `clipboard mode` select output modes directly
+
+Startup source controls:
+- `startup.output_mode_source = "state"` restores the last selected output mode from `state.json`
+- `startup.output_mode_source = "config"` always starts in `config-default`
+- `startup.input_device_source = "state"` restores the last runtime input device when possible
+- `startup.input_device_source = "config"` starts from `audio.input_device`, otherwise OS default input
+- `startup.output_device_source = "state"` restores the last runtime feedback output device when possible
+- `startup.output_device_source = "config"` starts from `feedback.output_device`, otherwise OS default output
 
 The built-in runtime modes are:
 - `config-default`: whatever `config.toml` says for the output handlers

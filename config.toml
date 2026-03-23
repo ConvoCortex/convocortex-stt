@@ -35,12 +35,18 @@ vad_threshold   = 0.5   # Silero VAD sensitivity 0–1 (lower = more sensitive, 
 buffer_seconds  = 1.0   # ring buffer before speech start — captures audio before VAD triggers
 silence_timeout = 0.8   # seconds of silence before ending an utterance and firing final transcription
 input_stall_reset_seconds = 1.5 # if audio capture stalls this long mid-utterance, drop buffered speech instead of resuming it later
-# startup input device override by exact device name; empty = use device profiles/remembered device/default
+# exact startup input device when startup.input_device_source = "config"; empty = OS default
 input_device    = ""
 # selected startup/cycling devices are stored here after first-run setup
 device_profiles_file = "device-profiles.json"
 # false = run the interactive device setup on next startup, then flip back to true
 device_setup_initialized = true
+
+[startup]
+# "config" = start from config.toml defaults, "state" = restore last runtime selection from state.json
+input_device_source = "config"
+output_device_source = "config"
+output_mode_source = "state"
 
 [realtime]
 # check_interval: how often (seconds) a partial transcription is triggered during speech
@@ -122,7 +128,7 @@ final_sound_enabled = true
 on_volume = 1.0
 off_volume = 1.0
 final_volume = 1.0
-# optional exact output device name for feedback sounds; empty = remembered last output device, then OS default
+# exact startup feedback output device when startup.output_device_source = "config"; empty = OS default
 output_device = ""
 
 # ── Voice commands ────────────────────────────────────────────────────────────
@@ -163,6 +169,12 @@ words   = ["draft mode"] # Exact match only; selects draft-buffer output mode
 [voice_commands.output_mode_clipboard]
 enabled = true
 words   = ["clipboard mode"] # Exact match only; selects cursor-with-clipboard-last output mode
+[voice_commands.console_show]
+enabled = true
+words   = ["show"] # Exact match only; shows the STT console, same target as shift+f8
+[voice_commands.console_hide]
+enabled = true
+words   = ["hide"] # Exact match only; hides the STT console, same target as shift+f8
 [voice_commands.buffer_release]
 enabled = true
 words   = ["buffer"]

@@ -205,6 +205,28 @@ INPUT_STALL_RESET_SECONDS = float(cfg["audio"].get("input_stall_reset_seconds", 
 PREFERRED_INPUT_DEVICE = str(cfg["audio"].get("input_device", "")).strip()
 DEVICE_PROFILES_PATH = Path(str(cfg["audio"].get("device_profiles_file", "device-profiles.json")).strip() or "device-profiles.json")
 DEVICE_SETUP_INITIALIZED = bool(cfg["audio"].get("device_setup_initialized", False))
+_startup_cfg = cfg.get("startup", {})
+
+
+def _normalize_startup_source(value, default: str) -> str:
+    normalized = str(value or "").strip().lower()
+    if normalized in {"config", "state"}:
+        return normalized
+    return default
+
+
+INPUT_DEVICE_STARTUP_SOURCE = _normalize_startup_source(
+    _startup_cfg.get("input_device_source", "state"),
+    "state",
+)
+OUTPUT_DEVICE_STARTUP_SOURCE = _normalize_startup_source(
+    _startup_cfg.get("output_device_source", "state"),
+    "state",
+)
+OUTPUT_MODE_STARTUP_SOURCE = _normalize_startup_source(
+    _startup_cfg.get("output_mode_source", "state"),
+    "state",
+)
 
 # ── Realtime ──────────────────────────────────────────────────────────────────
 RT_CHECK_INTERVAL = cfg["realtime"]["check_interval"]
@@ -275,124 +297,76 @@ DISFLUENCY_PATTERNS = [
 
 # ── Voice commands (minimal) ──────────────────────────────────────────────────
 VOICE_COMMANDS_ENABLED = bool(cfg.get("voice_commands", {}).get("enabled", False))
-ENTER_COMMAND_ENABLED = (
-    VOICE_COMMANDS_ENABLED
-    and bool(cfg.get("voice_commands", {}).get("enter", {}).get("enabled", False))
-)
+
+
+def _voice_command_words(name: str) -> list[str]:
+    return [
+        _normalize_command_phrase(w)
+        for w in cfg.get("voice_commands", {}).get(name, {}).get("words", [])
+        if _normalize_command_phrase(w)
+    ]
+
+
+def _voice_command_enabled(name: str, *, extra: bool = True) -> bool:
+    return (
+        VOICE_COMMANDS_ENABLED
+        and extra
+        and bool(cfg.get("voice_commands", {}).get(name, {}).get("enabled", False))
+        and bool(_voice_command_words(name))
+    )
+
+
 ENTER_COMMAND_WORDS = [
     str(w).strip()
     for w in cfg.get("voice_commands", {}).get("enter", {}).get("words", [])
     if str(w).strip()
-]
-TYPE_TOGGLE_COMMAND_ENABLED = (
-    VOICE_COMMANDS_ENABLED
-    and bool(cfg.get("voice_commands", {}).get("type_at_cursor_toggle", {}).get("enabled", False))
-)
-TYPE_TOGGLE_COMMAND_WORDS = [
-    _normalize_command_phrase(w)
-    for w in cfg.get("voice_commands", {}).get("type_at_cursor_toggle", {}).get("words", [])
-    if _normalize_command_phrase(w)
-]
-UNDO_COMMAND_ENABLED = (
-    VOICE_COMMANDS_ENABLED
-    and bool(cfg.get("voice_commands", {}).get("undo", {}).get("enabled", False))
-)
-UNDO_COMMAND_WORDS = [
-    _normalize_command_phrase(w)
-    for w in cfg.get("voice_commands", {}).get("undo", {}).get("words", [])
-    if _normalize_command_phrase(w)
-]
-REDO_COMMAND_ENABLED = (
-    VOICE_COMMANDS_ENABLED
-    and bool(cfg.get("voice_commands", {}).get("redo", {}).get("enabled", False))
-)
-REDO_COMMAND_WORDS = [
-    _normalize_command_phrase(w)
-    for w in cfg.get("voice_commands", {}).get("redo", {}).get("words", [])
-    if _normalize_command_phrase(w)
-]
-INPUT_DEVICE_CYCLE_COMMAND_ENABLED = (
-    VOICE_COMMANDS_ENABLED
-    and bool(cfg.get("voice_commands", {}).get("input_device_cycle", {}).get("enabled", False))
-)
-INPUT_DEVICE_CYCLE_COMMAND_WORDS = [
-    _normalize_command_phrase(w)
-    for w in cfg.get("voice_commands", {}).get("input_device_cycle", {}).get("words", [])
-    if _normalize_command_phrase(w)
-]
-OUTPUT_DEVICE_CYCLE_COMMAND_ENABLED = (
-    VOICE_COMMANDS_ENABLED
-    and bool(cfg.get("voice_commands", {}).get("output_device_cycle", {}).get("enabled", False))
-)
-OUTPUT_DEVICE_CYCLE_COMMAND_WORDS = [
-    _normalize_command_phrase(w)
-    for w in cfg.get("voice_commands", {}).get("output_device_cycle", {}).get("words", [])
-    if _normalize_command_phrase(w)
-]
-OUTPUT_MODE_DEFAULT_COMMAND_ENABLED = (
-    VOICE_COMMANDS_ENABLED
-    and bool(cfg.get("voice_commands", {}).get("output_mode_default", {}).get("enabled", False))
-)
-OUTPUT_MODE_DEFAULT_COMMAND_WORDS = [
-    _normalize_command_phrase(w)
-    for w in cfg.get("voice_commands", {}).get("output_mode_default", {}).get("words", [])
-    if _normalize_command_phrase(w)
-]
-OUTPUT_MODE_CURSOR_COMMAND_ENABLED = (
-    VOICE_COMMANDS_ENABLED
-    and bool(cfg.get("voice_commands", {}).get("output_mode_cursor", {}).get("enabled", False))
-)
-OUTPUT_MODE_CURSOR_COMMAND_WORDS = [
-    _normalize_command_phrase(w)
-    for w in cfg.get("voice_commands", {}).get("output_mode_cursor", {}).get("words", [])
-    if _normalize_command_phrase(w)
-]
-OUTPUT_MODE_DRAFT_COMMAND_ENABLED = (
-    VOICE_COMMANDS_ENABLED
-    and bool(cfg.get("voice_commands", {}).get("output_mode_draft", {}).get("enabled", False))
-)
-OUTPUT_MODE_DRAFT_COMMAND_WORDS = [
-    _normalize_command_phrase(w)
-    for w in cfg.get("voice_commands", {}).get("output_mode_draft", {}).get("words", [])
-    if _normalize_command_phrase(w)
-]
-OUTPUT_MODE_CLIPBOARD_COMMAND_ENABLED = (
-    VOICE_COMMANDS_ENABLED
-    and bool(cfg.get("voice_commands", {}).get("output_mode_clipboard", {}).get("enabled", False))
-)
-OUTPUT_MODE_CLIPBOARD_COMMAND_WORDS = [
-    _normalize_command_phrase(w)
-    for w in cfg.get("voice_commands", {}).get("output_mode_clipboard", {}).get("words", [])
-    if _normalize_command_phrase(w)
-]
-BUFFER_RELEASE_COMMAND_ENABLED = (
-    VOICE_COMMANDS_ENABLED
-    and bool(cfg.get("output", {}).get("file_buffer", {}).get("enabled", False))
-    and bool(cfg.get("voice_commands", {}).get("buffer_release", {}).get("enabled", False))
-)
-BUFFER_RELEASE_COMMAND_WORDS = [
-    _normalize_command_phrase(w)
-    for w in cfg.get("voice_commands", {}).get("buffer_release", {}).get("words", [])
-    if _normalize_command_phrase(w)
-]
-BUFFER_RELEASE_COMMAND_PRESS_ENTER_AFTER = bool(
-    cfg.get("voice_commands", {}).get("buffer_release", {}).get("press_enter_after", False)
-)
-BUFFER_CLEAR_COMMAND_ENABLED = (
-    VOICE_COMMANDS_ENABLED
-    and bool(cfg.get("output", {}).get("file_buffer", {}).get("enabled", False))
-    and bool(cfg.get("voice_commands", {}).get("buffer_clear", {}).get("enabled", False))
-)
-BUFFER_CLEAR_COMMAND_WORDS = [
-    _normalize_command_phrase(w)
-    for w in cfg.get("voice_commands", {}).get("buffer_clear", {}).get("words", [])
-    if _normalize_command_phrase(w)
 ]
 ENTER_COMMAND_WORDS_EXACT = [
     _normalize_command_phrase(w)
     for w in ENTER_COMMAND_WORDS
     if _normalize_command_phrase(w)
 ]
+ENTER_COMMAND_ENABLED = (
+    VOICE_COMMANDS_ENABLED
+    and bool(cfg.get("voice_commands", {}).get("enter", {}).get("enabled", False))
+    and bool(ENTER_COMMAND_WORDS)
+    and bool(ENTER_COMMAND_WORDS_EXACT)
+)
+TYPE_TOGGLE_COMMAND_WORDS = _voice_command_words("type_at_cursor_toggle")
+TYPE_TOGGLE_COMMAND_ENABLED = _voice_command_enabled("type_at_cursor_toggle")
+UNDO_COMMAND_WORDS = _voice_command_words("undo")
+UNDO_COMMAND_ENABLED = _voice_command_enabled("undo")
+REDO_COMMAND_WORDS = _voice_command_words("redo")
+REDO_COMMAND_ENABLED = _voice_command_enabled("redo")
+INPUT_DEVICE_CYCLE_COMMAND_WORDS = _voice_command_words("input_device_cycle")
+INPUT_DEVICE_CYCLE_COMMAND_ENABLED = _voice_command_enabled("input_device_cycle")
+OUTPUT_DEVICE_CYCLE_COMMAND_WORDS = _voice_command_words("output_device_cycle")
+OUTPUT_DEVICE_CYCLE_COMMAND_ENABLED = _voice_command_enabled("output_device_cycle")
+OUTPUT_MODE_DEFAULT_COMMAND_WORDS = _voice_command_words("output_mode_default")
+OUTPUT_MODE_DEFAULT_COMMAND_ENABLED = _voice_command_enabled("output_mode_default")
+OUTPUT_MODE_CURSOR_COMMAND_WORDS = _voice_command_words("output_mode_cursor")
+OUTPUT_MODE_CURSOR_COMMAND_ENABLED = _voice_command_enabled("output_mode_cursor")
+OUTPUT_MODE_DRAFT_COMMAND_WORDS = _voice_command_words("output_mode_draft")
+OUTPUT_MODE_DRAFT_COMMAND_ENABLED = _voice_command_enabled("output_mode_draft")
+OUTPUT_MODE_CLIPBOARD_COMMAND_WORDS = _voice_command_words("output_mode_clipboard")
+OUTPUT_MODE_CLIPBOARD_COMMAND_ENABLED = _voice_command_enabled("output_mode_clipboard")
+CONSOLE_SHOW_COMMAND_WORDS = _voice_command_words("console_show")
+CONSOLE_SHOW_COMMAND_ENABLED = _voice_command_enabled("console_show")
+CONSOLE_HIDE_COMMAND_WORDS = _voice_command_words("console_hide")
+CONSOLE_HIDE_COMMAND_ENABLED = _voice_command_enabled("console_hide")
+BUFFER_RELEASE_COMMAND_WORDS = _voice_command_words("buffer_release")
+BUFFER_RELEASE_COMMAND_ENABLED = _voice_command_enabled(
+    "buffer_release",
+    extra=bool(cfg.get("output", {}).get("file_buffer", {}).get("enabled", False)),
+)
+BUFFER_RELEASE_COMMAND_PRESS_ENTER_AFTER = bool(
+    cfg.get("voice_commands", {}).get("buffer_release", {}).get("press_enter_after", False)
+)
+BUFFER_CLEAR_COMMAND_WORDS = _voice_command_words("buffer_clear")
+BUFFER_CLEAR_COMMAND_ENABLED = _voice_command_enabled(
+    "buffer_clear",
+    extra=bool(cfg.get("output", {}).get("file_buffer", {}).get("enabled", False)),
+)
 UNDO_COMMAND_WORDS_EXACT = UNDO_COMMAND_WORDS
 REDO_COMMAND_WORDS_EXACT = REDO_COMMAND_WORDS
 INPUT_DEVICE_CYCLE_COMMAND_WORDS_EXACT = INPUT_DEVICE_CYCLE_COMMAND_WORDS
@@ -401,6 +375,8 @@ OUTPUT_MODE_DEFAULT_COMMAND_WORDS_EXACT = OUTPUT_MODE_DEFAULT_COMMAND_WORDS
 OUTPUT_MODE_CURSOR_COMMAND_WORDS_EXACT = OUTPUT_MODE_CURSOR_COMMAND_WORDS
 OUTPUT_MODE_DRAFT_COMMAND_WORDS_EXACT = OUTPUT_MODE_DRAFT_COMMAND_WORDS
 OUTPUT_MODE_CLIPBOARD_COMMAND_WORDS_EXACT = OUTPUT_MODE_CLIPBOARD_COMMAND_WORDS
+CONSOLE_SHOW_COMMAND_WORDS_EXACT = CONSOLE_SHOW_COMMAND_WORDS
+CONSOLE_HIDE_COMMAND_WORDS_EXACT = CONSOLE_HIDE_COMMAND_WORDS
 BUFFER_RELEASE_COMMAND_WORDS_EXACT = BUFFER_RELEASE_COMMAND_WORDS
 BUFFER_CLEAR_COMMAND_WORDS_EXACT = BUFFER_CLEAR_COMMAND_WORDS
 
@@ -656,6 +632,7 @@ class FeedbackAudio:
         off_volume: float,
         final_volume: float,
         output_device: str,
+        startup_source: str = "state",
         persisted_output_device_name: str = "",
         persisted_output_device_host_api: int | None = None,
     ):
@@ -669,12 +646,18 @@ class FeedbackAudio:
         self.off_volume = _clamp_volume(off_volume)
         self.final_volume = _clamp_volume(final_volume)
         self.output_device = output_device
+        self.startup_source = _normalize_startup_source(startup_source, "state")
         self._persisted_output_device_name = str(persisted_output_device_name or "").strip()
         self._persisted_output_device_host_api = persisted_output_device_host_api
-        self._preferred_output_device_name = str(output_device or "").strip() or self._persisted_output_device_name
-        self._preferred_output_device_host_api = (
-            None if str(output_device or "").strip() else persisted_output_device_host_api
-        )
+        configured_output_name = str(output_device or "").strip()
+        if self.startup_source == "config":
+            self._preferred_output_device_name = configured_output_name
+            self._preferred_output_device_host_api = None
+        else:
+            self._preferred_output_device_name = configured_output_name or self._persisted_output_device_name
+            self._preferred_output_device_host_api = (
+                None if configured_output_name else persisted_output_device_host_api
+            )
         self._p_sfx = None
         self._p_silence = None
         self._output_device_index = None
@@ -768,7 +751,7 @@ class FeedbackAudio:
 
         desired_name = str(self._preferred_output_device_name or "").strip()
         desired_host_api = self._preferred_output_device_host_api
-        source = "config" if str(self.output_device or "").strip() else "persisted"
+        source = "config" if self.startup_source == "config" else "persisted"
 
         info = None
         if desired_name:
@@ -1135,7 +1118,7 @@ def main(args=None):
 
             persisted_name = str(_persisted.get("last_input_device_name") or "").strip()
             persisted_host_api = _persisted.get("last_input_device_host_api")
-            if APPROVED_INPUT_PROFILES:
+            if INPUT_DEVICE_STARTUP_SOURCE == "state" and APPROVED_INPUT_PROFILES:
                 approved_infos = order_devices_by_profiles(available_inputs, APPROVED_INPUT_PROFILES)
                 if persisted_name:
                     persisted_info = _find_device_by_name(persisted_name, persisted_host_api)
@@ -1146,7 +1129,7 @@ def main(args=None):
             else:
                 if PREFERRED_INPUT_DEVICE:
                     _push_candidate("Configured", _find_device_by_name(PREFERRED_INPUT_DEVICE), PREFERRED_INPUT_DEVICE)
-                elif persisted_name:
+                elif INPUT_DEVICE_STARTUP_SOURCE == "state" and persisted_name:
                     persisted_info = _find_device_by_name(persisted_name, persisted_host_api)
                     if not persisted_info:
                         persisted_info = _find_device_by_name(persisted_name)
@@ -1250,11 +1233,16 @@ def main(args=None):
         off_volume=FEEDBACK_OFF_VOLUME,
         final_volume=FEEDBACK_FINAL_VOLUME,
         output_device=FEEDBACK_OUTPUT_DEVICE,
+        startup_source=OUTPUT_DEVICE_STARTUP_SOURCE,
         persisted_output_device_name=persisted_output_name,
         persisted_output_device_host_api=persisted_output_host_api,
     )
 
-    if getattr(feedback, "enabled", False) and APPROVED_OUTPUT_PROFILES:
+    if (
+        getattr(feedback, "enabled", False)
+        and OUTPUT_DEVICE_STARTUP_SOURCE == "state"
+        and APPROVED_OUTPUT_PROFILES
+    ):
         approved_output_infos = order_devices_by_profiles(
             available_output_devices(p_instance, include_alias=True),
             APPROVED_OUTPUT_PROFILES,
@@ -1293,10 +1281,12 @@ def main(args=None):
         "enabled": bool(_persisted.get("type_at_cursor_enabled", default_typing_enabled))
     }
     output_mode_lock = threading.Lock()
-    persisted_output_mode = str(_persisted.get("output_mode", "config-default") or "config-default").strip().lower()
-    if persisted_output_mode not in OUTPUT_MODE_NAMES:
-        persisted_output_mode = "config-default"
-    output_mode_state = {"name": persisted_output_mode}
+    startup_output_mode = "config-default"
+    if OUTPUT_MODE_STARTUP_SOURCE == "state":
+        startup_output_mode = str(_persisted.get("output_mode", "config-default") or "config-default").strip().lower()
+        if startup_output_mode not in OUTPUT_MODE_NAMES:
+            startup_output_mode = "config-default"
+    output_mode_state = {"name": startup_output_mode}
     voice_command_lock = threading.Lock()
     voice_command_seen_by_epoch: dict[int, set[str]] = {}
     last_replayable_final_event = [None]
@@ -1584,6 +1574,20 @@ def main(args=None):
                 logger.info(f"[{source.upper()} +{t:.2f}s] → CMD output_mode=cursor-with-clipboard-last ({inf_ms}ms)")
                 apply_output_mode("cursor-with-clipboard-last", reason=f"voice:{normalized}")
                 feedback.play_on()
+            return True
+
+        if CONSOLE_SHOW_COMMAND_ENABLED and normalized in CONSOLE_SHOW_COMMAND_WORDS_EXACT:
+            if _mark_voice_command_seen(epoch, f"console_show:{normalized}"):
+                logger.info(f"[{source.upper()} +{t:.2f}s] → CMD console_show ({inf_ms}ms)")
+                if console_controller.show(reason=f"voice:{normalized}"):
+                    feedback.play_on()
+            return True
+
+        if CONSOLE_HIDE_COMMAND_ENABLED and normalized in CONSOLE_HIDE_COMMAND_WORDS_EXACT:
+            if _mark_voice_command_seen(epoch, f"console_hide:{normalized}"):
+                logger.info(f"[{source.upper()} +{t:.2f}s] → CMD console_hide ({inf_ms}ms)")
+                if console_controller.hide(reason=f"voice:{normalized}"):
+                    feedback.play_on()
             return True
 
         if ENTER_COMMAND_ENABLED and normalized in ENTER_COMMAND_WORDS_EXACT:
