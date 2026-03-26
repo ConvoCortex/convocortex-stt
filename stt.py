@@ -270,6 +270,7 @@ FEEDBACK_OUTPUT_DEVICE = str(_fb_cfg.get("output_device", "")).strip()
 EXPECTED_CHUNK_MS = (CHUNK / RATE) * 1000.0
 INPUT_PROBE_READ_LIMIT_MS = max(400.0, EXPECTED_CHUNK_MS * 8.0)
 INPUT_PROBE_READS = 2
+DEVICE_RETRY_COOLDOWN_SECONDS = 30.0
 IGNORED_TRANSCRIPTS = {
     normalized
     for normalized in (
@@ -799,7 +800,14 @@ class FeedbackAudio:
             return None
         return (int(self._probe_sr), int(self._probe_channels))
 
-    def try_set_output_device_index(self, device_index: int, device_name: str, host_api: int | None = None) -> bool:
+    def try_set_output_device_index(
+        self,
+        device_index: int,
+        device_name: str,
+        host_api: int | None = None,
+        *,
+        update_preference: bool = True,
+    ) -> bool:
         if not self.enabled or self._p_sfx is None:
             return False
         if not self._supports_output_format(self._p_sfx, int(device_index)):
@@ -830,8 +838,9 @@ class FeedbackAudio:
             self._output_device_index = int(device_index)
             self._output_device_name = str(device_name or "").strip()
             self._output_device_host_api = host_api
-            self._preferred_output_device_name = self._output_device_name
-            self._preferred_output_device_host_api = host_api
+            if update_preference:
+                self._preferred_output_device_name = self._output_device_name
+                self._preferred_output_device_host_api = host_api
         return True
 
     def _load_clip(self, torchaudio, path: str, volume: float = 1.0):
@@ -1280,6 +1289,7 @@ def main(args=None):
                 int(candidate_info["index"]),
                 str(candidate_info.get("name", "")),
                 candidate_info.get("hostApi"),
+                update_preference=False,
             ):
                 logger.info(f"[feedback] Approved output selected: {candidate_info['name']}")
                 break
@@ -1347,6 +1357,15 @@ def main(args=None):
         },
     }
 
+    # Keep the user's selected device durable even if startup had to fall back.
+    preferred_input_device_state = [{"name": "", "host_api": None}]
+    if INPUT_DEVICE_STARTUP_SOURCE == "config" and PREFERRED_INPUT_DEVICE:
+        preferred_input_device_state[0] = {"name": PREFERRED_INPUT_DEVICE, "host_api": None}
+    elif INPUT_DEVICE_STARTUP_SOURCE == "state" and persisted_name:
+        preferred_input_device_state[0] = {"name": persisted_name, "host_api": persisted_host_api}
+    else:
+        preferred_input_device_state[0] = {"name": dev_name, "host_api": resources['host_api']}
+
     # ── State persistence helper ──────────────────────────────────────────────
     current_device_state = [{"name": dev_name, "host_api": resources['host_api']}]
     current_output_device_state = [
@@ -1369,8 +1388,8 @@ def main(args=None):
             "sleeping": sleeping,
             "type_at_cursor_enabled": typing_enabled,
             "output_mode": output_mode_name,
-            "last_input_device_name": current_device_state[0]["name"],
-            "last_input_device_host_api": current_device_state[0]["host_api"],
+            "last_input_device_name": preferred_input_device_state[0]["name"],
+            "last_input_device_host_api": preferred_input_device_state[0]["host_api"],
             "last_output_device_name": output_preference.get("name", ""),
             "last_output_device_host_api": output_preference.get("host_api", None),
         })
@@ -1994,9 +2013,18 @@ def main(args=None):
     current_device_idx = [resources['dev_idx']]
     current_capture_rate = [resources.get('capture_rate', RATE)]
     _pending_device    = [None]   # (idx, name, info) set by hotkey, consumed by main loop
-    _bad_devices       = set()    # (name, host_api) tuples that failed to open; skipped in cycle
-    _bad_output_devices = set()
+    _bad_devices       = {}       # (name, host_api) -> retry_at monotonic timestamp
+    _bad_output_devices = {}
     _pending_output_device = [None]  # (idx, name, info) set by hotkey, consumed by main loop
+
+    def _device_temporarily_blocked(bad_devices: dict, key: tuple[str, int | None]) -> bool:
+        retry_at = bad_devices.get(key)
+        if retry_at is None:
+            return False
+        if time.monotonic() >= retry_at:
+            bad_devices.pop(key, None)
+            return False
+        return True
 
     def _enumerate_input_devices():
         """Read-only enumeration — safe to call from any thread."""
@@ -2007,7 +2035,7 @@ def main(args=None):
         seen = set()
         for info in infos:
             key = (str(info.get('name', '')).strip(), info.get('hostApi'))
-            if key in _bad_devices:
+            if _device_temporarily_blocked(_bad_devices, key):
                 continue
             if not APPROVED_INPUT_PROFILES and key[0] in ALIAS_DEVICE_NAMES:
                 continue
@@ -2029,7 +2057,7 @@ def main(args=None):
         probe_format = feedback.get_probe_format() if hasattr(feedback, 'get_probe_format') else None
         for info in infos:
             key = (str(info.get('name', '')).strip(), info.get('hostApi'))
-            if key in _bad_output_devices:
+            if _device_temporarily_blocked(_bad_output_devices, key):
                 continue
             if not APPROVED_OUTPUT_PROFILES and key[0] in ALIAS_DEVICE_NAMES:
                 continue
@@ -2192,6 +2220,7 @@ def main(args=None):
                         current_device_idx[0] = next_idx
                         current_capture_rate[0] = int(input_session.capture_rate)
                         current_device_state[0] = {"name": next_name, "host_api": next_info.get("hostApi")}
+                        preferred_input_device_state[0] = dict(current_device_state[0])
                         wakeword_buffer = np.array([], dtype=np.int16)
                         ring_buffer.clear(); recording_buffer.clear(); is_recording = False
                         logger.info(
@@ -2206,7 +2235,9 @@ def main(args=None):
                         persist()
                         break
                     except Exception as e:
-                        _bad_devices.add((str(next_name), next_info.get("hostApi")))
+                        _bad_devices[(str(next_name), next_info.get("hostApi"))] = (
+                            time.monotonic() + DEVICE_RETRY_COOLDOWN_SECONDS
+                        )
                         logger.warning(f"[device] Skipping {next_name}: {e}")
                         try:
                             if prev_info is not None:
@@ -2256,7 +2287,9 @@ def main(args=None):
                         persist()
                         switched = True
                         break
-                    _bad_output_devices.add((str(next_name), next_host_api))
+                    _bad_output_devices[(str(next_name), next_host_api)] = (
+                        time.monotonic() + DEVICE_RETRY_COOLDOWN_SECONDS
+                    )
                     logger.warning(f"[feedback] Skipping output {next_name}")
                 if not switched:
                     logger.warning("[feedback] Output device cycle failed (all candidates rejected).")
