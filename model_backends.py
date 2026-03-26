@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import tempfile
 import wave
 from dataclasses import dataclass
@@ -9,6 +10,9 @@ from typing import Any
 import numpy as np
 import torch
 from faster_whisper import WhisperModel
+
+
+_RUNTIME_TEMP_DIR = Path(__file__).resolve().parent / ".tmp"
 
 
 def _resolve_device(device: str) -> str:
@@ -38,6 +42,17 @@ def _extract_text(value: Any) -> str:
         parts = [_extract_text(item) for item in value]
         return " ".join(part for part in parts if part).strip()
     return str(value).strip()
+
+
+def _ensure_runtime_tempdir() -> str:
+    path = _RUNTIME_TEMP_DIR
+    path.mkdir(parents=True, exist_ok=True)
+    resolved = str(path)
+    os.environ["TMP"] = resolved
+    os.environ["TEMP"] = resolved
+    os.environ["TMPDIR"] = resolved
+    tempfile.tempdir = resolved
+    return resolved
 
 
 @dataclass
@@ -87,6 +102,7 @@ class ParakeetBackend(TranscriptionBackend):
     name = "parakeet"
 
     def __init__(self, model_name: str, device: str) -> None:
+        _ensure_runtime_tempdir()
         try:
             import nemo.collections.asr as nemo_asr
         except Exception as exc:
