@@ -21,7 +21,6 @@ from pathlib import Path
 import numpy as np
 import pyaudio
 import pvporcupine
-from faster_whisper import WhisperModel
 
 from audio_devices import (
     ALIAS_DEVICE_NAMES,
@@ -38,6 +37,7 @@ from audio_devices import (
     save_profiles,
 )
 import config
+from model_backends import load_backend
 import state as state_store
 
 
@@ -108,6 +108,8 @@ def _setup_logging():
     fw_level = logging.DEBUG if DEBUG_LOGGING_ENABLED and THIRD_PARTY_DEBUG_LOGGING else logging.WARNING
     logging.getLogger("faster_whisper").setLevel(fw_level)
     logging.getLogger("ctranslate2").setLevel(fw_level)
+    logging.getLogger("nemo").setLevel(fw_level)
+    logging.getLogger("lightning").setLevel(fw_level)
 
     configured_logger = logging.getLogger("STT")
     if DEBUG_LOGGING_ENABLED:
@@ -191,8 +193,10 @@ class WindowsConsoleController:
 FINAL_MODEL        = cfg["models"]["final"]
 FINAL_DEVICE       = cfg["models"]["final_device"]
 FINAL_COMPUTE      = cfg["models"]["final_compute"]
+FINAL_BACKEND      = str(cfg["models"].get("final_backend", "whisper")).strip().lower()
 REALTIME_MODEL     = cfg["models"]["realtime"]
 REALTIME_DEVICE    = cfg["models"]["realtime_device"]
+REALTIME_BACKEND   = str(cfg["models"].get("realtime_backend", "whisper")).strip().lower()
 LANGUAGE           = cfg["models"]["language"]
 WHISPER_NO_SPEECH_THRESHOLD = float(cfg["models"].get("no_speech_threshold", 0.6))
 WHISPER_LOG_PROB_THRESHOLD = float(cfg["models"].get("log_prob_threshold", -1.0))
@@ -1034,6 +1038,7 @@ def main(args=None):
         f"rate={RATE} chunk={CHUNK} vad_threshold={VAD_THRESHOLD} "
         f"silence_timeout={SILENCE_TIMEOUT} rt_interval={RT_CHECK_INTERVAL} "
         f"rt_queue_size={RT_QUEUE_SIZE} start_sleeping={SLEEP_START_SLEEPING} "
+        f"final_backend={FINAL_BACKEND} realtime_backend={REALTIME_BACKEND} "
         f"whisper_no_speech_threshold={WHISPER_NO_SPEECH_THRESHOLD} "
         f"whisper_log_prob_threshold={WHISPER_LOG_PROB_THRESHOLD}"
     )
@@ -1051,14 +1056,16 @@ def main(args=None):
 
     def load_final():
         try:
-            logger.info(f"Loading {FINAL_MODEL} ({FINAL_DEVICE})...")
-            m = WhisperModel(FINAL_MODEL, device=FINAL_DEVICE, compute_type=FINAL_COMPUTE)
-            m.transcribe(
-                warmup_audio,
-                beam_size=1,
+            logger.info(f"Loading final {FINAL_BACKEND} model {FINAL_MODEL} ({FINAL_DEVICE})...")
+            m = load_backend(
+                backend_name=FINAL_BACKEND,
+                model_name=FINAL_MODEL,
+                device=FINAL_DEVICE,
+                compute_type=FINAL_COMPUTE,
                 no_speech_threshold=WHISPER_NO_SPEECH_THRESHOLD,
                 log_prob_threshold=WHISPER_LOG_PROB_THRESHOLD,
             )
+            m.warmup(warmup_audio)
             resources['final_model'] = m
             logger.info("Final model ready.")
         except Exception as e:
@@ -1070,15 +1077,17 @@ def main(args=None):
             resources['realtime_model'] = None
             return
         try:
-            logger.info(f"Loading {REALTIME_MODEL} ({REALTIME_DEVICE})...")
+            logger.info(f"Loading realtime {REALTIME_BACKEND} model {REALTIME_MODEL} ({REALTIME_DEVICE})...")
             compute = "default" if REALTIME_DEVICE == "cpu" else FINAL_COMPUTE
-            m = WhisperModel(REALTIME_MODEL, device=REALTIME_DEVICE, compute_type=compute)
-            m.transcribe(
-                warmup_audio,
-                beam_size=1,
+            m = load_backend(
+                backend_name=REALTIME_BACKEND,
+                model_name=REALTIME_MODEL,
+                device=REALTIME_DEVICE,
+                compute_type=compute,
                 no_speech_threshold=WHISPER_NO_SPEECH_THRESHOLD,
                 log_prob_threshold=WHISPER_LOG_PROB_THRESHOLD,
             )
+            m.warmup(warmup_audio)
             resources['realtime_model'] = m
             logger.info("Realtime model ready.")
         except Exception as e:
@@ -1720,14 +1729,11 @@ def main(args=None):
                 logger.info(f"[FINAL] Processing {len(audio)/RATE:.2f}s audio...")
 
                 t_start = time.time()
-                segs, _ = final_model.transcribe(
+                raw_text = final_model.transcribe(
                     audio,
                     language=LANGUAGE,
                     beam_size=5,
-                    no_speech_threshold=WHISPER_NO_SPEECH_THRESHOLD,
-                    log_prob_threshold=WHISPER_LOG_PROB_THRESHOLD,
-                )
-                raw_text = " ".join(s.text for s in segs).strip()
+                ).text
                 inf_ms = int((time.time() - t_start) * 1000)
                 t = time.time() - t0
 
@@ -1821,14 +1827,11 @@ def main(args=None):
 
                 audio = np.concatenate(audio_data).astype(np.float32) / 32768.0
                 t_start = time.time()
-                segs, _ = rt_model.transcribe(
+                text = rt_model.transcribe(
                     audio,
                     language=LANGUAGE,
                     beam_size=1,
-                    no_speech_threshold=WHISPER_NO_SPEECH_THRESHOLD,
-                    log_prob_threshold=WHISPER_LOG_PROB_THRESHOLD,
-                )
-                text = " ".join(s.text for s in segs).strip()
+                ).text
                 inf_ms = int((time.time() - t_start) * 1000)
                 t = time.time() - t0
 
@@ -2137,7 +2140,12 @@ def main(args=None):
 
     dispatch({"type": "system", "event": "startup",
               "device": dev_name,
-              "models": {"final": FINAL_MODEL, "realtime": REALTIME_MODEL},
+              "models": {
+                  "final": FINAL_MODEL,
+                  "final_backend": FINAL_BACKEND,
+                  "realtime": REALTIME_MODEL,
+                  "realtime_backend": REALTIME_BACKEND,
+              },
               "output_mode": output_mode_state["name"]})
     dispatch({"type": "status", "value": "sleeping" if mode_state["sleeping"] else "working"})
     print("STT Ready!")

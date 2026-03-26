@@ -1,5 +1,7 @@
 .venv/
+.venv-parakeet/
 .uv-cache/
+.tmp/
 __pycache__/
 *.pyc
 *.pyo

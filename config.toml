@@ -1,18 +1,25 @@
 [models]
+# backend: "whisper" or "parakeet"
+final_backend    = "parakeet"
+realtime_backend = "parakeet"
+#
 # faster-whisper models:
 #   tiny, tiny.en, base, base.en, small, small.en, medium, medium.en
 #   large-v1, large-v2, large-v3, large-v3-turbo, large
 #   distil-large-v2, distil-large-v3, distil-medium.en, distil-small.en
 # ".en" variants are English-only but faster. Use non-.en for multilingual.
-# Can also be a local path or HuggingFace model ID.
-final          = "large-v3-turbo"
-realtime       = "tiny.en"   # set to "" to disable partials entirely
+# Parakeet examples:
+#   nvidia/parakeet-tdt-0.6b-v2
+#   nvidia/parakeet-tdt-0.6b-v3
+# Model can also be a local path or HuggingFace model ID.
+final          = "nvidia/parakeet-tdt-0.6b-v2"
+realtime       = "nvidia/parakeet-tdt-0.6b-v2"   # set to "" to disable partials entirely
 
 # device: "cuda", "cpu", or "auto"
 final_device    = "cuda"
 realtime_device = "cuda"
 
-# compute_type (faster-whisper / ctranslate2):
+# compute_type applies to the whisper backend only (faster-whisper / ctranslate2):
 #   float16       — GPU only, fastest, recommended for cuda
 #   bfloat16      — GPU, newer cards
 #   int8_float16  — GPU, quantized weights, less VRAM
@@ -24,13 +31,14 @@ realtime_device = "cuda"
 #   default       — let ctranslate2 decide (recommended for cpu)
 final_compute  = "float16"
 
-# language: BCP-47 code e.g. "en", "fr", "de", "ja" — or remove/set to "" for auto-detect (slower)
-# auto-detect analyzes first 30s of audio. English-only models always use "en" regardless.
+# language: BCP-47 code e.g. "en", "fr", "de", "ja" — or remove/set to "" for auto-detect when supported
+# Whisper honors this directly. Parakeet v2 is English-only; Parakeet v3 can auto-detect.
 language       = "en"
-# Whisper skip/silence gating.
+# Whisper-side skip/silence gating.
 # faster-whisper library defaults for reference:
 #   no_speech_threshold = 0.6
 #   log_prob_threshold = -1.0
+# These are ignored by the Parakeet backend.
 # Tuned slightly stricter here to prefer dropping dubious audio over hallucinating text.
 # lower no_speech_threshold = more willing to treat weak audio as silence
 # higher log_prob_threshold = more willing to reject low-confidence decodes
@@ -38,7 +46,7 @@ no_speech_threshold = 0.45
 log_prob_threshold = -0.8
 
 [audio]
-rate            = 16000  # sample rate — Whisper requires 16000, do not change
+rate            = 16000  # sample rate — required by the current transcription backends, do not change
 chunk           = 512    # audio frames per VAD check — lower = more responsive, higher = more stable
 vad_threshold   = 0.5   # Silero VAD sensitivity 0–1 (lower = more sensitive, picks up more speech)
 buffer_seconds  = 1.0   # ring buffer before speech start — captures audio before VAD triggers
@@ -66,9 +74,9 @@ check_interval   = 0.1
 min_chunks       = 10
 max_chunks       = 50
 # queue_size: max pending partial jobs — oldest dropped if full (keeps latency low)
-queue_size       = 10
+queue_size       = 1
 
-# ── Transcript filters - for handling Whisper hallucinations ───────────────────────────────────────────────────────
+# ── Transcript filters - for handling backend/model hallucinations ─────────────────────────────────────────────────
 # Exact phrases to swallow completely from both partial and final output.
 # Matching is case-insensitive, ignores trailing punctuation, and treats hyphens like spaces.
 [filters]
@@ -83,7 +91,7 @@ disfluency_words = ["uh", "um", "er", "ah", "oh", "fucking"]
 debug = true
 # append-only debug log file for investigating stalls / missed audio / queue pressure
 file = "stt-debug.log"
-# include DEBUG logs from faster-whisper / ctranslate2 too; usually leave false unless needed
+# include DEBUG logs from transcription backends too; usually leave false unless needed
 third_party_debug = false
 # throttled runtime snapshot cadence while debug logging is enabled
 heartbeat_seconds = 5.0

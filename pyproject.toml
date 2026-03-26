@@ -19,6 +19,7 @@ dependencies = [
 
 [project.optional-dependencies]
 windows  = ["pywin32"]
+parakeet = ["nemo_toolkit[asr]"]
 
 [tool.uv.sources]
 torch = { index = "pytorch-cu121" }

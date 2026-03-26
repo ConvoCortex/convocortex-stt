@@ -20,6 +20,7 @@ uv run python stt.py --background
 ```
 
 Before first real use, open `config.toml` and set the bits you actually care about:
+- `models.final_backend` / `models.realtime_backend`
 - `models.final_device` / `models.realtime_device`
 - `sleep_wake.wake_word`
 - `output.type_at_cursor.enabled`
@@ -162,6 +163,25 @@ C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.1\libnvvp
 
 CPU-only is supported by setting `models.final_device = "cpu"` in `config.toml` (slower finals).
 
+Parakeet support is available through the optional NeMo extra:
+
+```bash
+uv sync --extra parakeet
+```
+
+Example `config.toml` model section for Parakeet:
+
+```toml
+[models]
+final_backend    = "parakeet"
+realtime_backend = "parakeet"
+final            = "nvidia/parakeet-tdt-0.6b-v3"
+realtime         = "nvidia/parakeet-tdt-0.6b-v2"
+final_device     = "cuda"
+realtime_device  = "cuda"
+language         = ""
+```
+
 ### Python and uv
 
 - Python 3.10+
@@ -227,8 +247,8 @@ powershell -ExecutionPolicy Bypass -File .\scripts\uninstall-startup-shortcut.ps
 All runtime settings live in `config.toml` and are loaded at startup.
 
 Important areas:
-- `models`: realtime/final models and device choices
-- `models.no_speech_threshold` / `models.log_prob_threshold`: Whisper-side silence / low-confidence rejection for reducing spurious transcripts
+- `models`: backend choice plus realtime/final models and device choices
+- `models.no_speech_threshold` / `models.log_prob_threshold`: Whisper-only silence / low-confidence rejection for reducing spurious transcripts
 - `audio`: VAD behavior + silence timeout + preferred input
 - `startup`: whether startup restores last runtime state or uses config defaults for output mode and devices
 - `realtime`: partial cadence/window limits
@@ -318,7 +338,7 @@ With `debug = true`, the runtime keeps normal console output but also appends de
 - realtime queue enqueue/drop behavior
 - periodic heartbeats showing mode, queue depth, buffer sizes, and current VAD state
 
-This project is not currently using the `realtimestt` package at runtime for the main loop; the useful debug points are in [`stt.py`](stt.py) around PyAudio, Silero VAD, and faster-whisper.
+This project is not currently using the `realtimestt` package at runtime for the main loop; the useful debug points are in [`stt.py`](stt.py) around PyAudio, Silero VAD, and the transcription backend adapter layer.
 
 ## NATS
 
@@ -339,7 +359,7 @@ NATS is intended as the integration boundary to a larger app:
 {"type": "status",  "value": "idle"}
 {"type": "status",  "value": "sleeping"}
 {"type": "status",  "value": "working"}
-{"type": "system",  "event": "startup", "device": "Microphone (USB)", "models": {...}}
+{"type": "system",  "event": "startup", "device": "Microphone (USB)", "models": {"final": "large-v3-turbo", "final_backend": "whisper", "realtime": "tiny.en", "realtime_backend": "whisper"}}
 {"type": "system",  "event": "device_changed", "device": "Microphone (USB)"}
 {"type": "system",  "event": "output_device_changed", "device": "Speakers (USB)"}
 {"type": "system",  "event": "shutdown"}
@@ -366,12 +386,13 @@ Send JSON to `nats.subject_control`:
 ## Platform notes
 
 - Windows is the primary tested path.
+- Parakeet models depend on NVIDIA NeMo. NVIDIA’s Parakeet model cards list Linux as the supported OS, so Windows use is best-effort and less proven than the default Whisper path.
 - Linux hotkeys may require input permissions (group/root setup).
 - macOS hotkeys may require Accessibility permissions.
 
 ## Acknowledgments
 
-This repository uses the same general stack as the RealTimeSTT ecosystem, but the runtime loop in this project is custom and lives in `stt.py`. The main transcription path here is built around PyAudio, Silero VAD, and faster-whisper/ctranslate2.
+This repository uses the same general stack as the RealTimeSTT ecosystem, but the runtime loop in this project is custom and lives in `stt.py`. The main transcription path here is built around PyAudio, Silero VAD, and pluggable transcription backends, with faster-whisper as the default path and Parakeet supported through NeMo.
 
 ## Responsible use
 
