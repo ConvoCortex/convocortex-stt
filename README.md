@@ -29,7 +29,6 @@ Before first real use, open `config.toml` and set the bits you actually care abo
 Focused output-mode presets live in:
 - `presets/output-modes/direct-cursor.toml`
 - `presets/output-modes/draft-buffer.toml`
-- `presets/output-modes/cursor-with-clipboard-last.toml`
 
 ## Why this repo is useful
 
@@ -259,17 +258,16 @@ Important areas:
 
 ### Output workflow sets
 
-The repo currently has three output workflows that make sense as first-class sets:
+The repo currently has two output workflows that make sense as first-class sets:
 
 - `direct-cursor`: finalized text types into the active app immediately. Buffering and clipboard mirroring are off.
 - `draft-buffer`: keep the buffer workflow explicit. Typical loop is `typing` to disable direct typing, `clear`, speak, `buffer`, repeat.
-- `cursor-with-clipboard-last`: type immediately, but also mirror the last finalized utterance into the clipboard so you can manually paste/recover it.
 
 Those focused presets are provided as small snippets under `presets/output-modes/`. They describe the built-in runtime output modes.
 
 At runtime, output mode is treated as state, not as a config rewrite. Startup behavior is controlled by `startup.output_mode_source`:
 - hotkey `shift+f9` cycles output modes
-- exact voice commands `default mode`, `cursor mode`, `draft mode`, and `clipboard mode` select output modes directly
+- exact voice commands `default mode`, `cursor mode`, and `draft mode` select output modes directly
 
 Startup source controls:
 - `startup.output_mode_source = "state"` restores the last selected output mode from `state.json`
@@ -283,9 +281,6 @@ The built-in runtime modes are:
 - `config-default`: whatever `config.toml` says for the output handlers
 - `direct-cursor`
 - `draft-buffer`
-- `cursor-with-clipboard-last`
-
-`clipboard_accumulate` is still available, but it is more niche and less coherent as a default workflow than the three sets above.
 
 ### Type-at-cursor undo
 
@@ -306,11 +301,14 @@ This gives you a plain text working buffer you can keep open in an editor, adjus
 
 Relevant settings:
 - `output.file_buffer.separator`: separator inserted between finalized utterances
-- `output.file_buffer.clear_after_release`: clear the file after the `buffer` command types it
+- `output.file_buffer.clear_after_release`: clear the file after the `buffer` command releases it
 - `output.file_buffer.reset_after_each_message`: clear the existing buffer before writing each new finalized utterance
 - `output.file_buffer.undo_history_limit`: in-memory cap for one-step-at-a-time buffer undos triggered by the exact `undo` voice command while file-buffer mode is active
-- `voice_commands.buffer_release.words`: exact phrases that trigger release
-- `voice_commands.buffer_release.press_enter_after`: optionally press Enter after typing the buffer
+- `output.file_buffer.release_method`: `paste_preserve_clipboard` for fast paste with clipboard restore, or `type_keys` for the older direct typing path
+- `output.file_buffer.clipboard_restore_delay_ms`: how long to wait after paste before restoring clipboard contents
+- `output.file_buffer.clipboard_open_retry_count` / `output.file_buffer.clipboard_open_retry_delay_ms`: retry behavior for busy clipboard cases
+- `output.file_buffer.post_paste_enter_delay_ms`: brief wait between paste and Enter when a buffer release also submits
+- `voice_commands.buffer_release.words`: exact phrases that trigger buffer release, and are also recognized at the end of an utterance while draft-buffer mode is active
 - `voice_commands.buffer_clear.words`: exact phrases that clear the buffer without typing it
 
 In `draft-buffer` mode, `undo` rewinds `buffer.txt` one saved state at a time instead of sending a cursor undo. The default history cap is `10` buffer states and is not persisted across restarts.

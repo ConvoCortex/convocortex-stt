@@ -355,8 +355,6 @@ OUTPUT_MODE_CURSOR_COMMAND_WORDS = _voice_command_words("output_mode_cursor")
 OUTPUT_MODE_CURSOR_COMMAND_ENABLED = _voice_command_enabled("output_mode_cursor")
 OUTPUT_MODE_DRAFT_COMMAND_WORDS = _voice_command_words("output_mode_draft")
 OUTPUT_MODE_DRAFT_COMMAND_ENABLED = _voice_command_enabled("output_mode_draft")
-OUTPUT_MODE_CLIPBOARD_COMMAND_WORDS = _voice_command_words("output_mode_clipboard")
-OUTPUT_MODE_CLIPBOARD_COMMAND_ENABLED = _voice_command_enabled("output_mode_clipboard")
 CONSOLE_SHOW_COMMAND_WORDS = _voice_command_words("console_show")
 CONSOLE_SHOW_COMMAND_ENABLED = _voice_command_enabled("console_show")
 CONSOLE_HIDE_COMMAND_WORDS = _voice_command_words("console_hide")
@@ -365,9 +363,6 @@ BUFFER_RELEASE_COMMAND_WORDS = _voice_command_words("buffer_release")
 BUFFER_RELEASE_COMMAND_ENABLED = _voice_command_enabled(
     "buffer_release",
     extra=bool(cfg.get("output", {}).get("file_buffer", {}).get("enabled", False)),
-)
-BUFFER_RELEASE_COMMAND_PRESS_ENTER_AFTER = bool(
-    cfg.get("voice_commands", {}).get("buffer_release", {}).get("press_enter_after", False)
 )
 BUFFER_CLEAR_COMMAND_WORDS = _voice_command_words("buffer_clear")
 BUFFER_CLEAR_COMMAND_ENABLED = _voice_command_enabled(
@@ -381,7 +376,6 @@ OUTPUT_DEVICE_CYCLE_COMMAND_WORDS_EXACT = OUTPUT_DEVICE_CYCLE_COMMAND_WORDS
 OUTPUT_MODE_DEFAULT_COMMAND_WORDS_EXACT = OUTPUT_MODE_DEFAULT_COMMAND_WORDS
 OUTPUT_MODE_CURSOR_COMMAND_WORDS_EXACT = OUTPUT_MODE_CURSOR_COMMAND_WORDS
 OUTPUT_MODE_DRAFT_COMMAND_WORDS_EXACT = OUTPUT_MODE_DRAFT_COMMAND_WORDS
-OUTPUT_MODE_CLIPBOARD_COMMAND_WORDS_EXACT = OUTPUT_MODE_CLIPBOARD_COMMAND_WORDS
 CONSOLE_SHOW_COMMAND_WORDS_EXACT = CONSOLE_SHOW_COMMAND_WORDS
 CONSOLE_HIDE_COMMAND_WORDS_EXACT = CONSOLE_HIDE_COMMAND_WORDS
 BUFFER_RELEASE_COMMAND_WORDS_EXACT = BUFFER_RELEASE_COMMAND_WORDS
@@ -391,7 +385,6 @@ OUTPUT_MODE_NAMES = [
     "config-default",
     "direct-cursor",
     "draft-buffer",
-    "cursor-with-clipboard-last",
 ]
 
 def _clamp_volume(v: float) -> float:
@@ -1358,12 +1351,6 @@ def main(args=None):
             "clipboard_replace": False,
             "clipboard_accumulate": False,
         },
-        "cursor-with-clipboard-last": {
-            "type_at_cursor": True,
-            "file_buffer": False,
-            "clipboard_replace": True,
-            "clipboard_accumulate": False,
-        },
     }
 
     # Keep the user's selected device durable even if startup had to fall back.
@@ -1502,35 +1489,45 @@ def main(args=None):
     # ── Workers ───────────────────────────────────────────────────────────────
 
     def apply_voice_commands(final_text: str) -> tuple[str, dict]:
-        if not ENTER_COMMAND_ENABLED or not ENTER_COMMAND_WORDS:
-            return final_text, {}
-
         text = final_text.strip()
-        press_enter_after = False
-        words = sorted(ENTER_COMMAND_WORDS, key=len, reverse=True)
-
-        for trigger in words:
-            pat = re.compile(rf"^\s*{re.escape(trigger)}(?:[\s\.,!?;:]+|$)", re.IGNORECASE)
-            m = pat.match(text)
-            if m:
-                press_enter_after = True
-                text = text[m.end():].strip()
-                break
-
-        for trigger in words:
-            pat = re.compile(
-                rf"(?:^|[\s\.,!?;:]+){re.escape(trigger)}(?:[\s\.,!?;:]+)?$",
-                re.IGNORECASE
-            )
-            m = pat.search(text)
-            if m:
-                press_enter_after = True
-                text = text[:m.start()].strip()
-                break
-
         actions = {}
-        if press_enter_after:
-            actions["press_enter_after"] = True
+
+        def consume_command(words: list[str]) -> tuple[str, bool]:
+            if not words:
+                return text, False
+            ordered = sorted(words, key=len, reverse=True)
+            consumed_text = text
+            matched = False
+
+            for trigger in ordered:
+                pat = re.compile(
+                    rf"(?:^|[\s\.,!?;:]+){re.escape(trigger)}(?:[\s\.,!?;:]+)?$",
+                    re.IGNORECASE
+                )
+                m = pat.search(consumed_text)
+                if m:
+                    consumed_text = consumed_text[:m.start()].strip()
+                    matched = True
+                    break
+
+            return consumed_text, matched
+
+        file_buffer_active = bool(file_buffer_is_enabled and file_buffer_is_enabled())
+
+        if ENTER_COMMAND_ENABLED and ENTER_COMMAND_WORDS:
+            text, enter_matched = consume_command(ENTER_COMMAND_WORDS)
+            if enter_matched:
+                if file_buffer_active:
+                    actions["release_file_buffer"] = True
+                    actions["press_enter_after"] = True
+                else:
+                    actions["press_enter_after"] = True
+
+        if file_buffer_active and BUFFER_RELEASE_COMMAND_ENABLED and BUFFER_RELEASE_COMMAND_WORDS:
+            text, buffer_matched = consume_command(BUFFER_RELEASE_COMMAND_WORDS)
+            if buffer_matched:
+                actions["release_file_buffer"] = True
+
         return text, actions
 
     def _mark_voice_command_seen(epoch: int, key: str) -> bool:
@@ -1622,13 +1619,6 @@ def main(args=None):
                 feedback.play_on()
             return True
 
-        if OUTPUT_MODE_CLIPBOARD_COMMAND_ENABLED and normalized in OUTPUT_MODE_CLIPBOARD_COMMAND_WORDS_EXACT:
-            if _mark_voice_command_seen(epoch, f"output_mode_clipboard:{normalized}"):
-                logger.info(f"[{source.upper()} +{t:.2f}s] → CMD output_mode=cursor-with-clipboard-last ({inf_ms}ms)")
-                apply_output_mode("cursor-with-clipboard-last", reason=f"voice:{normalized}")
-                feedback.play_on()
-            return True
-
         if CONSOLE_SHOW_COMMAND_ENABLED and normalized in CONSOLE_SHOW_COMMAND_WORDS_EXACT:
             if _mark_voice_command_seen(epoch, f"console_show:{normalized}"):
                 logger.info(f"[{source.upper()} +{t:.2f}s] → CMD console_show ({inf_ms}ms)")
@@ -1646,10 +1636,13 @@ def main(args=None):
         if ENTER_COMMAND_ENABLED and normalized in ENTER_COMMAND_WORDS_EXACT:
             if _mark_voice_command_seen(epoch, f"press_enter:{normalized}"):
                 logger.info(f"[{source.upper()} +{t:.2f}s] → CMD enter ({inf_ms}ms)")
+                actions = {"press_enter_after": True}
+                if file_buffer_is_enabled and file_buffer_is_enabled():
+                    actions["release_file_buffer"] = True
                 dispatch({
                     "type": "final",
                     "text": "",
-                    "actions": {"press_enter_after": True},
+                    "actions": actions,
                     "epoch": epoch,
                     "t": round(t, 3),
                     "inference_ms": inf_ms,
@@ -1665,7 +1658,6 @@ def main(args=None):
                     "text": "",
                     "actions": {
                         "release_file_buffer": True,
-                        "press_enter_after": BUFFER_RELEASE_COMMAND_PRESS_ENTER_AFTER,
                     },
                     "epoch": epoch,
                     "t": round(t, 3),

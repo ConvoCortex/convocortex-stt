@@ -8,6 +8,7 @@ Handlers are registered at startup based on config.
 
 import logging
 import threading
+import time
 from collections import deque
 from pathlib import Path
 
@@ -73,16 +74,36 @@ def make_file_buffer(cfg: dict):
     clear_after_release = bool(bcfg.get("clear_after_release", True))
     reset_after_each_message = bool(bcfg.get("reset_after_each_message", False))
     undo_history_limit = max(0, int(bcfg.get("undo_history_limit", 10)))
+    release_method = str(bcfg.get("release_method", "type_keys")).strip().lower()
+    clipboard_restore_delay_ms = max(0, int(bcfg.get("clipboard_restore_delay_ms", 250)))
+    clipboard_open_retry_count = max(1, int(bcfg.get("clipboard_open_retry_count", 8)))
+    clipboard_open_retry_delay_ms = max(1, int(bcfg.get("clipboard_open_retry_delay_ms", 25)))
+    post_paste_enter_delay_ms = max(0, int(bcfg.get("post_paste_enter_delay_ms", 80)))
     lock = threading.Lock()
     enabled_lock = threading.Lock()
     enabled_state = [bool(bcfg.get("enabled", False))]
     undo_history = deque(maxlen=undo_history_limit) if undo_history_limit > 0 else None
+    release_lock = threading.Lock()
 
     try:
         import keyboard
     except ImportError:
         keyboard = None
         logger.warning("[file_buffer] keyboard not installed, voice-triggered release disabled.")
+
+    win32clipboard = None
+    win32con = None
+    if release_method == "paste_preserve_clipboard":
+        try:
+            import win32clipboard as _win32clipboard
+            import win32con as _win32con
+            win32clipboard = _win32clipboard
+            win32con = _win32con
+        except ImportError:
+            logger.warning(
+                "[file_buffer] pywin32 not installed, falling back to type_keys release method."
+            )
+            release_method = "type_keys"
 
     def _read_buffer() -> str:
         if not path.exists():
@@ -135,22 +156,129 @@ def make_file_buffer(cfg: dict):
             _write_buffer(restored)
         logger.info(f"[file_buffer] undo restored {len(restored)} chars")
 
+    def _open_clipboard_with_retry():
+        assert win32clipboard is not None
+        last_error = None
+        for _ in range(clipboard_open_retry_count):
+            try:
+                win32clipboard.OpenClipboard()
+                return
+            except Exception as exc:
+                last_error = exc
+                time.sleep(clipboard_open_retry_delay_ms / 1000.0)
+        raise RuntimeError(f"failed to open clipboard after retries: {last_error}")
+
+    def _capture_clipboard_state() -> tuple[str | None, list[tuple[int, object]]]:
+        assert win32clipboard is not None
+        text_value = None
+        try:
+            text_value = win32clipboard.GetClipboardData(win32con.CF_UNICODETEXT)
+        except Exception:
+            text_value = None
+        formats: list[tuple[int, object]] = []
+        fmt = 0
+        while True:
+            fmt = int(win32clipboard.EnumClipboardFormats(fmt))
+            if not fmt:
+                break
+            try:
+                data = win32clipboard.GetClipboardData(fmt)
+            except Exception:
+                continue
+            formats.append((fmt, data))
+        return text_value, formats
+
+    def _restore_clipboard_state(inserted_text: str, saved_text: str | None, saved_formats: list[tuple[int, object]]):
+        if win32clipboard is None:
+            return
+        time.sleep(clipboard_restore_delay_ms / 1000.0)
+        try:
+            _open_clipboard_with_retry()
+            try:
+                current_text = None
+                try:
+                    current_text = win32clipboard.GetClipboardData(win32con.CF_UNICODETEXT)
+                except Exception:
+                    current_text = None
+                if current_text != inserted_text:
+                    logger.info("[file_buffer] Clipboard changed after paste; skipping restore.")
+                    return
+                win32clipboard.EmptyClipboard()
+                restored = False
+                if saved_text is not None:
+                    try:
+                        win32clipboard.SetClipboardText(saved_text, win32con.CF_UNICODETEXT)
+                        restored = True
+                    except Exception:
+                        restored = False
+                if not restored:
+                    for fmt, data in saved_formats:
+                        try:
+                            win32clipboard.SetClipboardData(fmt, data)
+                            restored = True
+                        except Exception:
+                            continue
+                if not restored:
+                    logger.warning("[file_buffer] Clipboard restore failed: no clipboard formats could be restored.")
+            finally:
+                win32clipboard.CloseClipboard()
+        except Exception as exc:
+            logger.warning(f"[file_buffer] Clipboard restore failed: {exc}")
+
+    def _release_via_typing(content: str, press_enter_after: bool):
+        assert keyboard is not None
+        keyboard.write(content, delay=0)
+        if press_enter_after:
+            keyboard.press_and_release("enter")
+
+    def _release_via_clipboard(content: str, press_enter_after: bool):
+        assert keyboard is not None
+        assert win32clipboard is not None and win32con is not None
+
+        with release_lock:
+            _open_clipboard_with_retry()
+            try:
+                saved_text, saved_formats = _capture_clipboard_state()
+                win32clipboard.EmptyClipboard()
+                win32clipboard.SetClipboardText(content, win32con.CF_UNICODETEXT)
+            finally:
+                win32clipboard.CloseClipboard()
+
+            keyboard.press_and_release("ctrl+v")
+            if press_enter_after:
+                if post_paste_enter_delay_ms > 0:
+                    time.sleep(post_paste_enter_delay_ms / 1000.0)
+                keyboard.press_and_release("enter")
+
+            restore_thread = threading.Thread(
+                target=_restore_clipboard_state,
+                args=(content, saved_text, saved_formats),
+                daemon=True,
+            )
+            restore_thread.start()
+
     def _release_buffer(press_enter_after: bool = False):
         if keyboard is None:
             logger.warning("[file_buffer] Release ignored: keyboard not installed.")
             return
         with lock:
             content = _read_buffer()
-            if clear_after_release:
-                _remember_undo(content, "")
-                _write_buffer("")
         if not content:
             logger.info("[file_buffer] Release ignored: buffer is empty.")
             return
-        keyboard.write(content, delay=0)
-        if press_enter_after:
-            keyboard.press_and_release("enter")
-        logger.info(f"[file_buffer] released {len(content)} chars" + (" + enter" if press_enter_after else ""))
+        if release_method == "paste_preserve_clipboard":
+            _release_via_clipboard(content, press_enter_after)
+        else:
+            _release_via_typing(content, press_enter_after)
+        if clear_after_release:
+            with lock:
+                current = _read_buffer()
+                _remember_undo(current, "")
+                _write_buffer("")
+        logger.info(
+            f"[file_buffer] released {len(content)} chars via {release_method}"
+            + (" + enter" if press_enter_after else "")
+        )
 
     def file_buffer(event: dict):
         actions = event.get("actions", {}) or {}
@@ -170,6 +298,9 @@ def make_file_buffer(cfg: dict):
             if not is_enabled():
                 logger.info("[file_buffer] Release ignored (disabled).")
                 return
+            text = _final_text(event, cfg)
+            if text:
+                _append_buffer(text)
             _release_buffer(bool(actions.get("press_enter_after")))
             return
         if not is_enabled():

@@ -3,7 +3,9 @@ from __future__ import annotations
 import os
 import tempfile
 import wave
+from contextlib import redirect_stderr, redirect_stdout
 from dataclasses import dataclass
+from io import StringIO
 from pathlib import Path
 from typing import Any
 
@@ -145,7 +147,11 @@ class ParakeetBackend(TranscriptionBackend):
                 wav_file.setsampwidth(2)
                 wav_file.setframerate(16000)
                 wav_file.writeframes(pcm16.tobytes())
-            result = self.model.transcribe([temp_path], batch_size=1)
+            # NeMo/Lhotse emits noisy warnings and progress text directly to
+            # stdout/stderr during transcribe(). Keep the app console focused on
+            # STT runtime output instead of internal dataloader chatter.
+            with redirect_stdout(StringIO()), redirect_stderr(StringIO()):
+                result = self.model.transcribe([temp_path], batch_size=1)
             if isinstance(result, tuple):
                 result = result[0]
             item = result[0] if isinstance(result, list) and result else result

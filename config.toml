@@ -114,6 +114,14 @@ separator = ""
 clear_after_release = true
 reset_after_each_message = false
 undo_history_limit = 10
+# release_method:
+#   "paste_preserve_clipboard" = fast Ctrl+V path with clipboard save/restore
+#   "type_keys"                = slower simulated typing, clipboard untouched
+release_method = "paste_preserve_clipboard"
+clipboard_restore_delay_ms = 250
+clipboard_open_retry_count = 8
+clipboard_open_retry_delay_ms = 25
+post_paste_enter_delay_ms = 80
 
 # use either output.clipboard_replace or output.clipboard_accumulate, not both at once
 [output.clipboard_replace]
@@ -159,7 +167,7 @@ enabled = true
 
 [voice_commands.enter]
 enabled = true
-words   = ["enter", "simba"] # Detected at the start and at the end of utterance, not detected in the middle of utterance.
+words   = ["enter", "simba"] # Exact match or detected at the end of utterance, not detected in the middle.
 [voice_commands.type_at_cursor_toggle]
 enabled = true
 words   = ["typing"] # Detected at the start of utterance
@@ -184,9 +192,6 @@ words   = ["cursor mode", "Courser mode", "Corsair mode", "Coarser mode"] # Exac
 [voice_commands.output_mode_draft]
 enabled = true
 words   = ["draft mode"] # Exact match only; selects draft-buffer output mode
-[voice_commands.output_mode_clipboard]
-enabled = true
-words   = ["clipboard mode"] # Exact match only; selects cursor-with-clipboard-last output mode
 [voice_commands.console_show]
 enabled = true
 words   = ["show"] # Exact match only; shows the STT console, same target as shift+f8
@@ -196,7 +201,6 @@ words   = ["hide"] # Exact match only; hides the STT console, same target as shi
 [voice_commands.buffer_release]
 enabled = true
 words   = ["buffer"]
-press_enter_after = false
 [voice_commands.buffer_clear]
 enabled = true
 words   = ["clear"]
