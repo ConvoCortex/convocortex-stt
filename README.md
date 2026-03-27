@@ -163,11 +163,7 @@ C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.1\libnvvp
 
 CPU-only is supported by setting `models.final_device = "cpu"` in `config.toml` (slower finals).
 
-Parakeet support is available through the optional NeMo extra:
-
-```bash
-uv sync --extra parakeet
-```
+Parakeet support is included in the normal `uv sync` install.
 
 Example `config.toml` model section for Parakeet:
 

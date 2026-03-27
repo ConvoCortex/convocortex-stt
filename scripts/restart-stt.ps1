@@ -5,6 +5,8 @@ $ErrorActionPreference = "Stop"
 $repoRoot = Split-Path -Parent $PSScriptRoot
 $pythonExe = Join-Path $repoRoot ".venv\Scripts\python.exe"
 $scriptPath = Join-Path $repoRoot "stt.py"
+$launcherVbs = Join-Path $PSScriptRoot "launch-stt-hidden.vbs"
+$wscriptExe = Join-Path $env:WINDIR "System32\wscript.exe"
 
 if (-not (Test-Path $pythonExe)) {
     throw "Python executable not found at $pythonExe. Run 'uv sync' first."
@@ -12,6 +14,14 @@ if (-not (Test-Path $pythonExe)) {
 
 if (-not (Test-Path $scriptPath)) {
     throw "STT entrypoint not found at $scriptPath."
+}
+
+if (-not (Test-Path $launcherVbs)) {
+    throw "Hidden launcher not found at $launcherVbs."
+}
+
+if (-not (Test-Path $wscriptExe)) {
+    throw "wscript.exe not found at $wscriptExe."
 }
 
 $normalizedRepoRoot = [System.IO.Path]::GetFullPath($repoRoot)
@@ -33,8 +43,6 @@ if ($targetProcesses) {
     } while ($stillRunning -and (Get-Date) -lt $deadline)
 }
 
-$wsh = New-Object -ComObject WScript.Shell
-$command = '"' + $pythonExe + '" "' + $scriptPath + '" --background'
-$null = $wsh.Run($command, 7, $false)
+$null = Start-Process -FilePath $wscriptExe -ArgumentList ('"' + $launcherVbs + '"') -WindowStyle Hidden -PassThru
 
-Write-Host "Started STT in background mode."
+Write-Host "Started STT hidden in background mode."
