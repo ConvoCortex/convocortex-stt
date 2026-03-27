@@ -134,10 +134,10 @@ separator = ""
 
 [output.type_at_cursor]
 enabled = true
-# type-at-cursor undo behavior for the built-in "undo" voice command:
+# revert behavior for the built-in "rewind" voice command when cursor mode is active:
 # "ctrl+z" = send Ctrl+Z once, "backspace" = send N backspaces, "off" = do nothing
-undo_mode = "ctrl+z"
-undo_backspace_count = 24
+revert_mode = "ctrl+z"
+revert_backspace_count = 24
 
 [output.trailing_char]
 enabled = true
@@ -171,12 +171,12 @@ words   = ["enter", "simba"] # Exact match or detected at the end of utterance, 
 [voice_commands.type_at_cursor_toggle]
 enabled = true
 words   = ["typing"] # Detected at the start of utterance
-[voice_commands.undo]
+[voice_commands.rewind]
 enabled = true
-words   = ["undo"] # Exact match only; routed to type_at_cursor undo behavior
-[voice_commands.redo]
+words   = ["rewind"] # Exact match only; restores last released buffer in draft-buffer mode, otherwise uses cursor revert behavior
+[voice_commands.repeat]
 enabled = true
-words   = ["redo"] # Exact match only; re-emits the last replayable final event through current outputs
+words   = ["repeat"] # Exact match only; repeats last released buffer in draft-buffer mode, otherwise replays the last final cursor output
 [voice_commands.input_device_cycle]
 enabled = true
 words   = ["input"] # Exact match only; same behavior as the input-device cycle hotkey
@@ -185,7 +185,7 @@ enabled = true
 words   = ["output"] # Exact match only; same behavior as the output-device cycle hotkey
 [voice_commands.output_mode_default]
 enabled = true
-words   = ["default mode"] # Exact match only; selects config-default output mode
+words   = ["default mode"] # Exact match only; selects the configured startup output mode
 [voice_commands.output_mode_cursor]
 enabled = true
 words   = ["cursor mode", "Courser mode", "Corsair mode", "Coarser mode"] # Exact match only; selects direct-cursor output mode

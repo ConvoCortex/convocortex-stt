@@ -84,6 +84,7 @@ def make_file_buffer(cfg: dict):
     enabled_state = [bool(bcfg.get("enabled", False))]
     undo_history = deque(maxlen=undo_history_limit) if undo_history_limit > 0 else None
     release_lock = threading.Lock()
+    last_released_content = [""]
 
     try:
         import keyboard
@@ -270,6 +271,7 @@ def make_file_buffer(cfg: dict):
             _release_via_clipboard(content, press_enter_after)
         else:
             _release_via_typing(content, press_enter_after)
+        last_released_content[0] = content
         if clear_after_release:
             with lock:
                 current = _read_buffer()
@@ -280,6 +282,28 @@ def make_file_buffer(cfg: dict):
             + (" + enter" if press_enter_after else "")
         )
 
+    def _repeat_last_released_buffer(press_enter_after: bool = False):
+        content = last_released_content[0]
+        if not content:
+            logger.info("[file_buffer] Repeat ignored: no released buffer in memory.")
+            return
+        if release_method == "paste_preserve_clipboard":
+            _release_via_clipboard(content, press_enter_after)
+        else:
+            _release_via_typing(content, press_enter_after)
+        logger.info(
+            f"[file_buffer] repeated {len(content)} chars via {release_method}"
+            + (" + enter" if press_enter_after else "")
+        )
+
+    def _restore_last_released_buffer():
+        content = last_released_content[0]
+        if not content:
+            logger.info("[file_buffer] Revert ignored: no released buffer in memory.")
+            return
+        _set_buffer(content)
+        logger.info(f"[file_buffer] restored last released buffer ({len(content)} chars)")
+
     def file_buffer(event: dict):
         actions = event.get("actions", {}) or {}
         if actions.get("undo_file_buffer"):
@@ -287,6 +311,18 @@ def make_file_buffer(cfg: dict):
                 logger.info("[file_buffer] Undo ignored (disabled).")
                 return
             _undo_buffer()
+            return
+        if actions.get("restore_last_released_buffer"):
+            if not is_enabled():
+                logger.info("[file_buffer] Revert ignored (disabled).")
+                return
+            _restore_last_released_buffer()
+            return
+        if actions.get("repeat_last_released_buffer"):
+            if not is_enabled():
+                logger.info("[file_buffer] Repeat ignored (disabled).")
+                return
+            _repeat_last_released_buffer(bool(actions.get("press_enter_after")))
             return
         if actions.get("clear_file_buffer"):
             if not is_enabled():
@@ -417,11 +453,11 @@ def make_type_at_cursor(cfg: dict):
     tcfg = cfg["output"]["type_at_cursor"]
     enabled_lock = threading.Lock()
     enabled_state = [bool(tcfg["enabled"])]
-    undo_mode = str(tcfg.get("undo_mode", "off")).strip().lower()
-    if undo_mode not in {"off", "ctrl+z", "backspace"}:
-        logger.warning(f"[type_at_cursor] Invalid undo_mode={undo_mode!r}; using 'off'.")
-        undo_mode = "off"
-    undo_backspace_count = max(1, int(tcfg.get("undo_backspace_count", 24)))
+    revert_mode = str(tcfg.get("revert_mode", tcfg.get("undo_mode", "off"))).strip().lower()
+    if revert_mode not in {"off", "ctrl+z", "backspace"}:
+        logger.warning(f"[type_at_cursor] Invalid revert_mode={revert_mode!r}; using 'off'.")
+        revert_mode = "off"
+    revert_backspace_count = max(1, int(tcfg.get("revert_backspace_count", tcfg.get("undo_backspace_count", 24))))
 
     def set_enabled(enabled: bool):
         with enabled_lock:
@@ -436,22 +472,22 @@ def make_type_at_cursor(cfg: dict):
         with enabled_lock:
             return enabled_state[0]
 
-    def undo_last():
-        if undo_mode == "off":
-            logger.info("[type_at_cursor] Undo ignored (undo_mode=off).")
+    def revert_last():
+        if revert_mode == "off":
+            logger.info("[type_at_cursor] Revert ignored (revert_mode=off).")
             return
-        if undo_mode == "ctrl+z":
+        if revert_mode == "ctrl+z":
             keyboard.press_and_release("ctrl+z")
-            logger.info("[type_at_cursor] Undo sent via ctrl+z")
+            logger.info("[type_at_cursor] Revert sent via ctrl+z")
             return
-        for _ in range(undo_backspace_count):
+        for _ in range(revert_backspace_count):
             keyboard.press_and_release("backspace")
-        logger.info(f"[type_at_cursor] Undo sent via {undo_backspace_count} backspaces")
+        logger.info(f"[type_at_cursor] Revert sent via {revert_backspace_count} backspaces")
 
     def type_at_cursor(event: dict):
         actions = event.get("actions", {}) or {}
         if actions.get("undo_type_at_cursor"):
-            undo_last()
+            revert_last()
             return
         if not is_enabled():
             return

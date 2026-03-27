@@ -341,10 +341,10 @@ ENTER_COMMAND_ENABLED = (
 )
 TYPE_TOGGLE_COMMAND_WORDS = _voice_command_words("type_at_cursor_toggle")
 TYPE_TOGGLE_COMMAND_ENABLED = _voice_command_enabled("type_at_cursor_toggle")
-UNDO_COMMAND_WORDS = _voice_command_words("undo")
-UNDO_COMMAND_ENABLED = _voice_command_enabled("undo")
-REDO_COMMAND_WORDS = _voice_command_words("redo")
-REDO_COMMAND_ENABLED = _voice_command_enabled("redo")
+REVERT_COMMAND_WORDS = _voice_command_words("rewind")
+REVERT_COMMAND_ENABLED = _voice_command_enabled("rewind")
+REPEAT_COMMAND_WORDS = _voice_command_words("repeat")
+REPEAT_COMMAND_ENABLED = _voice_command_enabled("repeat")
 INPUT_DEVICE_CYCLE_COMMAND_WORDS = _voice_command_words("input_device_cycle")
 INPUT_DEVICE_CYCLE_COMMAND_ENABLED = _voice_command_enabled("input_device_cycle")
 OUTPUT_DEVICE_CYCLE_COMMAND_WORDS = _voice_command_words("output_device_cycle")
@@ -369,8 +369,8 @@ BUFFER_CLEAR_COMMAND_ENABLED = _voice_command_enabled(
     "buffer_clear",
     extra=bool(cfg.get("output", {}).get("file_buffer", {}).get("enabled", False)),
 )
-UNDO_COMMAND_WORDS_EXACT = UNDO_COMMAND_WORDS
-REDO_COMMAND_WORDS_EXACT = REDO_COMMAND_WORDS
+REVERT_COMMAND_WORDS_EXACT = REVERT_COMMAND_WORDS
+REPEAT_COMMAND_WORDS_EXACT = REPEAT_COMMAND_WORDS
 INPUT_DEVICE_CYCLE_COMMAND_WORDS_EXACT = INPUT_DEVICE_CYCLE_COMMAND_WORDS
 OUTPUT_DEVICE_CYCLE_COMMAND_WORDS_EXACT = OUTPUT_DEVICE_CYCLE_COMMAND_WORDS
 OUTPUT_MODE_DEFAULT_COMMAND_WORDS_EXACT = OUTPUT_MODE_DEFAULT_COMMAND_WORDS
@@ -382,7 +382,6 @@ BUFFER_RELEASE_COMMAND_WORDS_EXACT = BUFFER_RELEASE_COMMAND_WORDS
 BUFFER_CLEAR_COMMAND_WORDS_EXACT = BUFFER_CLEAR_COMMAND_WORDS
 
 OUTPUT_MODE_NAMES = [
-    "config-default",
     "direct-cursor",
     "draft-buffer",
 ]
@@ -1310,14 +1309,20 @@ def main(args=None):
         "enabled": bool(_persisted.get("type_at_cursor_enabled", default_typing_enabled))
     }
     output_mode_lock = threading.Lock()
-    startup_output_mode = "config-default"
+    configured_output_mode = (
+        "draft-buffer"
+        if bool(cfg["output"]["file_buffer"]["enabled"]) and not bool(cfg["output"]["type_at_cursor"]["enabled"])
+        else "direct-cursor"
+    )
+    startup_output_mode = configured_output_mode
     if OUTPUT_MODE_STARTUP_SOURCE == "state":
-        startup_output_mode = str(_persisted.get("output_mode", "config-default") or "config-default").strip().lower()
+        startup_output_mode = str(_persisted.get("output_mode", configured_output_mode) or configured_output_mode).strip().lower()
         if startup_output_mode not in OUTPUT_MODE_NAMES:
-            startup_output_mode = "config-default"
+            startup_output_mode = configured_output_mode
     output_mode_state = {"name": startup_output_mode}
     voice_command_lock = threading.Lock()
     voice_command_seen_by_epoch: dict[int, set[str]] = {}
+    command_consumed_epochs: set[int] = set()
     last_replayable_final_event = [None]
 
     type_set_enabled = handler_extras.get("type_at_cursor_set_enabled")
@@ -1333,12 +1338,6 @@ def main(args=None):
     clipboard_accumulate_set_enabled = handler_extras.get("clipboard_accumulate_set_enabled")
 
     output_mode_profiles = {
-        "config-default": {
-            "type_at_cursor": bool(cfg["output"]["type_at_cursor"]["enabled"]),
-            "file_buffer": bool(cfg["output"]["file_buffer"]["enabled"]),
-            "clipboard_replace": bool(cfg["output"]["clipboard_replace"]["enabled"]),
-            "clipboard_accumulate": bool(cfg["output"]["clipboard_accumulate"]["enabled"]),
-        },
         "direct-cursor": {
             "type_at_cursor": True,
             "file_buffer": False,
@@ -1393,7 +1392,7 @@ def main(args=None):
     def apply_output_mode(mode_name: str, *, reason: str = "", announce: bool = True) -> str:
         normalized = str(mode_name or "").strip().lower()
         if normalized not in output_mode_profiles:
-            normalized = "config-default"
+            normalized = "direct-cursor"
         profile = output_mode_profiles[normalized]
 
         if file_buffer_set_enabled:
@@ -1431,14 +1430,14 @@ def main(args=None):
     def replay_last_final_event(epoch: int, t: float, inf_ms: int, source: str) -> bool:
         event = last_replayable_final_event[0]
         if not event:
-            logger.info(f"[{source.upper()} +{t:.2f}s] → CMD redo ignored (no replayable final event)")
+            logger.info(f"[{source.upper()} +{t:.2f}s] → CMD repeat ignored (no replayable final event)")
             return False
         replay = copy.deepcopy(event)
         replay["epoch"] = epoch
         replay["t"] = round(t, 3)
         replay["inference_ms"] = inf_ms
         replay["replayed"] = True
-        logger.info(f"[{source.upper()} +{t:.2f}s] → CMD redo ({inf_ms}ms)")
+        logger.info(f"[{source.upper()} +{t:.2f}s] → CMD repeat ({inf_ms}ms)")
         dispatch(replay)
         return True
 
@@ -1539,7 +1538,20 @@ def main(args=None):
             stale_epochs = [e for e in voice_command_seen_by_epoch if e < epoch - 8]
             for e in stale_epochs:
                 del voice_command_seen_by_epoch[e]
+            stale_consumed = [e for e in command_consumed_epochs if e < epoch - 8]
+            for e in stale_consumed:
+                command_consumed_epochs.discard(e)
             return True
+
+    def _mark_epoch_consumed_by_partial_command(epoch: int, source: str):
+        if source != "partial":
+            return
+        with voice_command_lock:
+            command_consumed_epochs.add(epoch)
+
+    def _is_epoch_consumed_by_partial_command(epoch: int) -> bool:
+        with voice_command_lock:
+            return epoch in command_consumed_epochs
 
     def apply_exact_voice_command(text: str, epoch: int, t: float, inf_ms: int, source: str) -> bool:
         normalized = _normalize_command_phrase(text)
@@ -1548,29 +1560,30 @@ def main(args=None):
 
         if normalized in SLEEP_STOP_WORDS:
             if _mark_voice_command_seen(epoch, f"sleep:{normalized}"):
+                _mark_epoch_consumed_by_partial_command(epoch, source)
                 set_sleeping(True, reason=f"voice:{normalized}")
             return True
 
         if TYPE_TOGGLE_COMMAND_ENABLED and normalized in TYPE_TOGGLE_COMMAND_WORDS:
             if _mark_voice_command_seen(epoch, f"typing_toggle:{normalized}"):
+                _mark_epoch_consumed_by_partial_command(epoch, source)
                 toggle_typing_enabled(reason=f"voice:{normalized}")
             return True
 
-        if UNDO_COMMAND_ENABLED and normalized in UNDO_COMMAND_WORDS_EXACT:
-            if _mark_voice_command_seen(epoch, f"undo:{normalized}"):
-                undo_actions = {}
+        if REVERT_COMMAND_ENABLED and normalized in REVERT_COMMAND_WORDS_EXACT:
+            if _mark_voice_command_seen(epoch, f"rewind:{normalized}"):
+                _mark_epoch_consumed_by_partial_command(epoch, source)
+                revert_actions = {}
                 if file_buffer_is_enabled and file_buffer_is_enabled():
-                    undo_actions["undo_file_buffer"] = True
-                elif type_is_enabled and type_is_enabled():
-                    undo_actions["undo_type_at_cursor"] = True
+                    revert_actions["restore_last_released_buffer"] = True
+                    revert_actions["undo_type_at_cursor"] = True
                 else:
-                    logger.info(f"[{source.upper()} +{t:.2f}s] → CMD undo ignored (no active undo target) ({inf_ms}ms)")
-                    return True
-                logger.info(f"[{source.upper()} +{t:.2f}s] → CMD undo ({inf_ms}ms)")
+                    revert_actions["undo_type_at_cursor"] = True
+                logger.info(f"[{source.upper()} +{t:.2f}s] → CMD rewind ({inf_ms}ms)")
                 dispatch({
                     "type": "final",
                     "text": "",
-                    "actions": undo_actions,
+                    "actions": revert_actions,
                     "epoch": epoch,
                     "t": round(t, 3),
                     "inference_ms": inf_ms,
@@ -1578,14 +1591,28 @@ def main(args=None):
                 feedback.play_on()
             return True
 
-        if REDO_COMMAND_ENABLED and normalized in REDO_COMMAND_WORDS_EXACT:
-            if _mark_voice_command_seen(epoch, f"redo:{normalized}"):
+        if REPEAT_COMMAND_ENABLED and normalized in REPEAT_COMMAND_WORDS_EXACT:
+            if _mark_voice_command_seen(epoch, f"repeat:{normalized}"):
+                _mark_epoch_consumed_by_partial_command(epoch, source)
+                if file_buffer_is_enabled and file_buffer_is_enabled():
+                    logger.info(f"[{source.upper()} +{t:.2f}s] → CMD repeat ({inf_ms}ms)")
+                    dispatch({
+                        "type": "final",
+                        "text": "",
+                        "actions": {"repeat_last_released_buffer": True},
+                        "epoch": epoch,
+                        "t": round(t, 3),
+                        "inference_ms": inf_ms,
+                    })
+                    feedback.play_on()
+                    return True
                 if replay_last_final_event(epoch, t, inf_ms, source):
                     feedback.play_on()
             return True
 
         if INPUT_DEVICE_CYCLE_COMMAND_ENABLED and normalized in INPUT_DEVICE_CYCLE_COMMAND_WORDS_EXACT:
             if _mark_voice_command_seen(epoch, f"input_device_cycle:{normalized}"):
+                _mark_epoch_consumed_by_partial_command(epoch, source)
                 logger.info(f"[{source.upper()} +{t:.2f}s] → CMD input_device_cycle ({inf_ms}ms)")
                 cycle_input_device()
                 feedback.play_on()
@@ -1593,6 +1620,7 @@ def main(args=None):
 
         if OUTPUT_DEVICE_CYCLE_COMMAND_ENABLED and normalized in OUTPUT_DEVICE_CYCLE_COMMAND_WORDS_EXACT:
             if _mark_voice_command_seen(epoch, f"output_device_cycle:{normalized}"):
+                _mark_epoch_consumed_by_partial_command(epoch, source)
                 logger.info(f"[{source.upper()} +{t:.2f}s] → CMD output_device_cycle ({inf_ms}ms)")
                 cycle_output_device()
                 feedback.play_on()
@@ -1600,13 +1628,15 @@ def main(args=None):
 
         if OUTPUT_MODE_DEFAULT_COMMAND_ENABLED and normalized in OUTPUT_MODE_DEFAULT_COMMAND_WORDS_EXACT:
             if _mark_voice_command_seen(epoch, f"output_mode_default:{normalized}"):
-                logger.info(f"[{source.upper()} +{t:.2f}s] → CMD output_mode=config-default ({inf_ms}ms)")
-                apply_output_mode("config-default", reason=f"voice:{normalized}")
+                _mark_epoch_consumed_by_partial_command(epoch, source)
+                logger.info(f"[{source.upper()} +{t:.2f}s] → CMD output_mode={configured_output_mode} ({inf_ms}ms)")
+                apply_output_mode(configured_output_mode, reason=f"voice:{normalized}")
                 feedback.play_on()
             return True
 
         if OUTPUT_MODE_CURSOR_COMMAND_ENABLED and normalized in OUTPUT_MODE_CURSOR_COMMAND_WORDS_EXACT:
             if _mark_voice_command_seen(epoch, f"output_mode_cursor:{normalized}"):
+                _mark_epoch_consumed_by_partial_command(epoch, source)
                 logger.info(f"[{source.upper()} +{t:.2f}s] → CMD output_mode=direct-cursor ({inf_ms}ms)")
                 apply_output_mode("direct-cursor", reason=f"voice:{normalized}")
                 feedback.play_on()
@@ -1614,6 +1644,7 @@ def main(args=None):
 
         if OUTPUT_MODE_DRAFT_COMMAND_ENABLED and normalized in OUTPUT_MODE_DRAFT_COMMAND_WORDS_EXACT:
             if _mark_voice_command_seen(epoch, f"output_mode_draft:{normalized}"):
+                _mark_epoch_consumed_by_partial_command(epoch, source)
                 logger.info(f"[{source.upper()} +{t:.2f}s] → CMD output_mode=draft-buffer ({inf_ms}ms)")
                 apply_output_mode("draft-buffer", reason=f"voice:{normalized}")
                 feedback.play_on()
@@ -1621,6 +1652,7 @@ def main(args=None):
 
         if CONSOLE_SHOW_COMMAND_ENABLED and normalized in CONSOLE_SHOW_COMMAND_WORDS_EXACT:
             if _mark_voice_command_seen(epoch, f"console_show:{normalized}"):
+                _mark_epoch_consumed_by_partial_command(epoch, source)
                 logger.info(f"[{source.upper()} +{t:.2f}s] → CMD console_show ({inf_ms}ms)")
                 if console_controller.show(reason=f"voice:{normalized}"):
                     feedback.play_on()
@@ -1628,6 +1660,7 @@ def main(args=None):
 
         if CONSOLE_HIDE_COMMAND_ENABLED and normalized in CONSOLE_HIDE_COMMAND_WORDS_EXACT:
             if _mark_voice_command_seen(epoch, f"console_hide:{normalized}"):
+                _mark_epoch_consumed_by_partial_command(epoch, source)
                 logger.info(f"[{source.upper()} +{t:.2f}s] → CMD console_hide ({inf_ms}ms)")
                 if console_controller.hide(reason=f"voice:{normalized}"):
                     feedback.play_on()
@@ -1635,6 +1668,7 @@ def main(args=None):
 
         if ENTER_COMMAND_ENABLED and normalized in ENTER_COMMAND_WORDS_EXACT:
             if _mark_voice_command_seen(epoch, f"press_enter:{normalized}"):
+                _mark_epoch_consumed_by_partial_command(epoch, source)
                 logger.info(f"[{source.upper()} +{t:.2f}s] → CMD enter ({inf_ms}ms)")
                 actions = {"press_enter_after": True}
                 if file_buffer_is_enabled and file_buffer_is_enabled():
@@ -1652,6 +1686,7 @@ def main(args=None):
 
         if BUFFER_RELEASE_COMMAND_ENABLED and normalized in BUFFER_RELEASE_COMMAND_WORDS_EXACT:
             if _mark_voice_command_seen(epoch, f"release_buffer:{normalized}"):
+                _mark_epoch_consumed_by_partial_command(epoch, source)
                 logger.info(f"[{source.upper()} +{t:.2f}s] → CMD buffer_release ({inf_ms}ms)")
                 dispatch({
                     "type": "final",
@@ -1668,6 +1703,7 @@ def main(args=None):
 
         if BUFFER_CLEAR_COMMAND_ENABLED and normalized in BUFFER_CLEAR_COMMAND_WORDS_EXACT:
             if _mark_voice_command_seen(epoch, f"clear_buffer:{normalized}"):
+                _mark_epoch_consumed_by_partial_command(epoch, source)
                 logger.info(f"[{source.upper()} +{t:.2f}s] → CMD buffer_clear ({inf_ms}ms)")
                 dispatch({
                     "type": "final",
@@ -1717,6 +1753,9 @@ def main(args=None):
                     if mode_state["sleeping"]:
                         debug_log(f"[final_worker] skip epoch={epoch} reason=sleeping")
                         continue
+                if _is_epoch_consumed_by_partial_command(epoch):
+                    debug_log(f"[final_worker] skip epoch={epoch} reason=partial_command_consumed")
+                    continue
                 audio = np.concatenate(audio_data).astype(np.float32) / 32768.0
                 logger.info(f"[FINAL] Processing {len(audio)/RATE:.2f}s audio...")
 

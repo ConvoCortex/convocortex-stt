@@ -78,7 +78,7 @@ Built-in voice commands are intentionally minimal and convenience-oriented.
 Current built-in command types:
 - sleep/stop words
 - type-at-cursor toggle words
-- type-at-cursor undo words
+- rewind/repeat words
 - input device cycle words
 - output device cycle words
 - output mode selection words
@@ -271,27 +271,27 @@ At runtime, output mode is treated as state, not as a config rewrite. Startup be
 
 Startup source controls:
 - `startup.output_mode_source = "state"` restores the last selected output mode from `state.json`
-- `startup.output_mode_source = "config"` always starts in `config-default`
+- `startup.output_mode_source = "config"` always starts in the configured default mode (`direct-cursor` or `draft-buffer`)
 - `startup.input_device_source = "state"` restores the last runtime input device when possible
 - `startup.input_device_source = "config"` starts from `audio.input_device`, otherwise OS default input
 - `startup.output_device_source = "state"` restores the last runtime feedback output device when possible
 - `startup.output_device_source = "config"` starts from `feedback.output_device`, otherwise OS default output
 
 The built-in runtime modes are:
-- `config-default`: whatever `config.toml` says for the output handlers
 - `direct-cursor`
 - `draft-buffer`
 
-### Type-at-cursor undo
+### Rewind And Repeat
 
-If cursor typing is the active output path, the built-in exact voice command `undo` can send a best-effort undo action to the active app.
+If cursor typing is the active output path, the built-in exact voice command `rewind` can send a best-effort revert action to the active app.
 
 Relevant settings:
-- `voice_commands.undo.words`: exact phrases that trigger the undo action
-- `output.type_at_cursor.undo_mode`: `ctrl+z`, `backspace`, or `off`
-- `output.type_at_cursor.undo_backspace_count`: number of backspaces to send when using `backspace` mode
+- `voice_commands.rewind.words`: exact phrases that trigger the rewind action
+- `voice_commands.repeat.words`: exact phrases that repeat the last emitted chunk
+- `output.type_at_cursor.revert_mode`: `ctrl+z`, `backspace`, or `off`
+- `output.type_at_cursor.revert_backspace_count`: number of backspaces to send when using `backspace` mode
 
-This is intentionally app-dependent. `ctrl+z` works in many GUI text fields, while terminals and some apps may require `backspace` mode or `off`.
+This is intentionally app-dependent. `ctrl+z` works in many GUI text fields, while terminals and some apps may require `backspace` mode or `off`. In `draft-buffer` mode, `rewind` restores the last released buffer into the current buffer and also sends the configured cursor revert action. `repeat` re-sends the last released buffer without requiring it to still be present in `buffer.txt`.
 
 ### File buffer workflow
 
@@ -303,7 +303,7 @@ Relevant settings:
 - `output.file_buffer.separator`: separator inserted between finalized utterances
 - `output.file_buffer.clear_after_release`: clear the file after the `buffer` command releases it
 - `output.file_buffer.reset_after_each_message`: clear the existing buffer before writing each new finalized utterance
-- `output.file_buffer.undo_history_limit`: in-memory cap for one-step-at-a-time buffer undos triggered by the exact `undo` voice command while file-buffer mode is active
+- `output.file_buffer.undo_history_limit`: in-memory cap for one-step-at-a-time internal buffer history entries
 - `output.file_buffer.release_method`: `paste_preserve_clipboard` for fast paste with clipboard restore, or `type_keys` for the older direct typing path
 - `output.file_buffer.clipboard_restore_delay_ms`: how long to wait after paste before restoring clipboard contents
 - `output.file_buffer.clipboard_open_retry_count` / `output.file_buffer.clipboard_open_retry_delay_ms`: retry behavior for busy clipboard cases
@@ -311,7 +311,7 @@ Relevant settings:
 - `voice_commands.buffer_release.words`: exact phrases that trigger buffer release, and are also recognized at the end of an utterance while draft-buffer mode is active
 - `voice_commands.buffer_clear.words`: exact phrases that clear the buffer without typing it
 
-In `draft-buffer` mode, `undo` rewinds `buffer.txt` one saved state at a time instead of sending a cursor undo. The default history cap is `10` buffer states and is not persisted across restarts.
+The default history cap is `10` buffer states and is not persisted across restarts.
 
 ### Debug logging
 
