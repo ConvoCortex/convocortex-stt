@@ -17,7 +17,7 @@ if (-not (Test-Path $scriptPath)) {
 }
 
 if (-not (Test-Path $launcherVbs)) {
-    throw "Hidden launcher not found at $launcherVbs."
+    throw "Launcher not found at $launcherVbs."
 }
 
 if (-not (Test-Path $wscriptExe)) {
@@ -45,4 +45,4 @@ if ($targetProcesses) {
 
 $null = Start-Process -FilePath $wscriptExe -ArgumentList ('"' + $launcherVbs + '"') -WindowStyle Hidden -PassThru
 
-Write-Host "Started STT hidden in background mode."
+Write-Host "Started STT using the console startup mode from config.toml."

@@ -1,13 +1,16 @@
 from __future__ import annotations
 
 import os
+import sys
 import tempfile
+import threading
 import wave
-from contextlib import redirect_stderr, redirect_stdout
+from contextlib import contextmanager, redirect_stderr, redirect_stdout
 from dataclasses import dataclass
 from io import StringIO
 from pathlib import Path
 from typing import Any
+import logging as pylogging
 
 import numpy as np
 import torch
@@ -15,6 +18,39 @@ from faster_whisper import WhisperModel
 
 
 _RUNTIME_TEMP_DIR = Path(__file__).resolve().parent / ".tmp"
+_PARAKEET_STDIO_LOCK = threading.Lock()
+
+
+@contextmanager
+def _silence_process_stdio():
+    # Some NeMo/Lhotse paths write directly to process stdout/stderr, bypassing
+    # Python logging and high-level redirect helpers.
+    stdout_fd = stderr_fd = None
+    saved_stdout_fd = saved_stderr_fd = None
+    devnull_fd = None
+    try:
+        try:
+            sys.stdout.flush()
+            sys.stderr.flush()
+        except Exception:
+            pass
+        stdout_fd = sys.stdout.fileno()
+        stderr_fd = sys.stderr.fileno()
+        saved_stdout_fd = os.dup(stdout_fd)
+        saved_stderr_fd = os.dup(stderr_fd)
+        devnull_fd = os.open(os.devnull, os.O_WRONLY)
+        os.dup2(devnull_fd, stdout_fd)
+        os.dup2(devnull_fd, stderr_fd)
+        yield
+    finally:
+        if saved_stdout_fd is not None and stdout_fd is not None:
+            os.dup2(saved_stdout_fd, stdout_fd)
+            os.close(saved_stdout_fd)
+        if saved_stderr_fd is not None and stderr_fd is not None:
+            os.dup2(saved_stderr_fd, stderr_fd)
+            os.close(saved_stderr_fd)
+        if devnull_fd is not None:
+            os.close(devnull_fd)
 
 
 def _resolve_device(device: str) -> str:
@@ -107,26 +143,50 @@ class ParakeetBackend(TranscriptionBackend):
         _ensure_runtime_tempdir()
         try:
             import nemo.collections.asr as nemo_asr
+            from nemo.utils import logging as nemo_logging
         except Exception as exc:
             raise RuntimeError(
                 "Parakeet backend requires NeMo ASR. Install nemo_toolkit[asr] to use it."
             ) from exc
 
+        try:
+            nemo_logging.set_verbosity(pylogging.ERROR)
+        except Exception:
+            pass
+        try:
+            nemo_logging.remove_stream_handlers()
+        except Exception:
+            pass
+        for logger_name in ("nemo", "nemo_logger", "lhotse"):
+            logger = pylogging.getLogger(logger_name)
+            logger.setLevel(pylogging.ERROR)
+            logger.propagate = False
+            for handler in list(logger.handlers):
+                try:
+                    logger.removeHandler(handler)
+                except Exception:
+                    pass
+
         self.device = _resolve_device(device)
         model_ref = str(model_name).strip()
         path = Path(model_ref)
-        if path.exists() and path.is_file():
-            self.model = nemo_asr.models.ASRModel.restore_from(restore_path=str(path))
-        else:
-            self.model = nemo_asr.models.ASRModel.from_pretrained(model_ref)
+        # NeMo/Lhotse can print directly to stdout/stderr during model load and
+        # device moves as well, so suppress that startup chatter too.
+        with _PARAKEET_STDIO_LOCK:
+            with _silence_process_stdio():
+                with redirect_stdout(StringIO()), redirect_stderr(StringIO()):
+                    if path.exists() and path.is_file():
+                        self.model = nemo_asr.models.ASRModel.restore_from(restore_path=str(path))
+                    else:
+                        self.model = nemo_asr.models.ASRModel.from_pretrained(model_ref)
 
-        self.model.eval()
-        if self.device == "cuda":
-            if not torch.cuda.is_available():
-                raise RuntimeError("Parakeet backend requested CUDA but no CUDA device is available.")
-            self.model = self.model.to("cuda")
-        else:
-            self.model = self.model.to("cpu")
+                    self.model.eval()
+                    if self.device == "cuda":
+                        if not torch.cuda.is_available():
+                            raise RuntimeError("Parakeet backend requested CUDA but no CUDA device is available.")
+                        self.model = self.model.to("cuda")
+                    else:
+                        self.model = self.model.to("cpu")
 
     def warmup(self, audio: np.ndarray) -> None:
         del audio
@@ -150,8 +210,15 @@ class ParakeetBackend(TranscriptionBackend):
             # NeMo/Lhotse emits noisy warnings and progress text directly to
             # stdout/stderr during transcribe(). Keep the app console focused on
             # STT runtime output instead of internal dataloader chatter.
-            with redirect_stdout(StringIO()), redirect_stderr(StringIO()):
-                result = self.model.transcribe([temp_path], batch_size=1)
+            with _PARAKEET_STDIO_LOCK:
+                    with _silence_process_stdio():
+                        with redirect_stdout(StringIO()), redirect_stderr(StringIO()):
+                            result = self.model.transcribe(
+                                [temp_path],
+                                batch_size=1,
+                                num_workers=0,
+                                verbose=False,
+                            )
             if isinstance(result, tuple):
                 result = result[0]
             item = result[0] if isinstance(result, list) and result else result

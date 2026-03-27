@@ -13,7 +13,10 @@ uv sync
 uv run python stt.py
 ```
 
-On Windows, if you want it to start hidden once the runtime is ready:
+On Windows, console visibility during and after startup is controlled by
+`startup.console_startup_mode` in `config.toml`.
+
+If you want a one-off override for a single launch:
 
 ```bash
 uv run python stt.py --background
@@ -200,7 +203,13 @@ Edit `config.toml` directly, or replace it with one of the included preset confi
 uv run python stt.py
 ```
 
-To start normally and hide the console once the runtime is ready:
+To start with the config-defined console mode:
+
+```bash
+uv run python stt.py
+```
+
+To temporarily override that for one launch and hide the console once the runtime is ready:
 
 ```bash
 uv run python stt.py --background
@@ -211,7 +220,8 @@ If you want the default backtick sleep hotkey to be intercepted instead of typed
 
 ## Windows Startup Shortcut
 
-If you want this to come up automatically in the background after you log in on Windows:
+If you want this to come up automatically after you log in on Windows, using the
+console mode from `config.toml`:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\scripts\install-startup-shortcut.ps1
@@ -223,11 +233,9 @@ That creates a shortcut in:
 C:\Users\user\AppData\Roaming\Microsoft\Windows\Start Menu\Programs\Startup
 ```
 
-The shortcut launches:
-
-```text
-.venv\Scripts\python.exe stt.py --background
-```
+The shortcut launches the repo's Windows launcher, which reads
+`startup.console_startup_mode` from `config.toml` and then starts `stt.py`
+accordingly.
 
 This is the simpler Windows logon path and fits this app better because it relies on an interactive desktop session for global hotkeys and for restoring the console window to the foreground.
 
@@ -276,6 +284,7 @@ Startup source controls:
 - `startup.input_device_source = "config"` starts from `audio.input_device`, otherwise OS default input
 - `startup.output_device_source = "state"` restores the last runtime feedback output device when possible
 - `startup.output_device_source = "config"` starts from `feedback.output_device`, otherwise OS default output
+- `startup.console_startup_mode = "foreground"` keeps the console visible during and after startup; `"background"` hides it during and after startup
 
 The built-in runtime modes are:
 - `direct-cursor`

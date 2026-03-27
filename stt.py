@@ -221,6 +221,13 @@ def _normalize_startup_source(value, default: str) -> str:
     return default
 
 
+def _normalize_console_startup_mode(value, default: str = "foreground") -> str:
+    normalized = str(value or "").strip().lower()
+    if normalized in {"foreground", "background"}:
+        return normalized
+    return default
+
+
 INPUT_DEVICE_STARTUP_SOURCE = _normalize_startup_source(
     _startup_cfg.get("input_device_source", "state"),
     "state",
@@ -232,6 +239,10 @@ OUTPUT_DEVICE_STARTUP_SOURCE = _normalize_startup_source(
 OUTPUT_MODE_STARTUP_SOURCE = _normalize_startup_source(
     _startup_cfg.get("output_mode_source", "state"),
     "state",
+)
+CONSOLE_STARTUP_MODE = _normalize_console_startup_mode(
+    _startup_cfg.get("console_startup_mode", "foreground"),
+    "foreground",
 )
 
 # ── Realtime ──────────────────────────────────────────────────────────────────
@@ -939,12 +950,25 @@ class FeedbackAudio:
 def main(args=None):
     import signal
     if args is None:
-        args = argparse.Namespace(background=False)
+        args = argparse.Namespace(background=None, foreground=None)
     def _sigterm(_s, _f):
         raise KeyboardInterrupt
     signal.signal(signal.SIGTERM, _sigterm)
 
     console_controller = WindowsConsoleController()
+    requested_background = getattr(args, "background", None)
+    requested_foreground = getattr(args, "foreground", None)
+    background_mode = CONSOLE_STARTUP_MODE == "background"
+    if requested_background is True:
+        background_mode = True
+    elif requested_foreground is True:
+        background_mode = False
+    if background_mode:
+        if console_controller.available:
+            console_controller.hide(reason="startup-init")
+        else:
+            logger.warning("[console] Background mode requested but no Windows console is available.")
+
     hotkey_targets: dict[str, list] = {}
     hotkey_not_ready_logged: set[str] = set()
 
@@ -2181,11 +2205,6 @@ def main(args=None):
     dispatch({"type": "status", "value": "sleeping" if mode_state["sleeping"] else "working"})
     print("STT Ready!")
     sys.stdout.flush()
-    if getattr(args, "background", False):
-        if console_controller.available:
-            console_controller.hide(reason="startup")
-        else:
-            logger.warning("[console] Background mode requested but no Windows console is available.")
 
     def reset_active_utterance(reason: str):
         nonlocal recording_buffer, is_recording, silence_counter, current_t0, last_rt_update
@@ -2511,6 +2530,13 @@ if __name__ == '__main__':
     parser.add_argument(
         "--background",
         action="store_true",
+        default=None,
         help="Start normally, then hide the console after STT finishes startup.",
+    )
+    parser.add_argument(
+        "--foreground",
+        action="store_true",
+        default=None,
+        help="Keep the console visible after startup, overriding config.",
     )
     main(parser.parse_args())

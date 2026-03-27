@@ -78,7 +78,7 @@ def make_file_buffer(cfg: dict):
     clipboard_restore_delay_ms = max(0, int(bcfg.get("clipboard_restore_delay_ms", 250)))
     clipboard_open_retry_count = max(1, int(bcfg.get("clipboard_open_retry_count", 8)))
     clipboard_open_retry_delay_ms = max(1, int(bcfg.get("clipboard_open_retry_delay_ms", 25)))
-    post_paste_enter_delay_ms = max(0, int(bcfg.get("post_paste_enter_delay_ms", 80)))
+    post_paste_enter_delay_ms = max(0, int(bcfg.get("post_paste_enter_delay_ms", 140)))
     lock = threading.Lock()
     enabled_lock = threading.Lock()
     enabled_state = [bool(bcfg.get("enabled", False))]
@@ -265,7 +265,11 @@ def make_file_buffer(cfg: dict):
         with lock:
             content = _read_buffer()
         if not content:
-            logger.info("[file_buffer] Release ignored: buffer is empty.")
+            if press_enter_after:
+                keyboard.press_and_release("enter")
+                logger.info("[file_buffer] buffer empty; sent enter only")
+            else:
+                logger.info("[file_buffer] Release ignored: buffer is empty.")
             return
         if release_method == "paste_preserve_clipboard":
             _release_via_clipboard(content, press_enter_after)

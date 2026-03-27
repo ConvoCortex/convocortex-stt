@@ -14,3 +14,4 @@ mess/
 state.json
 output.txt
 buffer.txt
+device-profiles.json

@@ -64,6 +64,8 @@ device_setup_initialized = true
 input_device_source = "config"
 output_device_source = "config"
 output_mode_source = "state"
+# "foreground" = leave the console visible after startup, "background" = hide it after startup
+console_startup_mode = "background"
 
 [realtime]
 # check_interval: how often (seconds) a partial transcription is triggered during speech
@@ -118,10 +120,10 @@ undo_history_limit = 10
 #   "paste_preserve_clipboard" = fast Ctrl+V path with clipboard save/restore
 #   "type_keys"                = slower simulated typing, clipboard untouched
 release_method = "paste_preserve_clipboard"
-clipboard_restore_delay_ms = 250
+clipboard_restore_delay_ms = 1000
 clipboard_open_retry_count = 8
 clipboard_open_retry_delay_ms = 25
-post_paste_enter_delay_ms = 80
+post_paste_enter_delay_ms = 400
 
 # use either output.clipboard_replace or output.clipboard_accumulate, not both at once
 [output.clipboard_replace]
