@@ -1,8 +1,8 @@
 # convocortex-stt
 
-Ambient speech-to-text for desktop use: leave it running, wake it when needed, speak naturally, and have final text routed to files, clipboard, a live buffer, NATS, or directly into the active cursor.
+Ambient speech-to-text for desktop use: leave it running, wake it when needed, speak naturally, and route text into a working buffer, the active cursor, files, or NATS.
 
-It is built for daily background use rather than one-shot dictation: wake/sleep modes, VAD-gated utterances, realtime partials, accurate finals, device cycling, audio feedback, hotkeys, and a simple integration boundary over NATS.
+It is built for daily hands-free use rather than one-shot dictation: wake/sleep modes, VAD-gated utterances, pluggable realtime/final backends, device cycling, audio feedback, hotkeys, and a simple integration boundary over NATS.
 
 ## Quick start
 
@@ -16,27 +16,39 @@ uv run python stt.py
 On Windows, console visibility during and after startup is controlled by
 `startup.console_startup_mode` in `config.toml`.
 
-If you want a one-off override for a single launch:
-
-```bash
-uv run python stt.py --background
-```
 
 Before first real use, open `config.toml` and set the bits you actually care about:
 - `models.final_backend` / `models.realtime_backend`
 - `models.final_device` / `models.realtime_device`
 - `sleep_wake.wake_word`
-- `output.type_at_cursor.enabled`
+- `output.file_buffer.enabled`
 - `hotkeys.sleep_toggle`
+
+On the first real startup, the app runs interactive device setup so you can
+pick the input and output devices that should participate in runtime cycling.
 
 Focused output-mode presets live in:
 - `presets/output-modes/direct-cursor.toml`
 - `presets/output-modes/draft-buffer.toml`
 
+## Recommended workflow
+
+The intended workflow is `draft-buffer`.
+
+Keep [`buffer.txt`](buffer.txt) open in an editor such as VS Code, speak naturally into the buffer, adjust the text if needed, and then say `enter` when you want to release the buffer into the active app and submit it.
+
+That gives you a practical loop:
+- speak into the live buffer
+- glance at or edit `buffer.txt`
+- say `enter` to paste the buffer and press Enter
+
+If you want immediate direct typing instead, switch to `direct-cursor` mode at runtime with the output-mode hotkey or the exact voice command `cursor mode`.
+
 ## Why this repo is useful
 
 - It is hands-free. VAD starts and ends utterances from speech and silence, not button presses.
-- It separates low-latency partials from higher-accuracy finals, which makes it usable both for responsiveness and for actual text output.
+- It supports separate realtime and final backends, but the intended path here is NVIDIA Parakeet for both.
+- Its buffer-first workflow is practical for real desktop work instead of forcing immediate text emission all the time.
 - It already handles the ugly desktop details: wake/sleep state, audio feedback, hotkeys, device switching, reconnect behavior, and persisted runtime state.
 - It works as a standalone local tool and also as a component inside a larger voice system through NATS.
 
@@ -67,10 +79,12 @@ So wake word is not "say phrase to start one transcription". It controls whether
 
 When in working mode, inference is driven by VAD-detected speech windows instead of blindly processing endless noise.
 
-### 4) Dual-model pipeline
+### 4) Dual-backend pipeline
 
-- Realtime model emits **partial** text while you are speaking (low latency)
-- Final model emits **final** text after pause/silence (higher accuracy)
+- Realtime backend emits **partial** text while you are speaking
+- Final backend emits **final** text after pause/silence
+
+Each side can use a different backend and model. In practice, Parakeet is the recommended path here for both realtime and final transcription. It is accurate enough on partials that voice commands can trigger almost immediately, while finals still wait for pause detection before emission.
 
 Partials are primarily for responsiveness and command latency, not for high-accuracy text output.
 
@@ -97,13 +111,15 @@ For a proper, richer voice command engine, use the emitted NATS events and imple
 
 ### Practical device workflow
 
-One useful pattern is to keep two approved input devices and switch between them by voice:
+One useful pattern is to keep a small approved input cycle and switch it by voice:
 
-- use the desk microphone while you are at the PC, because it can sound better and it does not force bluetooth headphones into hands-free mic mode
-- say `input` when you want to walk away and switch to the headset microphone
-- say `input` again when you come back and want the desk microphone again
+- local desk microphone
+- optional bluetooth/headset microphone
+- optional virtual input such as `B1` from a remote-audio bridge
 
-This is a good fit for the built-in input-device cycle command because it lets you move between a higher-quality stationary mic and a mobile headset mic without touching the keyboard.
+Then say `input` to move between those options without touching the keyboard.
+
+This is especially useful when you want to compare microphones in the same environment or swap between local-PC mode and a remote-phone microphone path.
 
 ## Features
 
@@ -112,8 +128,10 @@ This is a good fit for the built-in input-device cycle command because it lets y
 - Sleep/working mode with wake word + stop words
 - Realtime partial transcriptions during speech
 - High-accuracy final transcriptions after pauses
+- Independent realtime/final backend selection with faster-whisper and Parakeet
 - Built-in audio feedback sounds (on/off/final + silence loop for bluetooth audio issues)
 - Simple built-in voice command actions
+- Draft-buffer workflow for reviewing/editing before release
 - Local output handlers:
   - append file
   - overwrite file
@@ -133,6 +151,7 @@ This is a good fit for the built-in input-device cycle command because it lets y
   - control surface (`sleep`, `wake`, `typing_*`, device cycle, etc.)
 - Persisted runtime state across restarts
 - Input/output device switching and reconnect behavior
+- Friendly to virtual-audio and remote-audio bridge setups
 
 ## Performance behavior
 
@@ -203,17 +222,6 @@ Edit `config.toml` directly, or replace it with one of the included preset confi
 uv run python stt.py
 ```
 
-To start with the config-defined console mode:
-
-```bash
-uv run python stt.py
-```
-
-To temporarily override that for one launch and hide the console once the runtime is ready:
-
-```bash
-uv run python stt.py --background
-```
 
 On Windows, the default `hotkeys.console_toggle = "shift+f8"` hides/shows that same console window. When you bring it back, `Ctrl+C` kills the process as usual.
 If you want the default backtick sleep hotkey to be intercepted instead of typed into the active app, set `hotkeys.sleep_toggle_suppress = true`.
@@ -268,8 +276,8 @@ Important areas:
 
 The repo currently has two output workflows that make sense as first-class sets:
 
+- `draft-buffer`: the recommended mode. Keep a visible working buffer, then explicitly release it. Typical loop is `clear`, speak, edit if needed, `enter`.
 - `direct-cursor`: finalized text types into the active app immediately. Buffering and clipboard mirroring are off.
-- `draft-buffer`: keep the buffer workflow explicit. Typical loop is `typing` to disable direct typing, `clear`, speak, `buffer`, repeat.
 
 Those focused presets are provided as small snippets under `presets/output-modes/`. They describe the built-in runtime output modes.
 
@@ -306,7 +314,7 @@ This is intentionally app-dependent. `ctrl+z` works in many GUI text fields, whi
 
 If `output.file_buffer.enabled = true`, each final transcription is appended to `output.file_buffer.path`.
 
-This gives you a plain text working buffer you can keep open in an editor, adjust manually, and then inject into the active cursor later with an exact voice command such as `buffer`.
+This gives you a plain text working buffer you can keep open in an editor, adjust manually, and then inject into the active cursor later with an exact voice command such as `buffer` or `enter`.
 
 Relevant settings:
 - `output.file_buffer.separator`: separator inserted between finalized utterances
@@ -319,6 +327,8 @@ Relevant settings:
 - `output.file_buffer.post_paste_enter_delay_ms`: brief wait between paste and Enter when a buffer release also submits
 - `voice_commands.buffer_release.words`: exact phrases that trigger buffer release, and are also recognized at the end of an utterance while draft-buffer mode is active
 - `voice_commands.buffer_clear.words`: exact phrases that clear the buffer without typing it
+
+If the file buffer is active, the built-in exact voice command `enter` releases the current buffer and then presses Enter. This makes `draft-buffer` practical for chat boxes, terminals, and other submit-oriented text fields.
 
 The default history cap is `10` buffer states and is not persisted across restarts.
 
@@ -341,7 +351,18 @@ With `debug = true`, the runtime keeps normal console output but also appends de
 - realtime queue enqueue/drop behavior
 - periodic heartbeats showing mode, queue depth, buffer sizes, and current VAD state
 
-This project is not currently using the `realtimestt` package at runtime for the main loop; the useful debug points are in [`stt.py`](stt.py) around PyAudio, Silero VAD, and the transcription backend adapter layer.
+The useful debug points are in [`stt.py`](stt.py) around PyAudio, Silero VAD, and the transcription backend adapter layer.
+
+## Remote audio bridge workflow
+
+This project also works well with a remote-audio bridge setup based on:
+- a routed or overlay network that gives the remote device access to the PC
+- a Mumble-compatible voice link
+- virtual audio devices such as Voicemeeter
+
+That lets you treat a phone or remote client as another microphone/speaker endpoint while keeping STT local on the desktop.
+
+See [docs/remote-audio-bridge.md](docs/remote-audio-bridge.md).
 
 ## NATS
 
@@ -389,13 +410,13 @@ Send JSON to `nats.subject_control`:
 ## Platform notes
 
 - Windows is the primary tested path.
-- Parakeet models depend on NVIDIA NeMo. NVIDIA’s Parakeet model cards list Linux as the supported OS, so Windows use is best-effort and less proven than the default Whisper path.
+- Parakeet models depend on NVIDIA NeMo. NVIDIA’s Parakeet model cards list Linux as the supported OS, so Windows use is still best-effort even though it works well enough for this repo's workflow.
 - Linux hotkeys may require input permissions (group/root setup).
 - macOS hotkeys may require Accessibility permissions.
 
 ## Acknowledgments
 
-This repository uses the same general stack as the RealTimeSTT ecosystem, but the runtime loop in this project is custom and lives in `stt.py`. The main transcription path here is built around PyAudio, Silero VAD, and pluggable transcription backends, with faster-whisper as the default path and Parakeet supported through NeMo.
+This repository is built around PyAudio, Silero VAD, pluggable transcription backends, and a local-first desktop workflow.
 
 ## Responsible use
 
@@ -421,6 +442,7 @@ Commercial licensing is available for proprietary use; contact the maintainer.
 
 Contributions require signing the [Individual Contributor License Agreement](CLA.md).
 See [CONTRIBUTING.md](CONTRIBUTING.md).
+
 
 
 

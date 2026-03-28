@@ -44,7 +44,6 @@ If fso.FileExists(configPath) Then
 End If
 
 If consoleMode = "background" Then
-    command = command & " --background"
     windowStyle = 0
 End If
 

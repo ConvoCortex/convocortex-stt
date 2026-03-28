@@ -50,14 +50,14 @@ rate            = 16000  # sample rate — required by the current transcription
 chunk           = 512    # audio frames per VAD check — lower = more responsive, higher = more stable
 vad_threshold   = 0.5   # Silero VAD sensitivity 0–1 (lower = more sensitive, picks up more speech)
 buffer_seconds  = 1.0   # ring buffer before speech start — captures audio before VAD triggers
-silence_timeout = 0.8   # seconds of silence before ending an utterance and firing final transcription
+silence_timeout = 0.6   # seconds of silence before ending an utterance and firing final transcription
 input_stall_reset_seconds = 1.5 # if audio capture stalls this long mid-utterance, drop buffered speech instead of resuming it later
 # exact startup input device when startup.input_device_source = "config"; empty = OS default
 input_device    = ""
 # selected startup/cycling devices are stored here after first-run setup
 device_profiles_file = "device-profiles.json"
 # false = run the interactive device setup on next startup, then flip back to true
-device_setup_initialized = true
+device_setup_initialized = false
 
 [startup]
 # "config" = start from config.toml defaults, "state" = restore last runtime selection from state.json
