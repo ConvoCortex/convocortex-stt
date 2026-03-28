@@ -7,6 +7,7 @@ Output via configurable local handlers. NATS optional.
 """
 
 import copy
+import _thread
 import sys
 import time
 import queue
@@ -38,6 +39,55 @@ from audio_devices import (
 import config
 from model_backends import load_backend
 import state as state_store
+
+
+def _bootstrap_owned_console():
+    if os.name != "nt":
+        return
+    if os.environ.get("CONVOCORTEX_OWN_CONSOLE", "").strip() != "1":
+        return
+    try:
+        import ctypes
+    except Exception:
+        return
+
+    kernel32 = ctypes.windll.kernel32
+    try:
+        if int(kernel32.GetConsoleWindow()):
+            return
+    except Exception:
+        return
+
+    try:
+        if not kernel32.AllocConsole():
+            return
+    except Exception:
+        return
+
+    startup_mode = os.environ.get("CONVOCORTEX_CONSOLE_STARTUP_MODE", "").strip().lower()
+    if startup_mode == "background":
+        try:
+            hwnd = int(kernel32.GetConsoleWindow())
+            if hwnd:
+                ctypes.windll.user32.ShowWindow(hwnd, 0)
+        except Exception:
+            pass
+
+    try:
+        sys.stdin = open("CONIN$", "r", encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+    try:
+        sys.stdout = open("CONOUT$", "w", encoding="utf-8", errors="replace", buffering=1)
+    except Exception:
+        pass
+    try:
+        sys.stderr = open("CONOUT$", "w", encoding="utf-8", errors="replace", buffering=1)
+    except Exception:
+        pass
+
+
+_bootstrap_owned_console()
 
 
 def _normalize_command_phrase(value: str) -> str:
@@ -187,6 +237,173 @@ class WindowsConsoleController:
         if self.is_visible():
             return self.hide(reason=reason)
         return self.show(reason=reason)
+
+
+class WindowsTrayIcon:
+    WMAPP_NOTIFYCALLBACK = 0x8001
+    CMD_TOGGLE_CONSOLE = 1001
+    CMD_EXIT = 1002
+
+    def __init__(self, console_controller: WindowsConsoleController):
+        self._console_controller = console_controller
+        self._thread = None
+        self._ready = threading.Event()
+        self._hwnd = None
+        self._class_name = f"ConvocortexSTTTray-{os.getpid()}"
+        self._available = False
+        self._win32api = None
+        self._win32con = None
+        self._win32gui = None
+
+        if os.name != "nt":
+            return
+        try:
+            import win32api
+            import win32con
+            import win32gui
+
+            self._win32api = win32api
+            self._win32con = win32con
+            self._win32gui = win32gui
+            self._available = True
+        except ImportError:
+            logger.warning("[tray] pywin32 not installed, tray icon disabled.")
+        except Exception as exc:
+            logger.warning(f"[tray] Windows tray icon unavailable: {exc}")
+
+    @property
+    def available(self) -> bool:
+        return self._available
+
+    def start(self) -> bool:
+        if not self._available:
+            return False
+        if self._thread and self._thread.is_alive():
+            return True
+        self._thread = threading.Thread(target=self._run, name="tray-icon", daemon=True)
+        self._thread.start()
+        return self._ready.wait(timeout=5.0)
+
+    def stop(self, timeout: float = 2.0):
+        if not self._available or not self._thread:
+            return
+        hwnd = self._hwnd
+        if hwnd:
+            try:
+                self._win32gui.PostMessage(hwnd, self._win32con.WM_CLOSE, 0, 0)
+            except Exception:
+                pass
+        self._thread.join(timeout=timeout)
+
+    def _menu_label(self) -> str:
+        return "Hide Console" if self._console_controller.is_visible() else "Show Console"
+
+    def _toggle_console(self):
+        self._console_controller.toggle(reason="tray")
+
+    def _request_exit(self):
+        logger.info("[tray] Exit requested.")
+        _thread.interrupt_main()
+
+    def _show_menu(self):
+        if not self._hwnd:
+            return
+        menu = self._win32gui.CreatePopupMenu()
+        try:
+            self._win32gui.AppendMenu(menu, self._win32con.MF_STRING, self.CMD_TOGGLE_CONSOLE, self._menu_label())
+            self._win32gui.AppendMenu(menu, self._win32con.MF_SEPARATOR, 0, "")
+            self._win32gui.AppendMenu(menu, self._win32con.MF_STRING, self.CMD_EXIT, "Exit STT")
+            pos = self._win32gui.GetCursorPos()
+            self._win32gui.SetForegroundWindow(self._hwnd)
+            self._win32gui.TrackPopupMenu(
+                menu,
+                self._win32con.TPM_LEFTALIGN | self._win32con.TPM_BOTTOMALIGN | self._win32con.TPM_RIGHTBUTTON,
+                pos[0],
+                pos[1],
+                0,
+                self._hwnd,
+                None,
+            )
+            self._win32gui.PostMessage(self._hwnd, self._win32con.WM_NULL, 0, 0)
+        finally:
+            self._win32gui.DestroyMenu(menu)
+
+    def _on_command(self, hwnd, msg, wparam, lparam):
+        cmd = self._win32api.LOWORD(wparam)
+        if cmd == self.CMD_TOGGLE_CONSOLE:
+            self._toggle_console()
+        elif cmd == self.CMD_EXIT:
+            self._request_exit()
+        return 0
+
+    def _on_notify(self, hwnd, msg, wparam, lparam):
+        if lparam == self._win32con.WM_LBUTTONUP:
+            self._toggle_console()
+        elif lparam in {self._win32con.WM_RBUTTONUP, self._win32con.WM_CONTEXTMENU}:
+            self._show_menu()
+        return 0
+
+    def _remove_icon(self):
+        if not self._hwnd:
+            return
+        try:
+            self._win32gui.Shell_NotifyIcon(self._win32gui.NIM_DELETE, (self._hwnd, 0))
+        except Exception:
+            pass
+
+    def _on_destroy(self, hwnd, msg, wparam, lparam):
+        self._remove_icon()
+        self._win32gui.PostQuitMessage(0)
+        return 0
+
+    def _run(self):
+        try:
+            message_map = {
+                self._win32con.WM_COMMAND: self._on_command,
+                self._win32con.WM_DESTROY: self._on_destroy,
+                self.WMAPP_NOTIFYCALLBACK: self._on_notify,
+            }
+            window_class = self._win32gui.WNDCLASS()
+            window_class.hInstance = self._win32api.GetModuleHandle(None)
+            window_class.lpszClassName = self._class_name
+            window_class.lpfnWndProc = message_map
+            class_atom = self._win32gui.RegisterClass(window_class)
+            self._hwnd = self._win32gui.CreateWindow(
+                class_atom,
+                self._class_name,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                window_class.hInstance,
+                None,
+            )
+            icon_handle = self._win32gui.LoadIcon(0, self._win32con.IDI_APPLICATION)
+            notify_id = (
+                self._hwnd,
+                0,
+                self._win32gui.NIF_ICON | self._win32gui.NIF_MESSAGE | self._win32gui.NIF_TIP,
+                self.WMAPP_NOTIFYCALLBACK,
+                icon_handle,
+                "Convocortex STT",
+            )
+            self._win32gui.Shell_NotifyIcon(self._win32gui.NIM_ADD, notify_id)
+            logger.info("[tray] Ready.")
+        except Exception as exc:
+            logger.warning(f"[tray] Failed to initialize: {exc}")
+        finally:
+            self._ready.set()
+
+        if not self._hwnd:
+            return
+
+        try:
+            self._win32gui.PumpMessages()
+        finally:
+            self._remove_icon()
 
 # ── Models ────────────────────────────────────────────────────────────────────
 FINAL_MODEL        = cfg["models"]["final"]
@@ -953,12 +1170,15 @@ def main(args=None):
     signal.signal(signal.SIGTERM, _sigterm)
 
     console_controller = WindowsConsoleController()
+    tray_icon = WindowsTrayIcon(console_controller)
     background_mode = CONSOLE_STARTUP_MODE == "background"
     if background_mode:
         if console_controller.available:
             console_controller.hide(reason="startup-init")
         else:
             logger.warning("[console] Background mode requested but no Windows console is available.")
+    if tray_icon.available and not tray_icon.start():
+        logger.warning("[tray] Failed to start tray icon thread.")
 
     hotkey_targets: dict[str, list] = {}
     hotkey_not_ready_logged: set[str] = set()
@@ -1820,7 +2040,7 @@ def main(args=None):
                         if actions.get("press_enter_after"):
                             feedback.play_on()
                 else:
-                    logger.info(f"[FINAL +{t:.2f}s] <empty> ({inf_ms}ms)")
+                    debug_log(f"[FINAL +{t:.2f}s] drop empty ({inf_ms}ms)")
 
                 drained = 0
                 with state_lock:
@@ -2503,6 +2723,8 @@ def main(args=None):
     try:
         if wakeword_engine is not None:
             wakeword_engine.delete()
+    except: pass
+    try: tray_icon.stop()
     except: pass
     try: feedback.shutdown()
     except: pass

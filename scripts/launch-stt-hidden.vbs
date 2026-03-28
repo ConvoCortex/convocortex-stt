@@ -1,15 +1,18 @@
 Set shell = CreateObject("WScript.Shell")
 Set fso = CreateObject("Scripting.FileSystemObject")
 
+Function PsQuote(value)
+    PsQuote = "'" & Replace(value, "'", "''") & "'"
+End Function
+
 repoRoot = fso.GetParentFolderName(WScript.ScriptFullName)
 repoRoot = fso.GetParentFolderName(repoRoot)
 shell.CurrentDirectory = repoRoot
-pythonExe = Chr(34) & fso.BuildPath(repoRoot, ".venv\Scripts\python.exe") & Chr(34)
-scriptPath = Chr(34) & fso.BuildPath(repoRoot, "stt.py") & Chr(34)
+pythonExePath = fso.BuildPath(repoRoot, ".venv\Scripts\pythonw.exe")
+scriptPathValue = fso.BuildPath(repoRoot, "stt.py")
 configPath = fso.BuildPath(repoRoot, "config.toml")
+powershellExe = Chr(34) & fso.BuildPath(shell.ExpandEnvironmentStrings("%WINDIR%"), "System32\WindowsPowerShell\v1.0\powershell.exe") & Chr(34)
 consoleMode = "foreground"
-windowStyle = 1
-command = pythonExe & " " & scriptPath
 
 If fso.FileExists(configPath) Then
     Set configFile = fso.OpenTextFile(configPath, 1)
@@ -43,9 +46,10 @@ If fso.FileExists(configPath) Then
     configFile.Close
 End If
 
-If consoleMode = "background" Then
-    windowStyle = 0
-End If
+psCommand = "$env:CONVOCORTEX_OWN_CONSOLE='1'; $env:CONVOCORTEX_CONSOLE_STARTUP_MODE='" & consoleMode & "'; Start-Process -FilePath " & PsQuote(pythonExePath) & _
+    " -ArgumentList @(" & PsQuote(scriptPathValue) & ")" & _
+    " -WorkingDirectory " & PsQuote(repoRoot)
 
-' 0 = hidden window, 1 = normal window, False = do not wait
-shell.Run command, windowStyle, False
+command = powershellExe & " -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -Command " & Chr(34) & psCommand & Chr(34)
+
+shell.Run command, 0, False
