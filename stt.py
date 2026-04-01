@@ -173,9 +173,12 @@ _persisted = state_store.load()
 
 
 class WindowsConsoleController:
+    STD_INPUT_HANDLE = -10
     SW_HIDE = 0
     SW_SHOW = 5
     SW_RESTORE = 9
+    ENABLE_EXTENDED_FLAGS = 0x0080
+    ENABLE_QUICK_EDIT_MODE = 0x0040
 
     def __init__(self):
         self._lock = threading.RLock()
@@ -190,6 +193,7 @@ class WindowsConsoleController:
             self._user32 = ctypes.windll.user32
             self._kernel32 = ctypes.windll.kernel32
             self._available = bool(self._console_hwnd())
+            self._disable_quick_edit()
         except Exception as exc:
             logger.warning(f"[console] Windows console control unavailable: {exc}")
 
@@ -204,6 +208,25 @@ class WindowsConsoleController:
     @property
     def available(self) -> bool:
         return bool(self._available and self._console_hwnd())
+
+    def _disable_quick_edit(self):
+        if not self._kernel32:
+            return
+        try:
+            import ctypes
+
+            handle = self._kernel32.GetStdHandle(self.STD_INPUT_HANDLE)
+            if not handle or handle == ctypes.c_void_p(-1).value:
+                return
+            mode = ctypes.c_uint32()
+            if not self._kernel32.GetConsoleMode(handle, ctypes.byref(mode)):
+                return
+            new_mode = (int(mode.value) | self.ENABLE_EXTENDED_FLAGS) & ~self.ENABLE_QUICK_EDIT_MODE
+            if new_mode != int(mode.value):
+                if self._kernel32.SetConsoleMode(handle, new_mode):
+                    logger.info("[console] Disabled Quick Edit to avoid click-freezes.")
+        except Exception as exc:
+            logger.warning(f"[console] Could not disable Quick Edit: {exc}")
 
     def is_visible(self) -> bool:
         hwnd = self._console_hwnd()
