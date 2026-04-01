@@ -152,11 +152,6 @@ on_sound = "sounds/on.ogg"
 off_sound = "sounds/off.ogg"
 silence_sound = "sounds/silence.ogg"
 silence_keepalive_mode = "always" # "always" keeps silence.ogg looping 24/7 on the feedback output; "off" disables the bluetooth keepalive
-# Stable keepalive mixer format. 44.1k stereo matches the old Go service better than mixed per-file formats.
-keepalive_sample_rate = 44100
-keepalive_channels = 2
-# Tiny non-zero signal to stop bluetooth/phone paths from treating the stream as perfect silence and going sleepy.
-keepalive_noise_floor = 0.0005
 final_sound = "sounds/final.ogg"
 final_sound_enabled = true
 on_volume = 1.0

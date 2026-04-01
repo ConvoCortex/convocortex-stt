@@ -272,7 +272,7 @@ Important areas:
 - `hotkeys`: optional runtime controls
 - `nats`: URL/subjects + enable toggle
 
-`feedback.silence_keepalive_mode = "always"` keeps an always-open feedback stream running on the selected output device. The stream uses `sounds/silence.ogg` plus a tiny configurable noise floor (`feedback.keepalive_noise_floor`) so flaky bluetooth/headset routes are less likely to optimize the audio path into sleep. `feedback.keepalive_sample_rate` and `feedback.keepalive_channels` control the fixed mixer format used for that keepalive. Set `silence_keepalive_mode = "off"` to disable it.
+`feedback.silence_keepalive_mode = "always"` keeps `sounds/silence.ogg` looping continuously on the feedback output device. Set it to `"off"` to disable that keepalive.
 
 ### Output workflow sets
 
