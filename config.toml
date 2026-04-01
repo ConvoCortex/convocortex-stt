@@ -151,6 +151,7 @@ enabled = true
 on_sound = "sounds/on.ogg"
 off_sound = "sounds/off.ogg"
 silence_sound = "sounds/silence.ogg"
+startup_sound = "sounds/startup.ogg"
 silence_keepalive_mode = "always" # "always" keeps silence.ogg looping 24/7 on the feedback output; "off" disables the bluetooth keepalive
 final_sound = "sounds/final.ogg"
 final_sound_enabled = true

@@ -522,6 +522,7 @@ FEEDBACK_ENABLED = bool(_fb_cfg.get("enabled", True))
 FEEDBACK_ON_SOUND = str(_fb_cfg.get("on_sound", "sounds/on.ogg")).strip()
 FEEDBACK_OFF_SOUND = str(_fb_cfg.get("off_sound", "sounds/off.ogg")).strip()
 FEEDBACK_SILENCE_SOUND = str(_fb_cfg.get("silence_sound", "sounds/silence.ogg")).strip()
+FEEDBACK_STARTUP_SOUND = str(_fb_cfg.get("startup_sound", "sounds/startup.ogg")).strip()
 FEEDBACK_FINAL_SOUND = str(_fb_cfg.get("final_sound", "sounds/final.ogg")).strip()
 FEEDBACK_FINAL_SOUND_ENABLED = bool(_fb_cfg.get("final_sound_enabled", True))
 FEEDBACK_SILENCE_KEEPALIVE_MODE = _normalize_silence_keepalive_mode(
@@ -886,6 +887,7 @@ class FeedbackAudio:
         on_path: str,
         off_path: str,
         silence_path: str,
+        startup_path: str,
         final_path: str,
         final_sound_enabled: bool,
         silence_keepalive_mode: str,
@@ -901,6 +903,7 @@ class FeedbackAudio:
         self.on_path = on_path
         self.off_path = off_path
         self.silence_path = silence_path
+        self.startup_path = startup_path
         self.final_path = final_path
         self.final_sound_enabled = final_sound_enabled
         self.silence_keepalive_mode = _normalize_silence_keepalive_mode(silence_keepalive_mode, "always")
@@ -943,6 +946,7 @@ class FeedbackAudio:
             self._clips["on"] = self._load_clip(torchaudio, self.on_path, self.on_volume)
             self._clips["off"] = self._load_clip(torchaudio, self.off_path, self.off_volume)
             self._clips["silence"] = self._load_clip(torchaudio, self.silence_path)
+            self._clips["startup"] = self._load_clip(torchaudio, self.startup_path)
             if self.final_sound_enabled:
                 try:
                     self._clips["final"] = self._load_clip(torchaudio, self.final_path, self.final_volume)
@@ -1185,6 +1189,10 @@ class FeedbackAudio:
     def play_final(self):
         if self.enabled and self.final_sound_enabled and "final" in self._clips:
             self._sound_queue.put("final")
+
+    def play_startup(self):
+        if self.enabled and "startup" in self._clips:
+            self._sound_queue.put("startup")
 
     def shutdown(self):
         if not self.enabled:
@@ -1557,6 +1565,7 @@ def main(args=None):
         on_path=FEEDBACK_ON_SOUND,
         off_path=FEEDBACK_OFF_SOUND,
         silence_path=FEEDBACK_SILENCE_SOUND,
+        startup_path=FEEDBACK_STARTUP_SOUND,
         final_path=FEEDBACK_FINAL_SOUND,
         final_sound_enabled=FEEDBACK_FINAL_SOUND_ENABLED,
         silence_keepalive_mode=FEEDBACK_SILENCE_KEEPALIVE_MODE,
@@ -2517,6 +2526,7 @@ def main(args=None):
     dispatch({"type": "status", "value": "sleeping" if mode_state["sleeping"] else "working"})
     print("STT Ready!")
     sys.stdout.flush()
+    feedback.play_startup()
 
     def reset_active_utterance(reason: str):
         nonlocal recording_buffer, is_recording, silence_counter, current_t0, last_rt_update
