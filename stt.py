@@ -2427,17 +2427,43 @@ def main(args=None):
         if len(devices) <= 1:
             logger.info('[feedback] Only one output device available.')
             return
-        idxs = [d[0] for d in devices]
-        cur_idx = current_output_device_state[0].get('idx', None)
-        if cur_idx is None:
+        current_name = str(current_output_device_state[0].get('name', '')).strip()
+        current_host_api = current_output_device_state[0].get('host_api')
+        pos = -1
+        if current_name:
+            for i, (_, candidate_name, candidate_info) in enumerate(devices):
+                if (
+                    str(candidate_name).strip() == current_name
+                    and candidate_info.get('hostApi') == current_host_api
+                ):
+                    pos = i
+                    break
+        if pos < 0:
+            preferred = feedback.get_output_device_preference() if hasattr(feedback, 'get_output_device_preference') else {}
+            preferred_name = str(preferred.get('name', '')).strip()
+            preferred_host_api = preferred.get('host_api')
+            if preferred_name:
+                for i, (_, candidate_name, candidate_info) in enumerate(devices):
+                    if (
+                        str(candidate_name).strip() == preferred_name
+                        and candidate_info.get('hostApi') == preferred_host_api
+                    ):
+                        pos = i
+                        break
+        if pos < 0:
             try:
-                cur_idx = int(p_instance.get_default_output_device_info().get('index'))
+                default_info = p_instance.get_default_output_device_info()
+                default_name = str(default_info.get('name', '')).strip()
+                default_host_api = default_info.get('hostApi')
+                for i, (_, candidate_name, candidate_info) in enumerate(devices):
+                    if (
+                        str(candidate_name).strip() == default_name
+                        and candidate_info.get('hostApi') == default_host_api
+                    ):
+                        pos = i
+                        break
             except Exception:
-                cur_idx = None
-        try:
-            pos = idxs.index(int(cur_idx))
-        except Exception:
-            pos = -1
+                pass
         _pending_output_device[0] = devices[(pos + 1) % len(devices)]
 
     set_hotkey_target("input_device_cycle", cycle_input_device)

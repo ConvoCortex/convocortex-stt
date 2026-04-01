@@ -40,6 +40,11 @@ Desktop playback path:
 Desktop Mumble:
 - audio input = `Voicemeeter Out B2`
 - audio output = `Voicemeeter Aux Input`
+- transmission:
+  use voice-activated transmission for normal remote-mic use, but lower the voice-activity / speech-detection thresholds aggressively so short STT feedback sounds still get transmitted
+- practical starting point:
+  roughly `15%` for sound activity and `25%` for speech activity, then tune by ear
+- if continuous transmission works but voice-activated mode drops feedback sounds, the issue is Mumble activation thresholds rather than the STT feedback path itself
 
 Voicemeeter Banana:
 - `Voicemeeter Input` -> `B2`
