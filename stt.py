@@ -21,6 +21,7 @@ from pathlib import Path
 import numpy as np
 import pyaudio
 import pvporcupine
+import torch
 
 from audio_devices import (
     ALIAS_DEVICE_NAMES,
@@ -444,6 +445,13 @@ def _normalize_console_startup_mode(value, default: str = "foreground") -> str:
     return default
 
 
+def _normalize_silence_keepalive_mode(value, default: str = "always") -> str:
+    normalized = str(value or "").strip().lower()
+    if normalized in {"off", "always"}:
+        return normalized
+    return default
+
+
 INPUT_DEVICE_STARTUP_SOURCE = _normalize_startup_source(
     _startup_cfg.get("input_device_source", "state"),
     "state",
@@ -494,6 +502,13 @@ FEEDBACK_OFF_SOUND = str(_fb_cfg.get("off_sound", "sounds/off.ogg")).strip()
 FEEDBACK_SILENCE_SOUND = str(_fb_cfg.get("silence_sound", "sounds/silence.ogg")).strip()
 FEEDBACK_FINAL_SOUND = str(_fb_cfg.get("final_sound", "sounds/final.ogg")).strip()
 FEEDBACK_FINAL_SOUND_ENABLED = bool(_fb_cfg.get("final_sound_enabled", True))
+FEEDBACK_SILENCE_KEEPALIVE_MODE = _normalize_silence_keepalive_mode(
+    _fb_cfg.get("silence_keepalive_mode", "always"),
+    "always",
+)
+FEEDBACK_KEEPALIVE_SAMPLE_RATE = int(_fb_cfg.get("keepalive_sample_rate", 44100))
+FEEDBACK_KEEPALIVE_CHANNELS = max(1, int(_fb_cfg.get("keepalive_channels", 2)))
+FEEDBACK_KEEPALIVE_NOISE_FLOOR = max(0.0, min(0.01, float(_fb_cfg.get("keepalive_noise_floor", 0.0005))))
 FEEDBACK_ON_VOLUME = float(_fb_cfg.get("on_volume", 1.0))
 FEEDBACK_OFF_VOLUME = float(_fb_cfg.get("off_volume", 1.0))
 FEEDBACK_FINAL_VOLUME = float(_fb_cfg.get("final_volume", 1.0))
@@ -854,6 +869,10 @@ class FeedbackAudio:
         silence_path: str,
         final_path: str,
         final_sound_enabled: bool,
+        silence_keepalive_mode: str,
+        keepalive_sample_rate: int,
+        keepalive_channels: int,
+        keepalive_noise_floor: float,
         on_volume: float,
         off_volume: float,
         final_volume: float,
@@ -868,6 +887,10 @@ class FeedbackAudio:
         self.silence_path = silence_path
         self.final_path = final_path
         self.final_sound_enabled = final_sound_enabled
+        self.silence_keepalive_mode = _normalize_silence_keepalive_mode(silence_keepalive_mode, "always")
+        self.keepalive_sample_rate = max(8000, int(keepalive_sample_rate))
+        self.keepalive_channels = max(1, int(keepalive_channels))
+        self.keepalive_noise_floor = max(0.0, min(0.01, float(keepalive_noise_floor)))
         self.on_volume = _clamp_volume(on_volume)
         self.off_volume = _clamp_volume(off_volume)
         self.final_volume = _clamp_volume(final_volume)
@@ -884,18 +907,22 @@ class FeedbackAudio:
             self._preferred_output_device_host_api = (
                 None if configured_output_name else persisted_output_device_host_api
             )
-        self._p_sfx = None
-        self._p_silence = None
+        self._p_audio = None
         self._output_device_index = None
         self._output_device_name = ""
         self._output_device_host_api = None
         self._probe_sr = None
         self._probe_channels = None
-        self._sound_queue = queue.Queue()
         self._running = False
         self._clips = {}
-        self._silence_thread = None
-        self._sound_thread = None
+        self._audio_thread = None
+        self._output_device_generation = 0
+        self._mixer_sr = None
+        self._mixer_channels = None
+        self._mixer_chunk_frames = 1024
+        self._silence_frame_pos = 0
+        self._active_clips: list[dict] = []
+        self._mix_wakeup = threading.Event()
         self._lock = threading.Lock()
 
         if not self.enabled:
@@ -903,29 +930,41 @@ class FeedbackAudio:
         try:
             import torchaudio
 
-            self._clips["on"] = self._load_clip(torchaudio, self.on_path, self.on_volume)
-            self._clips["off"] = self._load_clip(torchaudio, self.off_path, self.off_volume)
-            self._clips["silence"] = self._load_clip(torchaudio, self.silence_path)
+            raw_on = self._load_clip(torchaudio, self.on_path, self.on_volume)
+            raw_off = self._load_clip(torchaudio, self.off_path, self.off_volume)
+            raw_silence = self._load_clip(torchaudio, self.silence_path)
+            raw_final = None
             if self.final_sound_enabled:
                 try:
-                    self._clips["final"] = self._load_clip(torchaudio, self.final_path, self.final_volume)
+                    raw_final = self._load_clip(torchaudio, self.final_path, self.final_volume)
                 except Exception as e:
                     logger.warning(f"[feedback] final_sound disabled: {e}")
                     self.final_sound_enabled = False
-            self._probe_sr = int(self._clips.get("on", {}).get("sr") or 0) or None
-            self._probe_channels = int(self._clips.get("on", {}).get("channels") or 0) or None
-            self._p_sfx = pyaudio.PyAudio()
-            self._p_silence = pyaudio.PyAudio()
+
+            self._mixer_sr = int(self.keepalive_sample_rate)
+            self._mixer_channels = int(self.keepalive_channels)
+            self._clips["on"] = self._normalize_clip(torchaudio, raw_on)
+            self._clips["off"] = self._normalize_clip(torchaudio, raw_off)
+            self._clips["silence"] = self._normalize_clip(torchaudio, raw_silence)
+            if raw_final is not None:
+                self._clips["final"] = self._normalize_clip(torchaudio, raw_final)
+
+            self._probe_sr = self._mixer_sr
+            self._probe_channels = self._mixer_channels
+            self._p_audio = pyaudio.PyAudio()
             self._set_initial_output_device()
             self._running = True
-            self._sound_thread = threading.Thread(target=self._sound_worker, daemon=True, name="feedback-sound")
-            self._silence_thread = threading.Thread(target=self._silence_worker, daemon=True, name="feedback-silence")
-            self._sound_thread.start()
-            self._silence_thread.start()
+            self._audio_thread = threading.Thread(target=self._audio_worker, daemon=True, name="feedback-audio")
+            self._audio_thread.start()
             if self._output_device_name:
                 logger.info(f"[feedback] Enabled (output={self._output_device_name})")
             else:
                 logger.info("[feedback] Enabled (output=default)")
+            logger.info(
+                f"[feedback] silence_keepalive_mode={self.silence_keepalive_mode} "
+                f"mixer={self._mixer_sr}Hz/{self._mixer_channels}ch "
+                f"noise_floor={self.keepalive_noise_floor:.6f}"
+            )
         except Exception as e:
             logger.warning(f"[feedback] Disabled: {e}")
             self.enabled = False
@@ -966,13 +1005,15 @@ class FeedbackAudio:
             self._output_device_index = None
             self._output_device_name = ""
             self._output_device_host_api = None
+            self._output_device_generation += 1
             return
         self._output_device_index = int(info["index"])
         self._output_device_name = str(info.get("name", "")).strip()
         self._output_device_host_api = info.get("hostApi")
+        self._output_device_generation += 1
 
     def _set_initial_output_device(self):
-        if not self.enabled or self._p_sfx is None:
+        if not self.enabled or self._p_audio is None:
             return
 
         desired_name = str(self._preferred_output_device_name or "").strip()
@@ -981,10 +1022,10 @@ class FeedbackAudio:
 
         info = None
         if desired_name:
-            info = self._find_output_device_by_name(self._p_sfx, desired_name, desired_host_api)
+            info = self._find_output_device_by_name(self._p_audio, desired_name, desired_host_api)
             if not info:
-                info = self._find_output_device_by_name(self._p_sfx, desired_name)
-            if info and not self._supports_output_format(self._p_sfx, int(info["index"])):
+                info = self._find_output_device_by_name(self._p_audio, desired_name)
+            if info and not self._supports_output_format(self._p_audio, int(info["index"])):
                 info = None
             if info:
                 logger.info(f"[feedback] Startup output from {source}: {info['name']}")
@@ -993,7 +1034,7 @@ class FeedbackAudio:
 
         if info is None:
             try:
-                info = self._p_sfx.get_default_output_device_info()
+                info = self._p_audio.get_default_output_device_info()
             except Exception:
                 info = None
 
@@ -1031,9 +1072,9 @@ class FeedbackAudio:
         *,
         update_preference: bool = True,
     ) -> bool:
-        if not self.enabled or self._p_sfx is None:
+        if not self.enabled or self._p_audio is None:
             return False
-        if not self._supports_output_format(self._p_sfx, int(device_index)):
+        if not self._supports_output_format(self._p_audio, int(device_index)):
             return False
         if self._probe_sr and self._probe_channels:
             stream = None
@@ -1046,7 +1087,7 @@ class FeedbackAudio:
                     output_device_index=int(device_index),
                     frames_per_buffer=256,
                 )
-                stream = self._p_sfx.open(**open_kwargs)
+                stream = self._p_audio.open(**open_kwargs)
                 stream.write((b"\x00\x00\x00\x00") * int(self._probe_channels) * 256)
             except Exception:
                 return False
@@ -1061,9 +1102,11 @@ class FeedbackAudio:
             self._output_device_index = int(device_index)
             self._output_device_name = str(device_name or "").strip()
             self._output_device_host_api = host_api
+            self._output_device_generation += 1
             if update_preference:
                 self._preferred_output_device_name = self._output_device_name
                 self._preferred_output_device_host_api = host_api
+        self._mix_wakeup.set()
         return True
 
     def _load_clip(self, torchaudio, path: str, volume: float = 1.0):
@@ -1077,30 +1120,167 @@ class FeedbackAudio:
             wav = wav[:, np.newaxis]
         return {"data": np.ascontiguousarray(wav), "sr": int(sr), "channels": int(wav.shape[1])}
 
-    def _play_clip_blocking(self, clip_name: str, pa_instance):
+    def _normalize_clip(self, torchaudio, clip: dict) -> dict:
+        data = np.asarray(clip["data"], dtype=np.float32)
+        sr = int(clip["sr"])
+        channels = int(clip["channels"])
+        target_sr = int(self._mixer_sr or sr)
+        target_channels = int(self._mixer_channels or channels)
+
+        if sr != target_sr:
+            tensor = torchaudio.functional.resample(
+                torch.from_numpy(data.T.copy()),
+                sr,
+                target_sr,
+            )
+            data = tensor.detach().cpu().numpy().T.astype(np.float32)
+            sr = target_sr
+
+        if channels != target_channels:
+            if channels == 1 and target_channels > 1:
+                data = np.repeat(data, target_channels, axis=1)
+            elif target_channels == 1 and channels > 1:
+                data = np.mean(data, axis=1, keepdims=True, dtype=np.float32)
+            elif channels > target_channels:
+                data = data[:, :target_channels]
+            else:
+                pad = np.repeat(data[:, -1:], target_channels - channels, axis=1)
+                data = np.concatenate((data, pad), axis=1)
+
+        return {"data": np.ascontiguousarray(data), "sr": sr, "channels": int(data.shape[1])}
+
+    def _clip_open_kwargs(self, *, device_index: int | None):
+        open_kwargs = dict(
+            format=pyaudio.paFloat32,
+            channels=int(self._mixer_channels or 1),
+            rate=int(self._mixer_sr or 44100),
+            output=True,
+        )
+        if device_index is not None:
+            open_kwargs["output_device_index"] = int(device_index)
+        return open_kwargs
+
+    def _enqueue_clip(self, clip_name: str):
         if not self.enabled:
-            return
-        if pa_instance is None:
             return
         clip = self._clips.get(clip_name)
         if not clip:
             return
+        with self._lock:
+            self._active_clips.append({"name": clip_name, "data": clip["data"], "pos": 0})
+        self._mix_wakeup.set()
+
+    def _fill_silence_chunk(self, frames: int) -> np.ndarray:
+        channels = int(self._mixer_channels or 1)
+        out = np.zeros((frames, channels), dtype=np.float32)
+        if self.silence_keepalive_mode != "always":
+            return out
+        clip = self._clips.get("silence")
+        if clip:
+            data = clip["data"]
+            total = data.shape[0]
+            if total > 0:
+                pos = self._silence_frame_pos
+                filled = 0
+                while filled < frames:
+                    take = min(frames - filled, total - pos)
+                    out[filled:filled + take] = data[pos:pos + take]
+                    filled += take
+                    pos = (pos + take) % total
+                self._silence_frame_pos = pos
+        if self.keepalive_noise_floor > 0.0:
+            noise = np.random.uniform(
+                low=-self.keepalive_noise_floor,
+                high=self.keepalive_noise_floor,
+                size=(frames, channels),
+            ).astype(np.float32)
+            out += noise
+        return out
+
+    def _mix_active_clips(self, output: np.ndarray):
+        if output.size == 0:
+            return
+        with self._lock:
+            active = self._active_clips
+            if not active:
+                return
+            still_active = []
+            for clip_state in active:
+                clip = clip_state["data"]
+                pos = int(clip_state["pos"])
+                remaining = int(clip.shape[0] - pos)
+                if remaining <= 0:
+                    continue
+                take = min(output.shape[0], remaining)
+                output[:take] += clip[pos:pos + take]
+                pos += take
+                if pos < clip.shape[0]:
+                    clip_state["pos"] = pos
+                    still_active.append(clip_state)
+            self._active_clips = still_active
+
+    def _audio_worker(self):
+        if self._p_audio is None:
+            return
         stream = None
+        stream_generation = None
         try:
-            open_kwargs = dict(
-                format=pyaudio.paFloat32,
-                channels=clip["channels"],
-                rate=clip["sr"],
-                output=True,
-            )
-            with self._lock:
-                out_idx = self._output_device_index
-            if out_idx is not None:
-                open_kwargs["output_device_index"] = int(out_idx)
-            stream = pa_instance.open(**open_kwargs)
-            stream.write(clip["data"].tobytes())
-        except Exception as e:
-            logger.warning(f"[feedback] Playback error ({clip_name}): {e}")
+            while self._running:
+                with self._lock:
+                    out_idx = self._output_device_index
+                    generation = self._output_device_generation
+                    has_active = bool(self._active_clips)
+
+                if (
+                    self.silence_keepalive_mode != "always"
+                    and not has_active
+                    and stream is None
+                ):
+                    self._mix_wakeup.wait(timeout=0.5)
+                    self._mix_wakeup.clear()
+                    continue
+
+                try:
+                    if stream is None or stream_generation != generation:
+                        if stream is not None:
+                            try:
+                                stream.stop_stream()
+                                stream.close()
+                            except Exception:
+                                pass
+                            stream = None
+                        stream = self._p_audio.open(
+                            **self._clip_open_kwargs(device_index=out_idx),
+                            frames_per_buffer=int(self._mixer_chunk_frames),
+                        )
+                        stream_generation = generation
+
+                    mixed = self._fill_silence_chunk(int(self._mixer_chunk_frames))
+                    self._mix_active_clips(mixed)
+                    np.clip(mixed, -1.0, 1.0, out=mixed)
+                    stream.write(np.ascontiguousarray(mixed).tobytes())
+
+                    if self.silence_keepalive_mode != "always":
+                        with self._lock:
+                            if not self._active_clips:
+                                try:
+                                    stream.stop_stream()
+                                    stream.close()
+                                except Exception:
+                                    pass
+                                stream = None
+                                stream_generation = None
+                except Exception as e:
+                    logger.warning(f"[feedback] Playback error (mixer): {e}")
+                    try:
+                        if stream is not None:
+                            stream.stop_stream()
+                            stream.close()
+                    except Exception:
+                        pass
+                    stream = None
+                    stream_generation = None
+                    time.sleep(0.1)
         finally:
             try:
                 if stream is not None:
@@ -1109,56 +1289,30 @@ class FeedbackAudio:
             except Exception:
                 pass
 
-    def _sound_worker(self):
-        while self._running:
-            try:
-                name = self._sound_queue.get(timeout=0.5)
-            except queue.Empty:
-                continue
-            try:
-                self._play_clip_blocking(name, self._p_sfx)
-            finally:
-                self._sound_queue.task_done()
-
-    def _silence_worker(self):
-        while self._running:
-            self._play_clip_blocking("silence", self._p_silence)
-
     def play_on(self):
-        if self.enabled:
-            self._sound_queue.put("on")
+        self._enqueue_clip("on")
 
     def play_off(self):
-        if self.enabled:
-            self._sound_queue.put("off")
+        self._enqueue_clip("off")
 
     def play_final(self):
         if self.enabled and self.final_sound_enabled and "final" in self._clips:
-            self._sound_queue.put("final")
+            self._enqueue_clip("final")
 
     def shutdown(self):
         if not self.enabled:
             return
         with self._lock:
             self._running = False
+        self._mix_wakeup.set()
         try:
-            if self._silence_thread:
-                self._silence_thread.join(timeout=1.0)
+            if self._audio_thread:
+                self._audio_thread.join(timeout=1.0)
         except Exception:
             pass
         try:
-            if self._sound_thread:
-                self._sound_thread.join(timeout=1.0)
-        except Exception:
-            pass
-        try:
-            if self._p_sfx is not None:
-                self._p_sfx.terminate()
-        except Exception:
-            pass
-        try:
-            if self._p_silence is not None:
-                self._p_silence.terminate()
+            if self._p_audio is not None:
+                self._p_audio.terminate()
         except Exception:
             pass
 
@@ -1274,6 +1428,23 @@ def main(args=None):
     load_errors = []
     load_errors_lock = threading.Lock()
     warmup_audio = np.zeros(RATE, dtype=np.float32)
+    shared_model_signature = (
+        str(FINAL_BACKEND).strip().lower(),
+        str(FINAL_MODEL).strip(),
+        str(FINAL_DEVICE).strip().lower(),
+        str(FINAL_COMPUTE).strip().lower(),
+        float(WHISPER_NO_SPEECH_THRESHOLD),
+        float(WHISPER_LOG_PROB_THRESHOLD),
+    )
+    realtime_model_signature = (
+        str(REALTIME_BACKEND).strip().lower(),
+        str(REALTIME_MODEL).strip(),
+        str(REALTIME_DEVICE).strip().lower(),
+        str("default" if REALTIME_DEVICE == "cpu" else FINAL_COMPUTE).strip().lower(),
+        float(WHISPER_NO_SPEECH_THRESHOLD),
+        float(WHISPER_LOG_PROB_THRESHOLD),
+    )
+    reuse_realtime_model = bool(REALTIME_MODEL) and realtime_model_signature == shared_model_signature
 
     def record_load_error(message: str):
         with load_errors_lock:
@@ -1303,6 +1474,9 @@ def main(args=None):
             logger.info("Realtime model disabled (no model configured). Partials will not fire.")
             resources['realtime_model'] = None
             return
+        if reuse_realtime_model:
+            logger.info("Realtime model reusing final model configuration; skipping duplicate load.")
+            return
         try:
             logger.info(f"Loading realtime {REALTIME_BACKEND} model {REALTIME_MODEL} ({REALTIME_DEVICE})...")
             compute = "default" if REALTIME_DEVICE == "cpu" else FINAL_COMPUTE
@@ -1324,16 +1498,10 @@ def main(args=None):
         import torch
         try:
             logger.info("Loading Silero VAD...")
-            try:
-                model, _ = torch.hub.load(
-                    repo_or_dir='snakers4/silero-vad', model='silero_vad',
-                    source='local', onnx=True
-                )
-            except Exception:
-                model, _ = torch.hub.load(
-                    repo_or_dir='snakers4/silero-vad', model='silero_vad',
-                    force_reload=False, onnx=True
-                )
+            model, _ = torch.hub.load(
+                repo_or_dir='snakers4/silero-vad', model='silero_vad',
+                force_reload=False, onnx=True
+            )
             resources['vad'] = SileroVAD(model)
 
             logger.info("Initializing PyAudio...")
@@ -1471,6 +1639,10 @@ def main(args=None):
             logger.error(msg)
         sys.exit(1)
 
+    if reuse_realtime_model:
+        resources['realtime_model'] = resources['final_model']
+        logger.info("Realtime model ready (shared with final model).")
+
     final_model = resources['final_model']
     rt_model    = resources['realtime_model']
     vad         = resources['vad']
@@ -1491,6 +1663,10 @@ def main(args=None):
         silence_path=FEEDBACK_SILENCE_SOUND,
         final_path=FEEDBACK_FINAL_SOUND,
         final_sound_enabled=FEEDBACK_FINAL_SOUND_ENABLED,
+        silence_keepalive_mode=FEEDBACK_SILENCE_KEEPALIVE_MODE,
+        keepalive_sample_rate=FEEDBACK_KEEPALIVE_SAMPLE_RATE,
+        keepalive_channels=FEEDBACK_KEEPALIVE_CHANNELS,
+        keepalive_noise_floor=FEEDBACK_KEEPALIVE_NOISE_FLOOR,
         on_volume=FEEDBACK_ON_VOLUME,
         off_volume=FEEDBACK_OFF_VOLUME,
         final_volume=FEEDBACK_FINAL_VOLUME,
@@ -1676,7 +1852,7 @@ def main(args=None):
         dispatch(replay)
         return True
 
-    def set_sleeping(sleeping: bool, reason: str = ""):
+    def set_sleeping(sleeping: bool, reason: str = "", *, play_feedback: bool = True):
         with mode_lock:
             was_sleeping = mode_state["sleeping"]
             if was_sleeping == sleeping:
@@ -1687,12 +1863,18 @@ def main(args=None):
             with state_lock:
                 state["speech_epoch"] += 1
                 state["finalized_epoch"] = state["speech_epoch"]
-            feedback.play_off()
+            if play_feedback:
+                feedback.play_off()
         else:
-            feedback.play_on()
+            if play_feedback:
+                feedback.play_on()
         logger.info(f"[mode] {'Sleeping' if sleeping else 'Working'}" + (f" ({reason})" if reason else ""))
         dispatch({"type": "status", "value": "sleeping" if sleeping else "working"})
         persist()
+
+    def trigger_wake_feedback(reason: str = ""):
+        feedback.play_on()
+        logger.info(f"[wake] feedback" + (f" ({reason})" if reason else ""))
 
     def set_typing_enabled(enabled: bool, reason: str = ""):
         if not type_set_enabled:
@@ -2567,18 +2749,20 @@ def main(args=None):
             chunk = np.frombuffer(data, dtype=np.int16)
             chunk_rms = float(np.sqrt(np.mean(chunk.astype(np.float32) ** 2))) if len(chunk) else 0.0
 
+            wake_detected = detect_wakeword(chunk)
+            if wake_detected and not wakeword_prev_detected:
+                debug_log(f"[wake] detected word={WAKEWORD} rms={chunk_rms:.1f}")
+                trigger_wake_feedback(reason=f"wake:{WAKEWORD}")
+            wakeword_prev_detected = wake_detected
+
             with mode_lock:
                 sleeping = mode_state["sleeping"]
             if sleeping:
                 if is_recording or recording_buffer:
                     debug_log("[audio] clearing active buffers while sleeping")
                     reset_active_utterance(reason="sleeping")
-                wake_detected = detect_wakeword(chunk)
-                if wake_detected and not wakeword_prev_detected:
-                    debug_log(f"[wake] detected word={WAKEWORD} rms={chunk_rms:.1f}")
-                wakeword_prev_detected = wake_detected
                 if wake_detected:
-                    set_sleeping(False, reason=f"wake:{WAKEWORD}")
+                    set_sleeping(False, reason=f"wake:{WAKEWORD}", play_feedback=False)
                     drop_chunks_after_wake = int(max(0.0, WAKEWORD_DROP_SECONDS) * RATE / CHUNK)
                     reset_active_utterance(reason="wake_transition")
                     debug_log(f"[wake] dropping_chunks_after_wake={drop_chunks_after_wake}")

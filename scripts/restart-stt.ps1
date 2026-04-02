@@ -45,4 +45,4 @@ if ($targetProcesses) {
 
 $null = Start-Process -FilePath $wscriptExe -ArgumentList ('"' + $launcherVbs + '"') -WindowStyle Hidden -PassThru
 
-Write-Host "Started STT using the console startup mode from config.toml."
+Write-Host "Started STT"
