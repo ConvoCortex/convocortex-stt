@@ -171,40 +171,52 @@ enabled = true
 
 [voice_commands.enter]
 enabled = true
-words   = ["enter", "simba"] # Exact match or detected at the end of utterance, not detected in the middle.
+words   = ["enter"] # Exact match or detected at the end of utterance, not detected in the middle.
+
 [voice_commands.type_at_cursor_toggle]
-enabled = true
+enabled = false
 words   = ["typing"] # Detected at the start of utterance
+
 [voice_commands.rewind]
 enabled = true
 words   = ["rewind"] # Exact match only; restores last released buffer in draft-buffer mode, otherwise uses cursor revert behavior
+
 [voice_commands.repeat]
 enabled = true
 words   = ["repeat"] # Exact match only; repeats last released buffer in draft-buffer mode, otherwise replays the last final cursor output
+
 [voice_commands.input_device_cycle]
 enabled = true
 words   = ["input"] # Exact match only; same behavior as the input-device cycle hotkey
+
 [voice_commands.output_device_cycle]
 enabled = true
 words   = ["output"] # Exact match only; same behavior as the output-device cycle hotkey
+
 [voice_commands.output_mode_default]
 enabled = true
 words   = ["default mode"] # Exact match only; selects the configured startup output mode
+
 [voice_commands.output_mode_cursor]
 enabled = true
 words   = ["cursor mode", "Courser mode", "Corsair mode", "Coarser mode"] # Exact match only; selects direct-cursor output mode
+
 [voice_commands.output_mode_draft]
 enabled = true
 words   = ["draft mode"] # Exact match only; selects draft-buffer output mode
+
 [voice_commands.console_show]
-enabled = true
+enabled = false
 words   = ["show"] # Exact match only; shows the STT console, same target as shift+f8
+
 [voice_commands.console_hide]
-enabled = true
+enabled = false
 words   = ["hide"] # Exact match only; hides the STT console, same target as shift+f8
+
 [voice_commands.buffer_release]
 enabled = true
 words   = ["buffer"]
+
 [voice_commands.buffer_clear]
 enabled = true
 words   = ["clear"]
@@ -222,7 +234,7 @@ wake_word = "bumblebee"            # must be a supported built-in Porcupine keyw
 # Built-in Porcupine wake words:
 # alexa, americano, blueberry, bumblebee, computer, grapefruit, grasshopper,
 # hey google, hey siri, jarvis, ok google, pico clock, picovoice, porcupine, terminator
-sensitivity = 0.8                  # 0..1, higher = more sensitive
+sensitivity = 0.5                  # 0..1, higher = more sensitive
 drop_audio_after_wake_seconds = 0.4  # helps avoid wake word leaking into first transcription
 start_sleeping = true
 stop_words = ["sleep", "mufasa"]

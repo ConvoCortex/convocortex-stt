@@ -1615,7 +1615,7 @@ def main(args=None):
     state         = {'speech_epoch': 0, 'finalized_epoch': -1}
     rt_cancel     = threading.Event()
     mode_lock     = threading.Lock()
-    mode_state    = {"sleeping": bool(_persisted.get("sleeping", SLEEP_START_SLEEPING))}
+    mode_state    = {"sleeping": False}
     typing_lock   = threading.Lock()
     default_typing_enabled = bool(cfg["output"]["type_at_cursor"]["enabled"])
     typing_state = {
@@ -1775,7 +1775,7 @@ def main(args=None):
         persist()
 
     def trigger_wake_feedback(reason: str = ""):
-        feedback.play_on()
+        feedback.play_startup()
         logger.info(f"[wake] feedback" + (f" ({reason})" if reason else ""))
 
     def set_typing_enabled(enabled: bool, reason: str = ""):
