@@ -10,8 +10,11 @@ __pycache__/
 .coverage
 *.log
 *.agent
-mess/
-state.json
 output.txt
 buffer.txt
-device-profiles.json
+device-profiles.toml
+.dotnet/
+.nuget-packages/
+bin/
+obj/
+launcher-publish/

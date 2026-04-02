@@ -2,6 +2,7 @@ import audioop
 import json
 import time
 from pathlib import Path
+import tomllib
 
 import numpy as np
 import pyaudio
@@ -39,7 +40,12 @@ def load_profiles(path: str | Path) -> dict:
     if not profile_path.exists():
         return result
     try:
-        data = json.loads(profile_path.read_text(encoding='utf-8'))
+        suffix = profile_path.suffix.lower()
+        if suffix == '.toml':
+            with open(profile_path, 'rb') as f:
+                data = tomllib.load(f)
+        else:
+            data = json.loads(profile_path.read_text(encoding='utf-8'))
     except Exception:
         return result
     for key in ('inputs', 'outputs'):
@@ -59,8 +65,52 @@ def save_profiles(path: str | Path, profiles: dict):
         'outputs': [p for p in (_clean_profile(x) for x in profiles.get('outputs', [])) if p],
     }
     tmp = profile_path.with_suffix(profile_path.suffix + '.tmp')
-    tmp.write_text(json.dumps(cleaned, indent=2), encoding='utf-8')
+    if profile_path.suffix.lower() == '.toml':
+        tmp.write_text(_profiles_to_toml(cleaned), encoding='utf-8')
+    else:
+        tmp.write_text(json.dumps(cleaned, indent=2), encoding='utf-8')
     tmp.replace(profile_path)
+
+
+def _toml_quote(value: str) -> str:
+    return json.dumps(str(value), ensure_ascii=False)
+
+
+def _toml_profile_block(profile: dict, prefix: str = '') -> list[str]:
+    lines = []
+    if prefix:
+        lines.append(f'{prefix}name = {_toml_quote(profile["name"])}')
+        if profile.get('host_api') is None:
+            lines.append(f'{prefix}host_api = ""')
+        else:
+            lines.append(f'{prefix}host_api = {int(profile["host_api"])}')
+        return lines
+    lines.append('name = ' + _toml_quote(profile['name']))
+    if profile.get('host_api') is None:
+        lines.append('host_api = ""')
+    else:
+        lines.append(f'host_api = {int(profile["host_api"])}')
+    return lines
+
+
+def _profiles_to_toml(profiles: dict) -> str:
+    lines = [
+        '# Local machine-specific device profiles for Convocortex STT',
+        '# Order matters:',
+        '# - the first [[inputs]] entry is the startup input',
+        '# - the first [[outputs]] entry is the startup output',
+        '# - cycling follows the array order from first to last',
+        '',
+    ]
+    for profile in profiles.get('inputs', []):
+        lines.append('[[inputs]]')
+        lines.extend(_toml_profile_block(profile))
+        lines.append('')
+    for profile in profiles.get('outputs', []):
+        lines.append('[[outputs]]')
+        lines.extend(_toml_profile_block(profile))
+        lines.append('')
+    return '\n'.join(lines).rstrip() + '\n'
 
 
 def profile_from_info(info: dict) -> dict:

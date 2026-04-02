@@ -29,19 +29,44 @@ uv sync
 uv run python stt.py
 ```
 
-Use restart-stt.ps1 script to start/restart the stt conveniently.
+Use convocortex-stt.exe to launch STT conveniently.
 
-```powershell
-powershell -ExecutionPolicy Bypass -File .\scripts\restart-stt.ps1
+```text
+.\\convocortex-stt.exe
 ```
 
-The restart script expects `.venv` to exist, so run `uv sync` first.
+The launcher expects `.venv` to exist, so run `uv sync` first.
+
+If you want to rebuild the launcher yourself, the source is:
+- [`convocortex-stt-launcher.cs`](convocortex-stt-launcher.cs)
+- [`convocortex-stt-launcher.csproj`](convocortex-stt-launcher.csproj)
+
+Build command:
+
+```powershell
+dotnet publish .\convocortex-stt-launcher.csproj -c Release -o .\launcher-publish
+```
+
+That produces:
+
+```text
+.\launcher-publish\convocortex-stt.exe
+```
 
 If `audio.device_setup_initialized = false` or the device profiles file is
 missing, the app runs interactive device setup so you can pick the input and
-output devices that should participate in runtime cycling. To rerun it
+output devices in the order they should be used for startup and runtime cycling. To rerun it
 manually, set `audio.device_setup_initialized = false` in `config.toml` and
 start the app again.
+
+`device-profiles.toml` is local machine-specific config, not runtime state.
+Order matters there:
+- the `inputs` array order is the input cycle order
+- the `outputs` array order is the output cycle order
+- the first item in each list is the startup device for that direction
+
+So if you edit `device-profiles.toml` manually, reordering the arrays changes
+both startup behavior and runtime cycling order.
 
 NATS Python client dependency is included by default.
 
@@ -146,7 +171,7 @@ For a proper, richer voice command engine, use the emitted NATS events and imple
 - NATS integration:
   - event stream (`partial`, `final`, `status`, `system`)
   - control surface (`sleep`, `wake`, `typing_*`, device cycle, etc.)
-- Persisted runtime state across restarts
+- Config-driven startup with runtime state cleared on launch
 - Input/output device switching and reconnect behavior
 - Friendly to virtual-audio and remote-audio bridge setups
 
@@ -196,31 +221,22 @@ realtime_device  = "cuda"
 language         = ""
 ```
 
-## Windows Startup Shortcut
+## Windows Startup
 
-If you want this to come up automatically after you log in on Windows, using the
-console mode from `config.toml`:
+If you want STT to come up automatically after Windows logon, put
+[`convocortex-stt.exe`](convocortex-stt.exe) in the Startup folder, or
+put a shortcut to it there.
 
-```powershell
-powershell -ExecutionPolicy Bypass -File .\scripts\install-startup-shortcut.ps1
-```
-
-That creates a shortcut in:
+Startup folder:
 
 ```text
 C:\Users\user\AppData\Roaming\Microsoft\Windows\Start Menu\Programs\Startup
 ```
 
-The shortcut launches the repo's Windows launcher, which reads
-`startup.console_startup_mode` from `config.toml` and then starts `stt.py`
-accordingly.
+Direct launch command:
 
-This is the simpler Windows logon path and fits this app better because it relies on an interactive desktop session for global hotkeys and for restoring the console window to the foreground.
-
-To remove the shortcut:
-
-```powershell
-powershell -ExecutionPolicy Bypass -File .\scripts\uninstall-startup-shortcut.ps1
+```bat
+D:\projects\convocortex\convocortex-stt\convocortex-stt.exe
 ```
 
 ## Configuration
@@ -253,18 +269,15 @@ The repo currently has two output workflows that make sense as first-class sets:
 
 Those focused presets are provided as small snippets under `presets/output-modes/`. They describe the built-in runtime output modes.
 
-At runtime, output mode is treated as state, not as a config rewrite. Startup behavior is controlled by `startup.output_mode_source`:
+At runtime, output mode is treated as runtime state, not as a config rewrite. Startup always comes from `config.toml`:
 - hotkey `shift+f9` cycles output modes
 - exact voice commands `default mode`, `cursor mode`, and `draft mode` select output modes directly
 
-Startup source controls:
-- `startup.output_mode_source = "state"` restores the last selected output mode from `state.json`
-- `startup.output_mode_source = "config"` always starts in the configured default mode (`direct-cursor` or `draft-buffer`)
-- `startup.input_device_source = "state"` restores the last runtime input device when possible
-- `startup.input_device_source = "config"` starts from `audio.input_device`, otherwise OS default input
-- `startup.output_device_source = "state"` restores the last runtime feedback output device when possible
-- `startup.output_device_source = "config"` starts from `feedback.output_device`, otherwise OS default output
-- `startup.console_startup_mode = "foreground"` keeps the console visible during and after startup; `"background"` hides it during and after startup
+Startup behavior:
+- `output_mode` starts from the config-defined default (`direct-cursor` or `draft-buffer`)
+- input startup comes from `audio.input_device` when set, otherwise OS/default-profile fallback
+- output startup comes from `feedback.output_device` when set, otherwise OS default output
+- runtime state is kept in memory only and does not control startup behavior
 
 The built-in runtime modes are:
 - `direct-cursor`
@@ -303,6 +316,14 @@ Relevant settings:
 If the file buffer is active, the built-in exact voice command `enter` releases the current buffer and then presses Enter. This makes `draft-buffer` practical for chat boxes, terminals, and other submit-oriented text fields.
 
 The default history cap is `10` buffer states and is not persisted across restarts.
+
+### Direct cursor output
+
+`direct-cursor` mode can also emit text in two ways:
+- `output.type_at_cursor.release_method = "paste_preserve_clipboard"`: paste via clipboard and restore the previous clipboard contents afterward
+- `output.type_at_cursor.release_method = "type_keys"`: simulated typing without touching the clipboard
+
+The intended default is `paste_preserve_clipboard` for speed and consistency with file-buffer release.
 
 ### Debug logging
 
@@ -403,6 +424,11 @@ Commercial licensing is available for proprietary use; contact the maintainer.
 
 Contributions require signing the [Individual Contributor License Agreement](CLA.md).
 See [CONTRIBUTING.md](CONTRIBUTING.md).
+
+
+
+
+
 
 
 

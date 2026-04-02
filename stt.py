@@ -39,7 +39,6 @@ from audio_devices import (
 )
 import config
 from model_backends import load_backend
-import state as state_store
 
 
 def _bootstrap_owned_console():
@@ -169,17 +168,12 @@ def _setup_logging():
 
 
 logger = _setup_logging()
-state_store.init(cfg)
-_persisted = state_store.load()
 
 
 class WindowsConsoleController:
-    STD_INPUT_HANDLE = -10
     SW_HIDE = 0
     SW_SHOW = 5
     SW_RESTORE = 9
-    ENABLE_EXTENDED_FLAGS = 0x0080
-    ENABLE_QUICK_EDIT_MODE = 0x0040
 
     def __init__(self):
         self._lock = threading.RLock()
@@ -194,7 +188,6 @@ class WindowsConsoleController:
             self._user32 = ctypes.windll.user32
             self._kernel32 = ctypes.windll.kernel32
             self._available = bool(self._console_hwnd())
-            self._disable_quick_edit()
         except Exception as exc:
             logger.warning(f"[console] Windows console control unavailable: {exc}")
 
@@ -209,25 +202,6 @@ class WindowsConsoleController:
     @property
     def available(self) -> bool:
         return bool(self._available and self._console_hwnd())
-
-    def _disable_quick_edit(self):
-        if not self._kernel32:
-            return
-        try:
-            import ctypes
-
-            handle = self._kernel32.GetStdHandle(self.STD_INPUT_HANDLE)
-            if not handle or handle == ctypes.c_void_p(-1).value:
-                return
-            mode = ctypes.c_uint32()
-            if not self._kernel32.GetConsoleMode(handle, ctypes.byref(mode)):
-                return
-            new_mode = (int(mode.value) | self.ENABLE_EXTENDED_FLAGS) & ~self.ENABLE_QUICK_EDIT_MODE
-            if new_mode != int(mode.value):
-                if self._kernel32.SetConsoleMode(handle, new_mode):
-                    logger.info("[console] Disabled Quick Edit to avoid click-freezes.")
-        except Exception as exc:
-            logger.warning(f"[console] Could not disable Quick Edit: {exc}")
 
     def is_visible(self) -> bool:
         hwnd = self._console_hwnd()
@@ -477,18 +451,9 @@ def _normalize_silence_keepalive_mode(value, default: str = "always") -> str:
     return default
 
 
-INPUT_DEVICE_STARTUP_SOURCE = _normalize_startup_source(
-    _startup_cfg.get("input_device_source", "state"),
-    "state",
-)
-OUTPUT_DEVICE_STARTUP_SOURCE = _normalize_startup_source(
-    _startup_cfg.get("output_device_source", "state"),
-    "state",
-)
-OUTPUT_MODE_STARTUP_SOURCE = _normalize_startup_source(
-    _startup_cfg.get("output_mode_source", "state"),
-    "state",
-)
+INPUT_DEVICE_STARTUP_SOURCE = "config"
+OUTPUT_DEVICE_STARTUP_SOURCE = "config"
+OUTPUT_MODE_STARTUP_SOURCE = "config"
 CONSOLE_STARTUP_MODE = _normalize_console_startup_mode(
     _startup_cfg.get("console_startup_mode", "foreground"),
     "foreground",
@@ -678,24 +643,29 @@ def _prompt_profile_selection(
     candidates: list[dict],
     existing_profiles: list[dict],
     *,
+    recommended_profiles: list[dict] | None = None,
     allow_none: bool,
 ) -> list[dict]:
     existing_indexes = []
     for idx, candidate in enumerate(candidates, start=1):
         if any(profile_matches(candidate["info"], profile) for profile in existing_profiles):
             existing_indexes.append(str(idx))
-    default_text = ",".join(existing_indexes)
+    recommended_indexes = []
+    for idx, candidate in enumerate(candidates, start=1):
+        if any(profile_matches(candidate["info"], profile) for profile in (recommended_profiles or [])):
+            recommended_indexes.append(str(idx))
+    default_text = ",".join(existing_indexes or recommended_indexes)
 
     print()
-    print(f"[device-setup] Select {label} devices to allow for startup/cycling.")
-    print("[device-setup] Enter comma-separated numbers in your preferred cycle order.")
+    for idx, candidate in enumerate(candidates, start=1):
+        status = "usable" if candidate.get("usable", True) else f"unusable: {candidate.get('reason', 'unknown')}"
+        print(f"  {idx}. {candidate['description']} [{status}]")
+    print(f"[device-setup] Select {label} devices in the order you want them used.")
+    print("[device-setup] The first device becomes the startup default, and cycling follows the same order.")
     if allow_none:
         print("[device-setup] Press Enter to keep the current selection. Enter 'none' for no devices.")
     else:
         print("[device-setup] Press Enter to keep the current selection. Choose at least one device.")
-    for idx, candidate in enumerate(candidates, start=1):
-        status = "usable" if candidate.get("usable", True) else f"unusable: {candidate.get('reason', 'unknown')}"
-        print(f"  {idx}. {candidate['description']} [{status}]")
 
     while True:
         prompt = f"{label} selection"
@@ -774,6 +744,28 @@ def _set_device_setup_initialized(value: bool):
         logger.warning(f"[device-setup] Could not update initialization flag: {e}")
 
 
+def _recommended_setup_profiles(
+    candidates: list[dict],
+    preferred_name: str,
+    default_info: dict | None,
+) -> list[dict]:
+    for candidate in candidates:
+        if not candidate.get("usable", True):
+            continue
+        if preferred_name and str(candidate["profile"].get("name", "")).strip() == preferred_name:
+            return [candidate["profile"]]
+    if default_info is not None:
+        for candidate in candidates:
+            if not candidate.get("usable", True):
+                continue
+            if int(candidate["info"].get("index", -1)) == int(default_info.get("index", -2)):
+                return [candidate["profile"]]
+    for candidate in candidates:
+        if candidate.get("usable", True):
+            return [candidate["profile"]]
+    return []
+
+
 
 def _maybe_run_device_setup() -> dict:
     profiles = load_profiles(DEVICE_PROFILES_PATH)
@@ -787,6 +779,14 @@ def _maybe_run_device_setup() -> dict:
         api_names = host_api_names(p)
         existing_inputs = profiles.get("inputs", [])
         existing_outputs = profiles.get("outputs", [])
+        try:
+            default_input_info = p.get_default_input_device_info()
+        except Exception:
+            default_input_info = None
+        try:
+            default_output_info = p.get_default_output_device_info()
+        except Exception:
+            default_output_info = None
         input_candidates = []
         for info in available_input_devices(p):
             reason = "ok"
@@ -826,18 +826,32 @@ def _maybe_run_device_setup() -> dict:
             "input",
             input_candidates,
             existing_inputs,
+            recommended_profiles=_recommended_setup_profiles(
+                input_candidates,
+                PREFERRED_INPUT_DEVICE,
+                default_input_info,
+            ),
             allow_none=False,
         )
         selected_outputs = _prompt_profile_selection(
             "output",
             output_candidates,
             existing_outputs,
+            recommended_profiles=_recommended_setup_profiles(
+                output_candidates,
+                FEEDBACK_OUTPUT_DEVICE,
+                default_output_info,
+            ),
             allow_none=not FEEDBACK_ENABLED,
         )
-        profiles = {"inputs": selected_inputs, "outputs": selected_outputs}
+        profiles = {
+            "inputs": selected_inputs,
+            "outputs": selected_outputs,
+        }
         save_profiles(DEVICE_PROFILES_PATH, profiles)
         _set_device_setup_initialized(True)
         logger.info(f"[device-setup] Saved profiles to {DEVICE_PROFILES_PATH}")
+        logger.info("[device-setup] The first approved device in each list is used at startup.")
         logger.info("[device-setup] Initialization complete. Set audio.device_setup_initialized = false to rerun.")
         return profiles
     finally:
@@ -1271,15 +1285,6 @@ def main(args=None):
             return
 
         hk = cfg["hotkeys"]
-        clipboard_accumulate_enabled = bool(
-            cfg.get("output", {}).get("clipboard_accumulate", {}).get("enabled", False)
-        )
-
-        clipboard_cycle_hotkey = str(hk.get("clipboard_accumulate_cycle", "")).strip()
-        if clipboard_cycle_hotkey and clipboard_accumulate_enabled:
-            kb.add_hotkey(clipboard_cycle_hotkey, lambda: invoke_hotkey_target("clipboard_accumulate_cycle"))
-            logger.info(f"[hotkey] clipboard_accumulate_cycle = {clipboard_cycle_hotkey}")
-
         input_cycle_hotkey = str(hk.get("input_device_cycle", "")).strip()
         if input_cycle_hotkey:
             kb.add_hotkey(input_cycle_hotkey, lambda: invoke_hotkey_target("input_device_cycle"))
@@ -1454,27 +1459,15 @@ def main(args=None):
                 seen_candidate_indices.add(idx)
                 startup_candidates.append((source, candidate))
 
-            persisted_name = str(_persisted.get("last_input_device_name") or "").strip()
-            persisted_host_api = _persisted.get("last_input_device_host_api")
-            if INPUT_DEVICE_STARTUP_SOURCE == "state" and APPROVED_INPUT_PROFILES:
+            if APPROVED_INPUT_PROFILES:
                 approved_infos = order_devices_by_profiles(available_inputs, APPROVED_INPUT_PROFILES)
-                if persisted_name:
-                    persisted_info = _find_device_by_name(persisted_name, persisted_host_api)
-                    if persisted_info and matches_any_profile(persisted_info, APPROVED_INPUT_PROFILES):
-                        _push_candidate("Persisted", persisted_info, persisted_name)
                 for approved_info in approved_infos:
                     _push_candidate("Profile", approved_info)
-            else:
-                if PREFERRED_INPUT_DEVICE:
-                    _push_candidate("Configured", _find_device_by_name(PREFERRED_INPUT_DEVICE), PREFERRED_INPUT_DEVICE)
-                elif INPUT_DEVICE_STARTUP_SOURCE == "state" and persisted_name:
-                    persisted_info = _find_device_by_name(persisted_name, persisted_host_api)
-                    if not persisted_info:
-                        persisted_info = _find_device_by_name(persisted_name)
-                    _push_candidate("Persisted", persisted_info, persisted_name)
-                _push_candidate("Default", default_info)
-                for extra_info in available_inputs:
-                    _push_candidate("Fallback", extra_info)
+            if PREFERRED_INPUT_DEVICE:
+                _push_candidate("Configured", _find_device_by_name(PREFERRED_INPUT_DEVICE), PREFERRED_INPUT_DEVICE)
+            _push_candidate("Default", default_info)
+            for extra_info in available_inputs:
+                _push_candidate("Fallback", extra_info)
 
             for source, candidate in startup_candidates:
                 try:
@@ -1562,8 +1555,6 @@ def main(args=None):
     # ── Register handlers ─────────────────────────────────────────────────────
     import handlers as h
     handler_extras = h.register_all(cfg, register_handler)
-    persisted_output_name = str(_persisted.get("last_output_device_name") or "").strip()
-    persisted_output_host_api = _persisted.get("last_output_device_host_api")
     feedback = FeedbackAudio(
         enabled=FEEDBACK_ENABLED,
         on_path=FEEDBACK_ON_SOUND,
@@ -1578,38 +1569,23 @@ def main(args=None):
         final_volume=FEEDBACK_FINAL_VOLUME,
         output_device=FEEDBACK_OUTPUT_DEVICE,
         startup_source=OUTPUT_DEVICE_STARTUP_SOURCE,
-        persisted_output_device_name=persisted_output_name,
-        persisted_output_device_host_api=persisted_output_host_api,
+        persisted_output_device_name="",
+        persisted_output_device_host_api=None,
     )
 
-    if (
-        getattr(feedback, "enabled", False)
-        and OUTPUT_DEVICE_STARTUP_SOURCE == "state"
-        and APPROVED_OUTPUT_PROFILES
-    ):
+    if getattr(feedback, "enabled", False) and APPROVED_OUTPUT_PROFILES:
         approved_output_infos = order_devices_by_profiles(
             available_output_devices(p_instance, include_alias=True),
             APPROVED_OUTPUT_PROFILES,
         )
-        preferred_output_infos = []
         for candidate_info in approved_output_infos:
-            if (
-                str(candidate_info.get("name", "")).strip() == persisted_output_name
-                and candidate_info.get("hostApi") == persisted_output_host_api
-            ):
-                preferred_output_infos.append(candidate_info)
-                break
-        for candidate_info in approved_output_infos:
-            if candidate_info not in preferred_output_infos:
-                preferred_output_infos.append(candidate_info)
-        for candidate_info in preferred_output_infos:
             if feedback.try_set_output_device_index(
                 int(candidate_info["index"]),
                 str(candidate_info.get("name", "")),
                 candidate_info.get("hostApi"),
                 update_preference=False,
             ):
-                logger.info(f"[feedback] Approved output selected: {candidate_info['name']}")
+                logger.info(f"[feedback] Startup output selected from device profiles: {candidate_info['name']}")
                 break
 
     # ── State ─────────────────────────────────────────────────────────────────
@@ -1623,7 +1599,7 @@ def main(args=None):
     typing_lock   = threading.Lock()
     default_typing_enabled = bool(cfg["output"]["type_at_cursor"]["enabled"])
     typing_state = {
-        "enabled": bool(_persisted.get("type_at_cursor_enabled", default_typing_enabled))
+        "enabled": default_typing_enabled
     }
     output_mode_lock = threading.Lock()
     configured_output_mode = (
@@ -1631,12 +1607,7 @@ def main(args=None):
         if bool(cfg["output"]["file_buffer"]["enabled"]) and not bool(cfg["output"]["type_at_cursor"]["enabled"])
         else "direct-cursor"
     )
-    startup_output_mode = configured_output_mode
-    if OUTPUT_MODE_STARTUP_SOURCE == "state":
-        startup_output_mode = str(_persisted.get("output_mode", configured_output_mode) or configured_output_mode).strip().lower()
-        if startup_output_mode not in OUTPUT_MODE_NAMES:
-            startup_output_mode = configured_output_mode
-    output_mode_state = {"name": startup_output_mode}
+    output_mode_state = {"name": configured_output_mode}
     voice_command_lock = threading.Lock()
     voice_command_seen_by_epoch: dict[int, set[str]] = {}
     command_consumed_epochs: set[int] = set()
@@ -1651,30 +1622,21 @@ def main(args=None):
 
     file_buffer_set_enabled = handler_extras.get("file_buffer_set_enabled")
     file_buffer_is_enabled = handler_extras.get("file_buffer_is_enabled")
-    clipboard_replace_set_enabled = handler_extras.get("clipboard_replace_set_enabled")
-    clipboard_accumulate_set_enabled = handler_extras.get("clipboard_accumulate_set_enabled")
-
     output_mode_profiles = {
         "direct-cursor": {
             "type_at_cursor": True,
             "file_buffer": False,
-            "clipboard_replace": False,
-            "clipboard_accumulate": False,
         },
         "draft-buffer": {
             "type_at_cursor": False,
             "file_buffer": True,
-            "clipboard_replace": False,
-            "clipboard_accumulate": False,
         },
     }
 
     # Keep the user's selected device durable even if startup had to fall back.
     preferred_input_device_state = [{"name": "", "host_api": None}]
-    if INPUT_DEVICE_STARTUP_SOURCE == "config" and PREFERRED_INPUT_DEVICE:
+    if PREFERRED_INPUT_DEVICE:
         preferred_input_device_state[0] = {"name": PREFERRED_INPUT_DEVICE, "host_api": None}
-    elif INPUT_DEVICE_STARTUP_SOURCE == "state" and persisted_name:
-        preferred_input_device_state[0] = {"name": persisted_name, "host_api": persisted_host_api}
     else:
         preferred_input_device_state[0] = {"name": dev_name, "host_api": resources['host_api']}
 
@@ -1685,26 +1647,7 @@ def main(args=None):
     ]
 
     def persist():
-        with mode_lock:
-            sleeping = mode_state["sleeping"]
-        with typing_lock:
-            typing_enabled = typing_state["enabled"]
-        with output_mode_lock:
-            output_mode_name = output_mode_state["name"]
-        output_preference = (
-            feedback.get_output_device_preference()
-            if getattr(feedback, "enabled", False)
-            else {"name": "", "host_api": None}
-        )
-        state_store.save({
-            "sleeping": sleeping,
-            "type_at_cursor_enabled": typing_enabled,
-            "output_mode": output_mode_name,
-            "last_input_device_name": preferred_input_device_state[0]["name"],
-            "last_input_device_host_api": preferred_input_device_state[0]["host_api"],
-            "last_output_device_name": output_preference.get("name", ""),
-            "last_output_device_host_api": output_preference.get("host_api", None),
-        })
+        return
 
     def apply_output_mode(mode_name: str, *, reason: str = "", announce: bool = True) -> str:
         normalized = str(mode_name or "").strip().lower()
@@ -1714,10 +1657,6 @@ def main(args=None):
 
         if file_buffer_set_enabled:
             file_buffer_set_enabled(profile["file_buffer"])
-        if clipboard_replace_set_enabled:
-            clipboard_replace_set_enabled(profile["clipboard_replace"])
-        if clipboard_accumulate_set_enabled:
-            clipboard_accumulate_set_enabled(profile["clipboard_accumulate"])
         if type_set_enabled:
             type_set_enabled(profile["type_at_cursor"])
             with typing_lock:
@@ -2224,9 +2163,6 @@ def main(args=None):
         threading.Thread(target=realtime_worker, daemon=True).start()
 
     # ── Hotkeys ───────────────────────────────────────────────────────────────
-
-    if "clipboard_accumulate_reset" in handler_extras:
-        set_hotkey_target("clipboard_accumulate_cycle", handler_extras["clipboard_accumulate_reset"])
 
     def _sleep_toggle():
         with mode_lock:

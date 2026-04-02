@@ -15,6 +15,152 @@ from pathlib import Path
 logger = logging.getLogger("STT")
 
 
+def _load_keyboard():
+    try:
+        import keyboard
+        return keyboard
+    except ImportError:
+        return None
+
+
+def _load_win32_clipboard():
+    try:
+        import win32clipboard
+        import win32con
+        return win32clipboard, win32con
+    except ImportError:
+        return None, None
+
+
+def _open_clipboard_with_retry(win32clipboard, retry_count: int, retry_delay_ms: int):
+    last_error = None
+    for _ in range(max(1, int(retry_count))):
+        try:
+            win32clipboard.OpenClipboard()
+            return
+        except Exception as exc:
+            last_error = exc
+            time.sleep(max(1, int(retry_delay_ms)) / 1000.0)
+    raise RuntimeError(f"failed to open clipboard after retries: {last_error}")
+
+
+def _capture_clipboard_state(win32clipboard, win32con) -> tuple[str | None, list[tuple[int, object]]]:
+    text_value = None
+    try:
+        text_value = win32clipboard.GetClipboardData(win32con.CF_UNICODETEXT)
+    except Exception:
+        text_value = None
+    formats: list[tuple[int, object]] = []
+    fmt = 0
+    while True:
+        fmt = int(win32clipboard.EnumClipboardFormats(fmt))
+        if not fmt:
+            break
+        try:
+            data = win32clipboard.GetClipboardData(fmt)
+        except Exception:
+            continue
+        formats.append((fmt, data))
+    return text_value, formats
+
+
+def _restore_clipboard_state(
+    win32clipboard,
+    win32con,
+    inserted_text: str,
+    saved_text: str | None,
+    saved_formats: list[tuple[int, object]],
+    restore_delay_ms: int,
+    retry_count: int,
+    retry_delay_ms: int,
+    logger_label: str,
+):
+    time.sleep(max(0, int(restore_delay_ms)) / 1000.0)
+    try:
+        _open_clipboard_with_retry(win32clipboard, retry_count, retry_delay_ms)
+        try:
+            current_text = None
+            try:
+                current_text = win32clipboard.GetClipboardData(win32con.CF_UNICODETEXT)
+            except Exception:
+                current_text = None
+            if current_text != inserted_text:
+                logger.info(f"[{logger_label}] Clipboard changed after paste; skipping restore.")
+                return
+            win32clipboard.EmptyClipboard()
+            restored = False
+            if saved_text is not None:
+                try:
+                    win32clipboard.SetClipboardText(saved_text, win32con.CF_UNICODETEXT)
+                    restored = True
+                except Exception:
+                    restored = False
+            if not restored:
+                for fmt, data in saved_formats:
+                    try:
+                        win32clipboard.SetClipboardData(fmt, data)
+                        restored = True
+                    except Exception:
+                        continue
+            if not restored:
+                logger.warning(f"[{logger_label}] Clipboard restore failed: no clipboard formats could be restored.")
+        finally:
+            win32clipboard.CloseClipboard()
+    except Exception as exc:
+        logger.warning(f"[{logger_label}] Clipboard restore failed: {exc}")
+
+
+def _emit_text_via_typing(keyboard, content: str, press_enter_after: bool):
+    keyboard.write(content, delay=0)
+    if press_enter_after:
+        keyboard.press_and_release("enter")
+
+
+def _emit_text_via_clipboard(
+    keyboard,
+    win32clipboard,
+    win32con,
+    content: str,
+    press_enter_after: bool,
+    *,
+    clipboard_restore_delay_ms: int,
+    clipboard_open_retry_count: int,
+    clipboard_open_retry_delay_ms: int,
+    post_paste_enter_delay_ms: int,
+    logger_label: str,
+):
+    _open_clipboard_with_retry(win32clipboard, clipboard_open_retry_count, clipboard_open_retry_delay_ms)
+    try:
+        saved_text, saved_formats = _capture_clipboard_state(win32clipboard, win32con)
+        win32clipboard.EmptyClipboard()
+        win32clipboard.SetClipboardText(content, win32con.CF_UNICODETEXT)
+    finally:
+        win32clipboard.CloseClipboard()
+
+    keyboard.press_and_release("ctrl+v")
+    if press_enter_after:
+        if post_paste_enter_delay_ms > 0:
+            time.sleep(post_paste_enter_delay_ms / 1000.0)
+        keyboard.press_and_release("enter")
+
+    restore_thread = threading.Thread(
+        target=_restore_clipboard_state,
+        args=(
+            win32clipboard,
+            win32con,
+            content,
+            saved_text,
+            saved_formats,
+            clipboard_restore_delay_ms,
+            clipboard_open_retry_count,
+            clipboard_open_retry_delay_ms,
+            logger_label,
+        ),
+        daemon=True,
+    )
+    restore_thread.start()
+
+
 def _final_text(event: dict, cfg: dict) -> str | None:
     """Return text to output, with optional trailing char, or None to skip."""
     if event.get("type") != "final":
@@ -86,21 +232,14 @@ def make_file_buffer(cfg: dict):
     release_lock = threading.Lock()
     last_released_content = [""]
 
-    try:
-        import keyboard
-    except ImportError:
-        keyboard = None
+    keyboard = _load_keyboard()
+    if keyboard is None:
         logger.warning("[file_buffer] keyboard not installed, voice-triggered release disabled.")
 
-    win32clipboard = None
-    win32con = None
+    win32clipboard, win32con = None, None
     if release_method == "paste_preserve_clipboard":
-        try:
-            import win32clipboard as _win32clipboard
-            import win32con as _win32con
-            win32clipboard = _win32clipboard
-            win32con = _win32con
-        except ImportError:
+        win32clipboard, win32con = _load_win32_clipboard()
+        if win32clipboard is None or win32con is None:
             logger.warning(
                 "[file_buffer] pywin32 not installed, falling back to type_keys release method."
             )
@@ -157,106 +296,23 @@ def make_file_buffer(cfg: dict):
             _write_buffer(restored)
         logger.info(f"[file_buffer] undo restored {len(restored)} chars")
 
-    def _open_clipboard_with_retry():
-        assert win32clipboard is not None
-        last_error = None
-        for _ in range(clipboard_open_retry_count):
-            try:
-                win32clipboard.OpenClipboard()
-                return
-            except Exception as exc:
-                last_error = exc
-                time.sleep(clipboard_open_retry_delay_ms / 1000.0)
-        raise RuntimeError(f"failed to open clipboard after retries: {last_error}")
-
-    def _capture_clipboard_state() -> tuple[str | None, list[tuple[int, object]]]:
-        assert win32clipboard is not None
-        text_value = None
-        try:
-            text_value = win32clipboard.GetClipboardData(win32con.CF_UNICODETEXT)
-        except Exception:
-            text_value = None
-        formats: list[tuple[int, object]] = []
-        fmt = 0
-        while True:
-            fmt = int(win32clipboard.EnumClipboardFormats(fmt))
-            if not fmt:
-                break
-            try:
-                data = win32clipboard.GetClipboardData(fmt)
-            except Exception:
-                continue
-            formats.append((fmt, data))
-        return text_value, formats
-
-    def _restore_clipboard_state(inserted_text: str, saved_text: str | None, saved_formats: list[tuple[int, object]]):
-        if win32clipboard is None:
-            return
-        time.sleep(clipboard_restore_delay_ms / 1000.0)
-        try:
-            _open_clipboard_with_retry()
-            try:
-                current_text = None
-                try:
-                    current_text = win32clipboard.GetClipboardData(win32con.CF_UNICODETEXT)
-                except Exception:
-                    current_text = None
-                if current_text != inserted_text:
-                    logger.info("[file_buffer] Clipboard changed after paste; skipping restore.")
-                    return
-                win32clipboard.EmptyClipboard()
-                restored = False
-                if saved_text is not None:
-                    try:
-                        win32clipboard.SetClipboardText(saved_text, win32con.CF_UNICODETEXT)
-                        restored = True
-                    except Exception:
-                        restored = False
-                if not restored:
-                    for fmt, data in saved_formats:
-                        try:
-                            win32clipboard.SetClipboardData(fmt, data)
-                            restored = True
-                        except Exception:
-                            continue
-                if not restored:
-                    logger.warning("[file_buffer] Clipboard restore failed: no clipboard formats could be restored.")
-            finally:
-                win32clipboard.CloseClipboard()
-        except Exception as exc:
-            logger.warning(f"[file_buffer] Clipboard restore failed: {exc}")
-
-    def _release_via_typing(content: str, press_enter_after: bool):
-        assert keyboard is not None
-        keyboard.write(content, delay=0)
-        if press_enter_after:
-            keyboard.press_and_release("enter")
-
     def _release_via_clipboard(content: str, press_enter_after: bool):
         assert keyboard is not None
         assert win32clipboard is not None and win32con is not None
 
         with release_lock:
-            _open_clipboard_with_retry()
-            try:
-                saved_text, saved_formats = _capture_clipboard_state()
-                win32clipboard.EmptyClipboard()
-                win32clipboard.SetClipboardText(content, win32con.CF_UNICODETEXT)
-            finally:
-                win32clipboard.CloseClipboard()
-
-            keyboard.press_and_release("ctrl+v")
-            if press_enter_after:
-                if post_paste_enter_delay_ms > 0:
-                    time.sleep(post_paste_enter_delay_ms / 1000.0)
-                keyboard.press_and_release("enter")
-
-            restore_thread = threading.Thread(
-                target=_restore_clipboard_state,
-                args=(content, saved_text, saved_formats),
-                daemon=True,
+            _emit_text_via_clipboard(
+                keyboard,
+                win32clipboard,
+                win32con,
+                content,
+                press_enter_after,
+                clipboard_restore_delay_ms=clipboard_restore_delay_ms,
+                clipboard_open_retry_count=clipboard_open_retry_count,
+                clipboard_open_retry_delay_ms=clipboard_open_retry_delay_ms,
+                post_paste_enter_delay_ms=post_paste_enter_delay_ms,
+                logger_label="file_buffer",
             )
-            restore_thread.start()
 
     def _release_buffer(press_enter_after: bool = False):
         if keyboard is None:
@@ -274,7 +330,7 @@ def make_file_buffer(cfg: dict):
         if release_method == "paste_preserve_clipboard":
             _release_via_clipboard(content, press_enter_after)
         else:
-            _release_via_typing(content, press_enter_after)
+            _emit_text_via_typing(keyboard, content, press_enter_after)
         last_released_content[0] = content
         if clear_after_release:
             with lock:
@@ -294,7 +350,7 @@ def make_file_buffer(cfg: dict):
         if release_method == "paste_preserve_clipboard":
             _release_via_clipboard(content, press_enter_after)
         else:
-            _release_via_typing(content, press_enter_after)
+            _emit_text_via_typing(keyboard, content, press_enter_after)
         logger.info(
             f"[file_buffer] repeated {len(content)} chars via {release_method}"
             + (" + enter" if press_enter_after else "")
@@ -354,114 +410,33 @@ def make_file_buffer(cfg: dict):
     return file_buffer, _clear_buffer, set_enabled, is_enabled
 
 
-# ── Clipboard replace ─────────────────────────────────────────────────────────
-
-def make_clipboard_replace(cfg: dict):
-    try:
-        import win32clipboard
-    except ImportError:
-        logger.warning("[clipboard_replace] pywin32 not installed, handler disabled.")
-        return None
-
-    enabled_lock = threading.Lock()
-    enabled_state = [bool(cfg["output"]["clipboard_replace"].get("enabled", False))]
-
-    def set_enabled(enabled: bool):
-        with enabled_lock:
-            enabled_state[0] = bool(enabled)
-
-    def is_enabled() -> bool:
-        with enabled_lock:
-            return enabled_state[0]
-
-    def clipboard_replace(event: dict):
-        if not is_enabled():
-            return
-        text = _final_text(event, cfg)
-        if text is None:
-            return
-        try:
-            win32clipboard.OpenClipboard()
-            win32clipboard.EmptyClipboard()
-            win32clipboard.SetClipboardText(text, win32clipboard.CF_UNICODETEXT)
-        finally:
-            win32clipboard.CloseClipboard()
-
-    clipboard_replace.__name__ = "clipboard_replace"
-    return clipboard_replace, set_enabled, is_enabled
-
-
-# ── Clipboard accumulate ──────────────────────────────────────────────────────
-
-def make_clipboard_accumulate(cfg: dict):
-    try:
-        import win32clipboard
-    except ImportError:
-        logger.warning("[clipboard_accumulate] pywin32 not installed, handler disabled.")
-        return None
-
-    sep = cfg["output"]["clipboard_accumulate"]["separator"]
-    enabled_lock = threading.Lock()
-    enabled_state = [bool(cfg["output"]["clipboard_accumulate"].get("enabled", False))]
-
-    def set_enabled(enabled: bool):
-        with enabled_lock:
-            enabled_state[0] = bool(enabled)
-
-    def is_enabled() -> bool:
-        with enabled_lock:
-            return enabled_state[0]
-
-    def clipboard_accumulate(event: dict):
-        if not is_enabled():
-            return
-        text = _final_text(event, cfg)
-        if text is None:
-            return
-        try:
-            win32clipboard.OpenClipboard()
-            try:
-                existing = win32clipboard.GetClipboardData(win32clipboard.CF_UNICODETEXT)
-            except Exception:
-                existing = ""
-            combined = (existing + sep + text).lstrip(sep) if existing else text
-            win32clipboard.EmptyClipboard()
-            win32clipboard.SetClipboardText(combined, win32clipboard.CF_UNICODETEXT)
-        finally:
-            win32clipboard.CloseClipboard()
-
-    def clipboard_accumulate_reset():
-        if not is_enabled():
-            logger.info("[clipboard_accumulate] reset ignored (disabled)")
-            return
-        try:
-            win32clipboard.OpenClipboard()
-            win32clipboard.EmptyClipboard()
-        finally:
-            win32clipboard.CloseClipboard()
-        logger.info("[clipboard_accumulate] reset")
-
-    clipboard_accumulate.__name__ = "clipboard_accumulate"
-    return clipboard_accumulate, clipboard_accumulate_reset, set_enabled, is_enabled
-
-
 # ── Type at cursor ────────────────────────────────────────────────────────────
 
 def make_type_at_cursor(cfg: dict):
-    try:
-        import keyboard
-    except ImportError:
+    keyboard = _load_keyboard()
+    if keyboard is None:
         logger.warning("[type_at_cursor] keyboard not installed, handler disabled.")
         return None
 
     tcfg = cfg["output"]["type_at_cursor"]
     enabled_lock = threading.Lock()
     enabled_state = [bool(tcfg["enabled"])]
+    release_method = str(tcfg.get("release_method", "paste_preserve_clipboard")).strip().lower()
+    clipboard_restore_delay_ms = max(0, int(tcfg.get("clipboard_restore_delay_ms", 1000)))
+    clipboard_open_retry_count = max(1, int(tcfg.get("clipboard_open_retry_count", 8)))
+    clipboard_open_retry_delay_ms = max(1, int(tcfg.get("clipboard_open_retry_delay_ms", 25)))
+    post_paste_enter_delay_ms = max(0, int(tcfg.get("post_paste_enter_delay_ms", 0)))
     revert_mode = str(tcfg.get("revert_mode", tcfg.get("undo_mode", "off"))).strip().lower()
     if revert_mode not in {"off", "ctrl+z", "backspace"}:
         logger.warning(f"[type_at_cursor] Invalid revert_mode={revert_mode!r}; using 'off'.")
         revert_mode = "off"
     revert_backspace_count = max(1, int(tcfg.get("revert_backspace_count", tcfg.get("undo_backspace_count", 24))))
+    win32clipboard, win32con = None, None
+    if release_method == "paste_preserve_clipboard":
+        win32clipboard, win32con = _load_win32_clipboard()
+        if win32clipboard is None or win32con is None:
+            logger.warning("[type_at_cursor] pywin32 not installed, falling back to type_keys release method.")
+            release_method = "type_keys"
 
     def set_enabled(enabled: bool):
         with enabled_lock:
@@ -499,7 +474,21 @@ def make_type_at_cursor(cfg: dict):
             return
         text = _final_text(event, cfg)
         if text is not None:
-            keyboard.write(text, delay=0)
+            if release_method == "paste_preserve_clipboard":
+                _emit_text_via_clipboard(
+                    keyboard,
+                    win32clipboard,
+                    win32con,
+                    text,
+                    False,
+                    clipboard_restore_delay_ms=clipboard_restore_delay_ms,
+                    clipboard_open_retry_count=clipboard_open_retry_count,
+                    clipboard_open_retry_delay_ms=clipboard_open_retry_delay_ms,
+                    post_paste_enter_delay_ms=post_paste_enter_delay_ms,
+                    logger_label="type_at_cursor",
+                )
+            else:
+                _emit_text_via_typing(keyboard, text, False)
         if actions.get("press_enter_after"):
             keyboard.press_and_release("enter")
 
@@ -578,23 +567,6 @@ def register_all(cfg: dict, register) -> dict:
         extras["file_buffer_set_enabled"] = set_enabled
         extras["file_buffer_is_enabled"] = is_enabled
         logger.info(f"[handler] file_buffer -> {out['file_buffer']['path']}")
-
-    result = make_clipboard_replace(cfg)
-    if result:
-        fn, set_enabled, is_enabled = result
-        register(fn)
-        extras["clipboard_replace_set_enabled"] = set_enabled
-        extras["clipboard_replace_is_enabled"] = is_enabled
-        logger.info("[handler] clipboard_replace")
-
-    result = make_clipboard_accumulate(cfg)
-    if result:
-        fn, reset, set_enabled, is_enabled = result
-        register(fn)
-        extras["clipboard_accumulate_reset"] = reset
-        extras["clipboard_accumulate_set_enabled"] = set_enabled
-        extras["clipboard_accumulate_is_enabled"] = is_enabled
-        logger.info("[handler] clipboard_accumulate")
 
     result = make_type_at_cursor(cfg)
     if result:
