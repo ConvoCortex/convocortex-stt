@@ -643,18 +643,13 @@ def _prompt_profile_selection(
     candidates: list[dict],
     existing_profiles: list[dict],
     *,
-    recommended_profiles: list[dict] | None = None,
     allow_none: bool,
 ) -> list[dict]:
     existing_indexes = []
     for idx, candidate in enumerate(candidates, start=1):
         if any(profile_matches(candidate["info"], profile) for profile in existing_profiles):
             existing_indexes.append(str(idx))
-    recommended_indexes = []
-    for idx, candidate in enumerate(candidates, start=1):
-        if any(profile_matches(candidate["info"], profile) for profile in (recommended_profiles or [])):
-            recommended_indexes.append(str(idx))
-    default_text = ",".join(existing_indexes or recommended_indexes)
+    default_text = ",".join(existing_indexes)
 
     print()
     for idx, candidate in enumerate(candidates, start=1):
@@ -744,29 +739,6 @@ def _set_device_setup_initialized(value: bool):
         logger.warning(f"[device-setup] Could not update initialization flag: {e}")
 
 
-def _recommended_setup_profiles(
-    candidates: list[dict],
-    preferred_name: str,
-    default_info: dict | None,
-) -> list[dict]:
-    for candidate in candidates:
-        if not candidate.get("usable", True):
-            continue
-        if preferred_name and str(candidate["profile"].get("name", "")).strip() == preferred_name:
-            return [candidate["profile"]]
-    if default_info is not None:
-        for candidate in candidates:
-            if not candidate.get("usable", True):
-                continue
-            if int(candidate["info"].get("index", -1)) == int(default_info.get("index", -2)):
-                return [candidate["profile"]]
-    for candidate in candidates:
-        if candidate.get("usable", True):
-            return [candidate["profile"]]
-    return []
-
-
-
 def _maybe_run_device_setup() -> dict:
     profiles = load_profiles(DEVICE_PROFILES_PATH)
     needs_setup = (not DEVICE_SETUP_INITIALIZED) or (not DEVICE_PROFILES_PATH.exists())
@@ -779,14 +751,6 @@ def _maybe_run_device_setup() -> dict:
         api_names = host_api_names(p)
         existing_inputs = profiles.get("inputs", [])
         existing_outputs = profiles.get("outputs", [])
-        try:
-            default_input_info = p.get_default_input_device_info()
-        except Exception:
-            default_input_info = None
-        try:
-            default_output_info = p.get_default_output_device_info()
-        except Exception:
-            default_output_info = None
         input_candidates = []
         for info in available_input_devices(p):
             reason = "ok"
@@ -826,22 +790,12 @@ def _maybe_run_device_setup() -> dict:
             "input",
             input_candidates,
             existing_inputs,
-            recommended_profiles=_recommended_setup_profiles(
-                input_candidates,
-                PREFERRED_INPUT_DEVICE,
-                default_input_info,
-            ),
             allow_none=False,
         )
         selected_outputs = _prompt_profile_selection(
             "output",
             output_candidates,
             existing_outputs,
-            recommended_profiles=_recommended_setup_profiles(
-                output_candidates,
-                FEEDBACK_OUTPUT_DEVICE,
-                default_output_info,
-            ),
             allow_none=not FEEDBACK_ENABLED,
         )
         profiles = {
