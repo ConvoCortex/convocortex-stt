@@ -444,6 +444,8 @@ WHISPER_LOG_PROB_THRESHOLD = float(cfg["models"].get("log_prob_threshold", -1.0)
 RATE            = cfg["audio"]["rate"]
 CHUNK           = cfg["audio"]["chunk"]
 VAD_THRESHOLD   = cfg["audio"]["vad_threshold"]
+VAD_END_THRESHOLD = float(cfg["audio"].get("vad_end_threshold", max(float(VAD_THRESHOLD) - 0.15, 0.01)))
+MIN_SPEECH_DURATION_MS = float(cfg["audio"].get("min_speech_duration_ms", 250.0))
 BUFFER_SECONDS  = cfg["audio"]["buffer_seconds"]
 SILENCE_TIMEOUT = cfg["audio"]["silence_timeout"]
 INPUT_STALL_RESET_SECONDS = float(cfg["audio"].get("input_stall_reset_seconds", 1.5))
@@ -1320,7 +1322,8 @@ def main(args=None):
     sys.stdout.flush()
     debug_log(
         "[startup] "
-        f"rate={RATE} chunk={CHUNK} vad_threshold={VAD_THRESHOLD} "
+        f"rate={RATE} chunk={CHUNK} vad_start_threshold={VAD_THRESHOLD} "
+        f"vad_end_threshold={VAD_END_THRESHOLD} min_speech_duration_ms={MIN_SPEECH_DURATION_MS} "
         f"silence_timeout={SILENCE_TIMEOUT} rt_interval={RT_CHECK_INTERVAL} "
         f"rt_queue_size={RT_QUEUE_SIZE} start_sleeping={SLEEP_START_SLEEPING} "
         f"final_backend={FINAL_BACKEND} realtime_backend={REALTIME_BACKEND} "
@@ -2505,6 +2508,8 @@ def main(args=None):
     ring_buffer      = deque(maxlen=int(BUFFER_SECONDS * RATE / CHUNK))
     recording_buffer = []
     is_recording     = False
+    speech_counter   = 0
+    min_speech_chunks = max(1, int(math.ceil((MIN_SPEECH_DURATION_MS / 1000.0) * RATE / CHUNK)))
     silence_counter  = 0
     silence_limit    = int(SILENCE_TIMEOUT * (RATE / CHUNK))
     last_rt_update   = 0.0
@@ -2529,11 +2534,12 @@ def main(args=None):
     feedback.play_startup()
 
     def reset_active_utterance(reason: str):
-        nonlocal recording_buffer, is_recording, silence_counter, current_t0, last_rt_update
+        nonlocal recording_buffer, is_recording, speech_counter, silence_counter, current_t0, last_rt_update
         had_audio = bool(is_recording or recording_buffer)
         ring_buffer.clear()
         recording_buffer = []
         is_recording = False
+        speech_counter = 0
         silence_counter = 0
         current_t0 = None
         last_rt_update = 0.0
@@ -2713,33 +2719,43 @@ def main(args=None):
                 continue
 
             prob  = vad.is_speech(chunk.astype(np.float32) / 32768.0)
-            vad_active = prob > VAD_THRESHOLD
+            vad_start_active = prob >= VAD_THRESHOLD
+            vad_end_active = prob >= VAD_END_THRESHOLD
+            vad_active = vad_start_active if not is_recording else vad_end_active
             if vad_active != vad_prev_active:
                 debug_log(
                     f"[vad] transition active={vad_active} prob={prob:.3f} "
-                    f"threshold={VAD_THRESHOLD:.3f} rms={chunk_rms:.1f}"
+                    f"start_threshold={VAD_THRESHOLD:.3f} end_threshold={VAD_END_THRESHOLD:.3f} "
+                    f"rms={chunk_rms:.1f}"
                 )
                 vad_prev_active = vad_active
 
             if vad_active:
                 silence_counter = 0
                 if not is_recording:
-                    with state_lock:
-                        state['speech_epoch'] += 1
-                        state['finalized_epoch'] = -1
-                        rt_cancel.clear()
-                        epoch = state['speech_epoch']
-                    current_t0 = time.time()
-                    recording_buffer = list(ring_buffer)
-                    ring_buffer.clear()
-                    is_recording = True
-                    debug_log(
-                        f"[speech] start epoch={epoch} preroll_chunks={len(recording_buffer)} "
-                        f"rt_queue={rt_queue.qsize()} final_queue={final_queue.qsize()}"
-                    )
-                    dispatch({"type": "status", "value": "recording"})
-                recording_buffer.append(chunk)
+                    ring_buffer.append(chunk)
+                    speech_counter += 1
+                    if speech_counter >= min_speech_chunks:
+                        with state_lock:
+                            state['speech_epoch'] += 1
+                            state['finalized_epoch'] = -1
+                            rt_cancel.clear()
+                            epoch = state['speech_epoch']
+                        current_t0 = time.time()
+                        recording_buffer = list(ring_buffer)
+                        ring_buffer.clear()
+                        is_recording = True
+                        speech_counter = 0
+                        debug_log(
+                            f"[speech] start epoch={epoch} preroll_chunks={len(recording_buffer)} "
+                            f"min_speech_chunks={min_speech_chunks} rt_queue={rt_queue.qsize()} "
+                            f"final_queue={final_queue.qsize()}"
+                        )
+                        dispatch({"type": "status", "value": "recording"})
+                else:
+                    recording_buffer.append(chunk)
             else:
+                speech_counter = 0
                 if is_recording:
                     recording_buffer.append(chunk)
                     silence_counter += 1

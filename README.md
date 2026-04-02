@@ -260,7 +260,7 @@ All runtime settings live in `config.toml` and are loaded at startup.
 Important areas:
 - `models`: backend choice plus realtime/final models and device choices
 - `models.no_speech_threshold` / `models.log_prob_threshold`: Whisper-only silence / low-confidence rejection for reducing spurious transcripts
-- `audio`: VAD behavior + silence timeout + preferred input
+- `audio`: VAD behavior + silence timeout + preferred input, especially `vad_threshold`, `vad_end_threshold`, and `min_speech_duration_ms` for speech-vs-noise gating
 - `startup`: whether startup restores last runtime state or uses config defaults for output mode and devices
 - `realtime`: partial cadence/window limits
 - `filters.ignored_exact_phrases`: drops matching utterances entirely before partial/final output is shown or dispatched

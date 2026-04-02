@@ -48,7 +48,9 @@ log_prob_threshold = -0.8
 [audio]
 rate            = 16000  # sample rate — required by the current transcription backends, do not change
 chunk           = 512    # audio frames per VAD check — lower = more responsive, higher = more stable
-vad_threshold   = 0.7   # Silero VAD sensitivity 0–1 (lower = more sensitive, picks up more speech)
+vad_threshold   = 0.85  # Silero VAD speech-start threshold 0–1 (higher = stricter, rejects more weak/noisy audio)
+vad_end_threshold = 0.70 # Silero VAD speech-end threshold 0–1 (lower than start threshold keeps speech from chattering off)
+min_speech_duration_ms = 250 # require this much continuous voiced audio before opening an utterance at all
 buffer_seconds  = 1.0   # ring buffer before speech start — captures audio before VAD triggers
 silence_timeout = 0.6   # seconds of silence before ending an utterance and firing final transcription
 input_stall_reset_seconds = 1.5 # if audio capture stalls this long mid-utterance, drop buffered speech instead of resuming it later
@@ -171,7 +173,7 @@ enabled = true
 
 [voice_commands.enter]
 enabled = true
-words   = ["enter"] # Exact match or detected at the end of utterance, not detected in the middle.
+words   = ["enter", "And there"] # Exact match or detected at the end of utterance, not detected in the middle.
 
 [voice_commands.type_at_cursor_toggle]
 enabled = false
@@ -186,11 +188,11 @@ enabled = true
 words   = ["repeat"] # Exact match only; repeats last released buffer in draft-buffer mode, otherwise replays the last final cursor output
 
 [voice_commands.input_device_cycle]
-enabled = true
+enabled = false
 words   = ["input"] # Exact match only; same behavior as the input-device cycle hotkey
 
 [voice_commands.output_device_cycle]
-enabled = true
+enabled = false
 words   = ["output"] # Exact match only; same behavior as the output-device cycle hotkey
 
 [voice_commands.output_mode_default]
