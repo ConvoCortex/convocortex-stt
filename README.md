@@ -4,7 +4,23 @@ Ambient speech-to-text for desktop use: leave it running, wake it when needed, s
 
 It is built for daily hands-free use rather than one-shot dictation: wake/sleep modes, VAD-gated utterances, pluggable realtime/final backends, device cycling, audio feedback, hotkeys, and a simple integration boundary over NATS.
 
+## Why this repo is useful
+
+- It is hands-free. VAD starts and ends utterances from speech and silence, not button presses.
+- It supports separate realtime and final backends, but the intended path here is NVIDIA Parakeet for both.
+- Its buffer-first workflow is practical for real desktop work instead of forcing immediate text emission all the time.
+- It can turn a phone into a location-independent microphone-input/audio-feedback-output path for the desktop by combining Voicemeeter Banana, Mumble, and a networking solution; see [docs/remote-audio-bridge.md](docs/remote-audio-bridge.md).
+- wake/sleep state, audio feedback, hotkeys, device switching, reconnect behavior, and persisted runtime state.
+- It works as a standalone local tool and also as a component inside a larger voice system through NATS.
+
 ## Quick start
+
+Prerequisites:
+- Windows OS
+- Python 3.10+
+- `uv` installed (`pip install uv`)
+- NVIDIA CUDA 12.1 recommended
+
 
 ```bash
 git clone https://github.com/ConvoCortex/convocortex-stt
@@ -13,44 +29,39 @@ uv sync
 uv run python stt.py
 ```
 
-On Windows, console visibility during and after startup is controlled by
-`startup.console_startup_mode` in `config.toml`.
+Use restart-stt.ps1 script to start/restart the stt conveniently.
 
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\restart-stt.ps1
+```
 
-Before first real use, open `config.toml` and set the bits you actually care about:
-- `models.final_backend` / `models.realtime_backend`
-- `models.final_device` / `models.realtime_device`
-- `sleep_wake.wake_word`
-- `output.file_buffer.enabled`
-- `hotkeys.sleep_toggle`
+The restart script expects `.venv` to exist, so run `uv sync` first.
 
-On the first real startup, the app runs interactive device setup so you can
-pick the input and output devices that should participate in runtime cycling.
+If `audio.device_setup_initialized = false` or the device profiles file is
+missing, the app runs interactive device setup so you can pick the input and
+output devices that should participate in runtime cycling. To rerun it
+manually, set `audio.device_setup_initialized = false` in `config.toml` and
+start the app again.
 
-Focused output-mode presets live in:
-- `presets/output-modes/direct-cursor.toml`
-- `presets/output-modes/draft-buffer.toml`
+NATS Python client dependency is included by default.
+
+`config.toml` has is configured quite well, but you are free to tweak it as you wish.
+
+The default `hotkeys.console_toggle = "shift+f8"` hides/shows that same console window. A tray icon is also created so you can show/hide the console or exit STT without relying on the taskbar state of the console host. When you bring the console back, `Ctrl+C` kills the process as usual.
 
 ## Recommended workflow
 
 The intended workflow is `draft-buffer`.
 
-Keep [`buffer.txt`](buffer.txt) open in an editor such as VS Code, speak naturally into the buffer, adjust the text if needed, and then say `enter` when you want to release the buffer into the active app and submit it.
+Keep [`buffer.txt`](buffer.txt) open in an editor such as VS Code, speak naturally into the buffer, adjust the text if needed, and then say `buffer` or  `enter` when you want to release the buffer into the active app and submit it.
 
 That gives you a practical loop:
 - speak into the live buffer
 - glance at or edit `buffer.txt`
-- say `enter` to paste the buffer and press Enter
+- say `buffer` to paste the buffer
+- or say `enter` to paste the buffer and press Enter
 
 If you want immediate direct typing instead, switch to `direct-cursor` mode at runtime with the output-mode hotkey or the exact voice command `cursor mode`.
-
-## Why this repo is useful
-
-- It is hands-free. VAD starts and ends utterances from speech and silence, not button presses.
-- It supports separate realtime and final backends, but the intended path here is NVIDIA Parakeet for both.
-- Its buffer-first workflow is practical for real desktop work instead of forcing immediate text emission all the time.
-- It already handles the ugly desktop details: wake/sleep state, audio feedback, hotkeys, device switching, reconnect behavior, and persisted runtime state.
-- It works as a standalone local tool and also as a component inside a larger voice system through NATS.
 
 ## How it actually works
 
@@ -92,7 +103,7 @@ Partials are primarily for responsiveness and command latency, not for high-accu
 
 Built-in voice commands are intentionally minimal and convenience-oriented.
 
-Current built-in command types:
+Built-in command types:
 - sleep/stop words
 - type-at-cursor toggle words
 - rewind/repeat words
@@ -109,18 +120,6 @@ If a command has no configured `words`, it is treated as disabled and is not loa
 
 For a proper, richer voice command engine, use the emitted NATS events and implement command logic externally.
 
-### Practical device workflow
-
-One useful pattern is to keep a small approved input cycle and switch it by voice:
-
-- local desk microphone
-- optional bluetooth/headset microphone
-- optional virtual input such as `B1` from a remote-audio bridge
-
-Then say `input` to move between those options without touching the keyboard.
-
-This is especially useful when you want to compare microphones in the same environment or swap between local-PC mode and a remote-phone microphone path.
-
 ## Features
 
 - No GUI
@@ -136,8 +135,6 @@ This is especially useful when you want to compare microphones in the same envir
   - append file
   - overwrite file
   - file buffer accumulate/release
-  - clipboard replace
-  - clipboard accumulate
   - type at cursor
 - Hotkeys:
   - sleep toggle
@@ -198,33 +195,6 @@ final_device     = "cuda"
 realtime_device  = "cuda"
 language         = ""
 ```
-
-### Python and uv
-
-- Python 3.10+
-- `uv` installed (`pip install uv`)
-
-## Installation
-
-```bash
-git clone https://github.com/ConvoCortex/convocortex-stt
-cd convocortex-stt
-uv sync
-```
-
-NATS Python client dependency is included by default.
-
-Edit `config.toml` directly, or replace it with one of the included preset configs and then adjust it.
-
-## Running
-
-```bash
-uv run python stt.py
-```
-
-
-On Windows, the default `hotkeys.console_toggle = "shift+f8"` hides/shows that same console window. A tray icon is also created so you can show/hide the console or exit STT without relying on the taskbar state of the console host. When you bring the console back, `Ctrl+C` kills the process as usual.
-If you want the default backtick sleep hotkey to be intercepted instead of typed into the active app, set `hotkeys.sleep_toggle_suppress = true`.
 
 ## Windows Startup Shortcut
 
@@ -354,17 +324,6 @@ With `debug = true`, the runtime keeps normal console output but also appends de
 - periodic heartbeats showing mode, queue depth, buffer sizes, and current VAD state
 
 The useful debug points are in [`stt.py`](stt.py) around PyAudio, Silero VAD, and the transcription backend adapter layer.
-
-## Remote audio bridge workflow
-
-This project also works well with a remote-audio bridge setup based on:
-- a routed or overlay network that gives the remote device access to the PC
-- a Mumble-compatible voice link
-- virtual audio devices such as Voicemeeter
-
-That lets you treat a phone or remote client as another microphone/speaker endpoint while keeping STT local on the desktop.
-
-See [docs/remote-audio-bridge.md](docs/remote-audio-bridge.md).
 
 ## NATS
 
