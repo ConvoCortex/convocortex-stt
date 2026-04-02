@@ -217,11 +217,11 @@ words   = ["hide"] # Exact match only; hides the STT console, same target as shi
 
 [voice_commands.buffer_release]
 enabled = true
-words   = ["buffer"]
+words   = ["buffer", "baser", "buzzer"]
 
 [voice_commands.buffer_clear]
 enabled = true
-words   = ["clear"]
+words   = ["clear", "claire"]
 
 # ── Sleep / Wake ─────────────────────────────────────────────────────────────
 # Two modes:

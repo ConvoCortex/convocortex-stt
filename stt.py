@@ -8,6 +8,7 @@ Output via configurable local handlers. NATS optional.
 
 import copy
 import _thread
+import math
 import sys
 import time
 import queue
