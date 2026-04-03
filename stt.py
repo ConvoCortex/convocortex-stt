@@ -1442,7 +1442,8 @@ def main(args=None):
         key = str(backend_name or "").strip().lower().replace("-", "_")
         value = MICROPHONE_CFG.get(key, {})
         options = dict(value or {}) if isinstance(value, dict) else {}
-        options["runtime_role"] = runtime_role
+        if key in {"parakeet_tensorrt", "parakeet_cuda"}:
+            options["runtime_role"] = runtime_role
         if key == "parakeet_tensorrt":
             if runtime_role == "microphone-realtime":
                 buckets = options.get("trt_realtime_profile_buckets")
@@ -1456,23 +1457,35 @@ def main(args=None):
 
     final_backend_options = _backend_options_for(FINAL_BACKEND, "microphone-final")
     realtime_backend_options = _backend_options_for(REALTIME_BACKEND, "microphone-realtime")
-    shared_model_signature = (
+    def _reuse_signature(backend_name: str, model_name: str, device: str, compute: str, backend_options: dict) -> tuple:
+        backend_key = str(backend_name).strip().lower()
+        signature_options = dict(backend_options or {})
+        if backend_key not in {"parakeet-tensorrt", "parakeet-cuda"}:
+            signature_options.pop("runtime_role", None)
+            signature_options.pop("trt_profile_buckets", None)
+        return (
+            backend_key,
+            str(model_name).strip(),
+            str(device).strip().lower(),
+            str(compute).strip().lower(),
+            float(WHISPER_NO_SPEECH_THRESHOLD),
+            float(WHISPER_LOG_PROB_THRESHOLD),
+            repr(sorted(signature_options.items())),
+        )
+
+    shared_model_signature = _reuse_signature(
         str(FINAL_BACKEND).strip().lower(),
-        str(FINAL_MODEL).strip(),
-        str(FINAL_DEVICE).strip().lower(),
-        str(FINAL_COMPUTE).strip().lower(),
-        float(WHISPER_NO_SPEECH_THRESHOLD),
-        float(WHISPER_LOG_PROB_THRESHOLD),
-        repr(sorted(final_backend_options.items())),
+        FINAL_MODEL,
+        FINAL_DEVICE,
+        FINAL_COMPUTE,
+        final_backend_options,
     )
-    realtime_model_signature = (
+    realtime_model_signature = _reuse_signature(
         str(REALTIME_BACKEND).strip().lower(),
-        str(REALTIME_MODEL).strip(),
-        str(REALTIME_DEVICE).strip().lower(),
-        str("default" if REALTIME_DEVICE == "cpu" else FINAL_COMPUTE).strip().lower(),
-        float(WHISPER_NO_SPEECH_THRESHOLD),
-        float(WHISPER_LOG_PROB_THRESHOLD),
-        repr(sorted(realtime_backend_options.items())),
+        REALTIME_MODEL,
+        REALTIME_DEVICE,
+        "default" if REALTIME_DEVICE == "cpu" else FINAL_COMPUTE,
+        realtime_backend_options,
     )
     reuse_realtime_model = bool(REALTIME_MODEL) and realtime_model_signature == shared_model_signature
     if str(FINAL_BACKEND).strip().lower() == "parakeet-tensorrt" and str(REALTIME_BACKEND).strip().lower() == "parakeet-tensorrt":
