@@ -37,22 +37,6 @@ Use convocortex-stt.exe to launch STT conveniently.
 
 The launcher expects `.venv` to exist, so run `uv sync` first.
 
-If you want to rebuild the launcher yourself, the source is:
-- [`convocortex-stt-launcher.cs`](convocortex-stt-launcher.cs)
-- [`convocortex-stt-launcher.csproj`](convocortex-stt-launcher.csproj)
-
-Build command:
-
-```powershell
-dotnet publish .\convocortex-stt-launcher.csproj -c Release -o .\launcher-publish
-```
-
-That produces:
-
-```text
-.\launcher-publish\convocortex-stt.exe
-```
-
 If `audio.device_setup_initialized = false` or the device profiles file is
 missing, the app runs interactive device setup so you can pick the input and
 output devices in the order they should be used for startup and runtime cycling. To rerun it
@@ -68,9 +52,8 @@ Order matters there:
 So if you edit `device-profiles.toml` manually, reordering the arrays changes
 both startup behavior and runtime cycling order.
 
-NATS Python client dependency is included by default.
 
-`config.toml` has is configured quite well, but you are free to tweak it as you wish.
+`config.toml` is configured quite well, but you are free to tweak it as you wish.
 
 The default `hotkeys.console_toggle = "shift+f8"` hides/shows that same console window. A tray icon is also created so you can show/hide the console or exit STT without relying on the taskbar state of the console host. When you bring the console back, `Ctrl+C` kills the process as usual.
 
@@ -237,6 +220,24 @@ Direct launch command:
 
 ```bat
 D:\projects\convocortex\convocortex-stt\convocortex-stt.exe
+```
+
+## Build launcher
+
+If you want to rebuild the launcher yourself, the source is:
+- [`convocortex-stt-launcher.cs`](convocortex-stt-launcher.cs)
+- [`convocortex-stt-launcher.csproj`](convocortex-stt-launcher.csproj)
+
+Build command:
+
+```powershell
+dotnet publish .\convocortex-stt-launcher.csproj -c Release -o .\launcher-publish
+```
+
+That produces:
+
+```text
+.\launcher-publish\convocortex-stt.exe
 ```
 
 ## Configuration

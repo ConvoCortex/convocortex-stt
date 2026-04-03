@@ -3,6 +3,7 @@
 .uv-cache/
 .tmp/
 __pycache__/
+inbox/
 *.pyc
 *.pyo
 .pytest_cache/
