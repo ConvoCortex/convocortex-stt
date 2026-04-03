@@ -83,6 +83,8 @@ export_dir = ".tmp/onnx-cache"
 trt_cache_dir = ".tmp/trt-cache"
 trt_fp16_enable = true
 max_threads = 0
+trt_realtime_profile_buckets = ["rt-short:16:96:192", "rt-medium:16:192:384", "rt-long:16:384:768"]
+trt_final_profile_buckets = ["final-short:16:256:512", "final-medium:16:512:896", "final-long:16:896:1280"]
 
 [realtime]
 # check_interval: how often (seconds) a partial transcription is triggered during speech
@@ -127,6 +129,7 @@ export_dir = ".tmp/onnx-cache"
 trt_cache_dir = ".tmp/trt-cache"
 trt_fp16_enable = true
 max_threads = 0
+trt_profile_buckets = ["file-medium:16:512:1024", "file-long:16:1105:1536", "file-xlong:16:1536:2304"]
 
 # ── Transcript filters - for handling backend/model hallucinations ─────────────────────────────────────────────────
 # Exact phrases to swallow completely from both partial and final output.

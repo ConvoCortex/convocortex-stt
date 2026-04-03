@@ -5,7 +5,6 @@ import json
 import logging
 import os
 import re
-import shutil
 import sys
 import threading
 import time
@@ -235,6 +234,7 @@ def resolve_settings(
     backend_key = resolved_backend.lower().replace("-", "_")
     raw_backend_options = file_cfg.get(backend_key, {})
     backend_options = dict(raw_backend_options or {}) if isinstance(raw_backend_options, dict) else {}
+    backend_options["runtime_role"] = "file-drop"
     resolved_model = str(final_model or file_cfg.get("model") or "").strip()
     resolved_device = str(final_device or file_cfg.get("device") or "").strip()
     resolved_compute = str(final_compute or file_cfg.get("compute") or "").strip()
@@ -326,6 +326,10 @@ class FileDropWorker:
                 log_prob_threshold=self.settings.log_prob_threshold,
                 backend_options=self.settings.backend_options,
             )
+            try:
+                self._backend.warmup(np.zeros(self.rate, dtype=np.float32))
+            except Exception as exc:
+                logger.warning("[file-drop] warmup failed: %s", exc)
 
     def _discover_candidates(self) -> list[Path]:
         input_dir = self.settings.input_dir
@@ -375,6 +379,11 @@ class FileDropWorker:
         ]
         if metadata.get("onnx_provider_active"):
             header_lines.insert(4, f"# onnx_provider_active: {metadata['onnx_provider_active']}")
+        if metadata.get("trt_profile_bucket"):
+            header_lines.insert(5, f"# trt_profile_bucket: {metadata['trt_profile_bucket']}")
+        if metadata.get("trt_engine_cache_hit") is not None and metadata.get("trt_engine_cache_dir"):
+            header_lines.insert(6, f"# trt_engine_cache_hit: {str(metadata['trt_engine_cache_hit']).lower()}")
+            header_lines.insert(7, f"# trt_engine_cache_dir: {metadata['trt_engine_cache_dir']}")
         if metadata.get("encoder_inference_ms") is not None:
             header_lines.insert(9, f"# encoder_inference_ms: {metadata['encoder_inference_ms']}")
         if metadata.get("decoder_inference_ms") is not None:
@@ -421,9 +430,11 @@ class FileDropWorker:
         metrics = dict(getattr(result, "metrics", {}) or {})
         if metrics.get("onnx_provider_active"):
             logger.info(
-                "[file-drop] %s provider=%s encoder_ms=%s decoder_ms=%s",
+                "[file-drop] %s provider=%s bucket=%s cache_hit=%s encoder_ms=%s decoder_ms=%s",
                 source_name,
                 metrics.get("onnx_provider_active"),
+                metrics.get("trt_profile_bucket", ""),
+                metrics.get("trt_engine_cache_hit", ""),
                 metrics.get("encoder_inference_ms", ""),
                 metrics.get("decoder_inference_ms", ""),
             )

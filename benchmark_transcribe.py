@@ -25,16 +25,16 @@ class BenchmarkSpec:
 
 DEFAULT_SPECS = (
     BenchmarkSpec("parakeet", "parakeet", {}),
-    BenchmarkSpec("parakeet-cuda", "parakeet-cuda", {}),
     BenchmarkSpec("parakeet-tensorrt", "parakeet-tensorrt", {}),
 )
 
 
 def _default_input() -> Path:
-    candidates = sorted((ROOT / "transcribe-input").glob("*"))
-    for candidate in candidates:
-        if candidate.is_file():
-            return candidate
+    for search_root in (ROOT / "files" / "done", ROOT / "transcribe-input"):
+        candidates = sorted(search_root.glob("*"))
+        for candidate in candidates:
+            if candidate.is_file():
+                return candidate
     raise FileNotFoundError("No input files found under transcribe-input/")
 
 
@@ -49,6 +49,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--input", default="", help="Audio file to benchmark")
     parser.add_argument("--repeat", type=int, default=3, help="Measured repetitions per backend")
     parser.add_argument("--warmup", type=int, default=1, help="Warmup repetitions per backend")
+    parser.add_argument("--backends", default="parakeet,parakeet-tensorrt", help="Comma-separated backend list to benchmark")
     return parser
 
 
@@ -68,12 +69,24 @@ def main(argv: list[str] | None = None) -> int:
     language = str(microphone_cfg.get("language", "")).strip()
     no_speech_threshold = float(microphone_cfg.get("no_speech_threshold", 0.6))
     log_prob_threshold = float(microphone_cfg.get("log_prob_threshold", -1.0))
+    requested_backends = [item.strip() for item in str(args.backends or "").split(",") if item.strip()]
+    spec_map = {spec.backend: spec for spec in DEFAULT_SPECS}
+    specs = [spec_map[name] for name in requested_backends if name in spec_map]
+    if not specs:
+        raise ValueError("No supported benchmark backends were selected")
+
+    def _backend_options_for(backend_name: str) -> dict[str, Any]:
+        key = str(backend_name or "").strip().lower().replace("-", "_")
+        value = microphone_cfg.get(key, {})
+        options = dict(value or {}) if isinstance(value, dict) else {}
+        options["runtime_role"] = "benchmark"
+        return options
 
     timestamp = time.strftime("%Y%m%d_%H%M%S")
     output_path = _results_dir() / f"{timestamp}.json"
     results: list[dict[str, Any]] = []
 
-    for spec in DEFAULT_SPECS:
+    for spec in specs:
         try:
             backend = load_backend(
                 backend_name=spec.backend,
@@ -82,7 +95,7 @@ def main(argv: list[str] | None = None) -> int:
                 compute_type=final_compute,
                 no_speech_threshold=no_speech_threshold,
                 log_prob_threshold=log_prob_threshold,
-                backend_options=spec.backend_options,
+                backend_options=_backend_options_for(spec.backend) | spec.backend_options,
             )
             for _ in range(max(0, int(args.warmup))):
                 backend.transcribe(audio, language=language, beam_size=5)

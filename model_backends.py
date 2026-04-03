@@ -174,6 +174,33 @@ class TranscriptResult:
     metrics: dict[str, Any] | None = None
 
 
+@dataclass(frozen=True)
+class TensorRTProfileBucket:
+    name: str
+    min_length: int
+    opt_length: int
+    max_length: int
+
+
+@dataclass
+class EncoderRuntimeSession:
+    bucket: TensorRTProfileBucket | None
+    provider_label: str
+    active_provider: str
+    cache_dir: Path | None
+    cache_hit: bool
+    session: Any
+    input_names: list[str]
+    output_names: list[str]
+
+
+@dataclass
+class EncoderRuntimePlan:
+    bucket: TensorRTProfileBucket | None
+    cache_dir: Path | None
+    cache_hit: bool
+
+
 class TranscriptionBackend:
     name = "unknown"
 
@@ -396,22 +423,96 @@ def _parse_shape_profile(value: str) -> dict[str, tuple[int, ...]]:
     return parsed
 
 
-def _resolve_onnx_provider(options: dict[str, Any]) -> tuple[list[str], list[dict[str, Any]] | None, str]:
+def _parse_trt_profile_bucket(value: Any, index: int) -> TensorRTProfileBucket | None:
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    parts = [part.strip() for part in raw.split(":") if str(part).strip()]
+    if len(parts) == 3:
+        name = f"bucket-{index + 1}"
+        min_length, opt_length, max_length = (int(parts[0]), int(parts[1]), int(parts[2]))
+    elif len(parts) == 4:
+        name = parts[0]
+        min_length, opt_length, max_length = (int(parts[1]), int(parts[2]), int(parts[3]))
+    else:
+        raise ValueError(
+            "TensorRT profile bucket entries must be 'name:min:opt:max' or 'min:opt:max'"
+        )
+    if min_length <= 0 or opt_length <= 0 or max_length <= 0:
+        raise ValueError("TensorRT profile bucket lengths must be positive integers")
+    if not (min_length <= opt_length <= max_length):
+        raise ValueError("TensorRT profile bucket must satisfy min <= opt <= max")
+    return TensorRTProfileBucket(name=name, min_length=min_length, opt_length=opt_length, max_length=max_length)
+
+
+def _default_trt_profile_buckets(runtime_role: str) -> list[TensorRTProfileBucket]:
+    role = str(runtime_role or "").strip().lower()
+    if role == "microphone-realtime":
+        return [
+            TensorRTProfileBucket("rt-short", 16, 96, 192),
+            TensorRTProfileBucket("rt-medium", 16, 192, 384),
+            TensorRTProfileBucket("rt-long", 16, 384, 768),
+        ]
+    if role == "microphone-final":
+        return [
+            TensorRTProfileBucket("final-short", 16, 256, 512),
+            TensorRTProfileBucket("final-medium", 16, 512, 896),
+            TensorRTProfileBucket("final-long", 16, 896, 1280),
+        ]
+    if role == "benchmark":
+        return [
+            TensorRTProfileBucket("bench-short", 16, 256, 512),
+            TensorRTProfileBucket("bench-medium", 16, 768, 1280),
+            TensorRTProfileBucket("bench-long", 16, 1105, 1664),
+        ]
+    return [
+        TensorRTProfileBucket("file-medium", 16, 512, 1024),
+        TensorRTProfileBucket("file-long", 16, 1105, 1536),
+        TensorRTProfileBucket("file-xlong", 16, 1536, 2304),
+    ]
+
+
+def _resolve_trt_profile_buckets(options: dict[str, Any], runtime_role: str) -> list[TensorRTProfileBucket]:
+    configured = options.get("trt_profile_buckets")
+    if isinstance(configured, (list, tuple)):
+        buckets = [
+            bucket
+            for idx, item in enumerate(configured)
+            for bucket in [_parse_trt_profile_bucket(item, idx)]
+            if bucket is not None
+        ]
+        if buckets:
+            return buckets
+    return _default_trt_profile_buckets(runtime_role)
+
+
+def _resolve_onnx_provider(
+    options: dict[str, Any],
+    *,
+    bucket: TensorRTProfileBucket | None = None,
+    model_key: str = "",
+    runtime_role: str = "",
+) -> tuple[list[str], list[dict[str, Any]] | None, str, Path | None, bool]:
     onnxruntime = _import_onnxruntime_with_cuda_preload()
     requested = str(options.get("provider", "auto")).strip().lower()
     device_id = int(options.get("device_id", 0))
     available = set(onnxruntime.get_available_providers())
     extra = dict(options.get("provider_options", {}) or {})
+    role_key = str(runtime_role or "default").strip().lower().replace(" ", "-") or "default"
+    bucket_key = (bucket.name if bucket is not None else "default").strip().lower().replace(" ", "-")
     if requested in {"tensorrt", "tensorrtexecutionprovider", "trt"} and "TensorrtExecutionProvider" in available:
-        cache_dir = _resolve_path_like(options.get("trt_cache_dir"), _RUNTIME_TEMP_DIR / "trt-cache")
+        cache_root = _resolve_path_like(options.get("trt_cache_dir"), _RUNTIME_TEMP_DIR / "trt-cache")
+        cache_dir = cache_root / role_key / bucket_key / (model_key or "model")
         cache_dir.mkdir(parents=True, exist_ok=True)
-        profile_min = str(options.get("trt_profile_min_shapes", "")).strip()
-        profile_opt = str(options.get("trt_profile_opt_shapes", "")).strip()
-        profile_max = str(options.get("trt_profile_max_shapes", "")).strip()
-        if not (profile_min and profile_opt and profile_max):
-            profile_min = "audio_signal:1x128x16,length:1"
-            profile_opt = "audio_signal:1x128x1024,length:1"
-            profile_max = "audio_signal:1x128x1536,length:1"
+        if bucket is not None:
+            profile_min = f"audio_signal:1x128x{bucket.min_length},length:1"
+            profile_opt = f"audio_signal:1x128x{bucket.opt_length},length:1"
+            profile_max = f"audio_signal:1x128x{bucket.max_length},length:1"
+        else:
+            profile_min = str(options.get("trt_profile_min_shapes", "")).strip() or "audio_signal:1x128x16,length:1"
+            profile_opt = str(options.get("trt_profile_opt_shapes", "")).strip() or "audio_signal:1x128x1024,length:1"
+            profile_max = str(options.get("trt_profile_max_shapes", "")).strip() or "audio_signal:1x128x1536,length:1"
+        cache_hit = any(cache_dir.glob("*.engine")) or any(cache_dir.glob("*.profile")) or any(cache_dir.glob("*.cache"))
         trt_options = {
             "device_id": device_id,
             "trt_fp16_enable": bool(options.get("trt_fp16_enable", True)),
@@ -424,21 +525,24 @@ def _resolve_onnx_provider(options: dict[str, Any]) -> tuple[list[str], list[dic
             "trt_profile_opt_shapes": profile_opt,
             "trt_profile_max_shapes": profile_max,
         } | extra
-        return ["TensorrtExecutionProvider", "CUDAExecutionProvider"], [trt_options, {"device_id": device_id}], "tensorrt"
+        return ["TensorrtExecutionProvider", "CUDAExecutionProvider"], [trt_options, {"device_id": device_id}], "tensorrt", cache_dir, cache_hit
     if requested in {"cuda", "cudaexecutionprovider"} and "CUDAExecutionProvider" in available:
-        return ["CUDAExecutionProvider"], [{"device_id": device_id} | extra], "cuda"
+        return ["CUDAExecutionProvider"], [{"device_id": device_id} | extra], "cuda", None, False
     if requested in {"cpu", "cpuexecutionprovider"}:
-        return ["CPUExecutionProvider"], None, "cpu"
+        return ["CPUExecutionProvider"], None, "cpu", None, False
     if "TensorrtExecutionProvider" in available:
-        cache_dir = _resolve_path_like(options.get("trt_cache_dir"), _RUNTIME_TEMP_DIR / "trt-cache")
+        cache_root = _resolve_path_like(options.get("trt_cache_dir"), _RUNTIME_TEMP_DIR / "trt-cache")
+        cache_dir = cache_root / role_key / bucket_key / (model_key or "model")
         cache_dir.mkdir(parents=True, exist_ok=True)
-        profile_min = str(options.get("trt_profile_min_shapes", "")).strip()
-        profile_opt = str(options.get("trt_profile_opt_shapes", "")).strip()
-        profile_max = str(options.get("trt_profile_max_shapes", "")).strip()
-        if not (profile_min and profile_opt and profile_max):
-            profile_min = "audio_signal:1x128x16,length:1"
-            profile_opt = "audio_signal:1x128x1024,length:1"
-            profile_max = "audio_signal:1x128x1536,length:1"
+        if bucket is not None:
+            profile_min = f"audio_signal:1x128x{bucket.min_length},length:1"
+            profile_opt = f"audio_signal:1x128x{bucket.opt_length},length:1"
+            profile_max = f"audio_signal:1x128x{bucket.max_length},length:1"
+        else:
+            profile_min = str(options.get("trt_profile_min_shapes", "")).strip() or "audio_signal:1x128x16,length:1"
+            profile_opt = str(options.get("trt_profile_opt_shapes", "")).strip() or "audio_signal:1x128x1024,length:1"
+            profile_max = str(options.get("trt_profile_max_shapes", "")).strip() or "audio_signal:1x128x1536,length:1"
+        cache_hit = any(cache_dir.glob("*.engine")) or any(cache_dir.glob("*.profile")) or any(cache_dir.glob("*.cache"))
         trt_options = {
             "device_id": device_id,
             "trt_fp16_enable": bool(options.get("trt_fp16_enable", True)),
@@ -451,10 +555,10 @@ def _resolve_onnx_provider(options: dict[str, Any]) -> tuple[list[str], list[dic
             "trt_profile_opt_shapes": profile_opt,
             "trt_profile_max_shapes": profile_max,
         } | extra
-        return ["TensorrtExecutionProvider", "CUDAExecutionProvider"], [trt_options, {"device_id": device_id}], "tensorrt"
+        return ["TensorrtExecutionProvider", "CUDAExecutionProvider"], [trt_options, {"device_id": device_id}], "tensorrt", cache_dir, cache_hit
     if "CUDAExecutionProvider" in available:
-        return ["CUDAExecutionProvider"], [{"device_id": device_id} | extra], "cuda"
-    return ["CPUExecutionProvider"], None, "cpu"
+        return ["CUDAExecutionProvider"], [{"device_id": device_id} | extra], "cuda", None, False
+    return ["CPUExecutionProvider"], None, "cpu", None, False
 
 
 def _resolve_path_like(value: Any, default: Path) -> Path:
@@ -480,48 +584,57 @@ class ParakeetEncoderRuntimeBackend(TranscriptionBackend):
         self._transcribe_lock = threading.Lock()
         self.provider_label_requested = str(provider_label).strip().lower()
         self.options = _normalize_backend_options(options)
+        self.runtime_role = str(self.options.get("runtime_role", "")).strip().lower()
         self.base = ParakeetBackend(model_name=model_name, device=device)
         self.model = self.base.model
         self.device = self.base.device
         self.onnxruntime = _import_onnxruntime_with_cuda_preload()
-        self.model_key = _hash_key(model_name, self.device, self.provider_label_requested)
+        self.model_key = _hash_key(model_name, self.device, self.provider_label_requested, self.runtime_role)
         self.encoder_path = self._ensure_encoder_export()
-        self.providers, self.provider_options, self.provider_label = _resolve_onnx_provider(
-            {"provider": self.provider_label_requested, **self.options}
-        )
-        session_options = self.onnxruntime.SessionOptions()
-        session_options.log_severity_level = 3
-        max_threads = int(self.options.get("max_threads", 0))
-        if max_threads > 0:
-            session_options.inter_op_num_threads = max_threads
-            session_options.intra_op_num_threads = max_threads
-        self.encoder_session = self.onnxruntime.InferenceSession(
-            str(self.encoder_path),
-            sess_options=session_options,
-            providers=self.providers,
-            provider_options=self.provider_options,
-        )
-        self.encoder_input_names = [node.name for node in self.encoder_session.get_inputs()]
-        self.encoder_output_names = [node.name for node in self.encoder_session.get_outputs()]
+        self.session_plans = self._build_session_plans()
+        self._session_by_key: dict[str, EncoderRuntimeSession] = {}
+        self.encoder_session = self._get_or_create_session(self.session_plans[0]).session
+        self.providers = list(self.encoder_session.get_providers())
+        self.provider_options = None
+        self.provider_label = self._get_or_create_session(self.session_plans[0]).provider_label
+        self.encoder_input_names = list(self._get_or_create_session(self.session_plans[0]).input_names)
+        self.encoder_output_names = list(self._get_or_create_session(self.session_plans[0]).output_names)
 
     def warmup(self, audio: np.ndarray) -> None:
         del audio
         if self.provider_label != "tensorrt":
             return None
-        opt_profile = _parse_shape_profile(str(self.options.get("trt_profile_opt_shapes", "")).strip())
-        audio_shape = opt_profile.get(self.encoder_input_names[0], (1, 128, 512))
-        length_shape = opt_profile.get(self.encoder_input_names[1], (1,))
-        if len(audio_shape) != 3:
-            audio_shape = (1, 128, 512)
-        if len(length_shape) != 1:
-            length_shape = (1,)
-        length_value = np.full(length_shape, audio_shape[-1], dtype=np.int64)
-        dummy_inputs = {
-            self.encoder_input_names[0]: np.zeros(audio_shape, dtype=np.float32),
-            self.encoder_input_names[1]: length_value,
-        }
-        self.encoder_session.run(self.encoder_output_names[:2], dummy_inputs)
+        for plan in self._warmup_plans():
+            runtime_session = self._get_or_create_session(plan)
+            bucket = runtime_session.bucket
+            opt_length = bucket.opt_length if bucket is not None else 512
+            dummy_inputs = {
+                runtime_session.input_names[0]: np.zeros((1, 128, opt_length), dtype=np.float32),
+                runtime_session.input_names[1]: np.asarray([opt_length], dtype=np.int64),
+            }
+            runtime_session.session.run(runtime_session.output_names[:2], dummy_inputs)
         return None
+
+    def startup_logs(self) -> list[str]:
+        lines: list[str] = []
+        bucket_desc = ", ".join(
+            f"{plan.bucket.name}<={plan.bucket.max_length}"
+            for plan in self.session_plans
+            if plan.bucket is not None
+        )
+        if not bucket_desc:
+            bucket_desc = "default"
+        lines.append(
+            f"{self.name} role={self.runtime_role or 'default'} provider={self.provider_label} "
+            f"buckets={bucket_desc}"
+        )
+        for plan in self.session_plans:
+            if plan.bucket is None:
+                continue
+            lines.append(
+                f"{self.name} bucket={plan.bucket.name} cache_dir={plan.cache_dir} cache_hit={str(plan.cache_hit).lower()}"
+            )
+        return lines
 
     def _ensure_encoder_export(self) -> Path:
         export_dir = _resolve_path_like(self.options.get("export_dir"), _RUNTIME_TEMP_DIR / "onnx-cache")
@@ -535,6 +648,95 @@ class ParakeetEncoderRuntimeBackend(TranscriptionBackend):
                     self.model.encoder.export(str(encoder_path), check_trace=False)
         return encoder_path
 
+    def _build_session_plans(self) -> list[EncoderRuntimePlan]:
+        if self.provider_label_requested != "tensorrt":
+            return [EncoderRuntimePlan(bucket=None, cache_dir=None, cache_hit=False)]
+        buckets = _resolve_trt_profile_buckets(self.options, self.runtime_role)
+        plans: list[EncoderRuntimePlan] = []
+        role_key = str(self.runtime_role or "default").strip().lower().replace(" ", "-") or "default"
+        for bucket in buckets:
+            cache_root = _resolve_path_like(self.options.get("trt_cache_dir"), _RUNTIME_TEMP_DIR / "trt-cache")
+            cache_dir = cache_root / role_key / bucket.name / self.model_key
+            cache_hit = any(cache_dir.glob("*.engine")) or any(cache_dir.glob("*.profile")) or any(cache_dir.glob("*.cache")) or any(cache_dir.glob("*.timing"))
+            plans.append(EncoderRuntimePlan(bucket=bucket, cache_dir=cache_dir, cache_hit=cache_hit))
+        return plans
+
+    def _warmup_plans(self) -> list[EncoderRuntimePlan]:
+        if len(self.session_plans) <= 1:
+            return self.session_plans
+        role = self.runtime_role
+        if role == "microphone-realtime":
+            target_names = {"rt-medium"}
+        elif role == "microphone-final":
+            target_names = {"final-medium"}
+        elif role == "benchmark":
+            target_names = {"bench-medium", "file-long"}
+        else:
+            target_names = {"file-long"}
+        selected = [plan for plan in self.session_plans if plan.bucket is not None and plan.bucket.name in target_names]
+        return selected or [self.session_plans[min(1, len(self.session_plans) - 1)]]
+
+    def _plan_key(self, bucket: TensorRTProfileBucket | None) -> str:
+        return bucket.name if bucket is not None else "default"
+
+    def _build_encoder_session(self, plan: EncoderRuntimePlan) -> EncoderRuntimeSession:
+        session_options = self.onnxruntime.SessionOptions()
+        session_options.log_severity_level = 3
+        max_threads = int(self.options.get("max_threads", 0))
+        if max_threads > 0:
+            session_options.inter_op_num_threads = max_threads
+            session_options.intra_op_num_threads = max_threads
+        providers, provider_options, provider_label, cache_dir, cache_hit = _resolve_onnx_provider(
+            {"provider": self.provider_label_requested, **self.options},
+            bucket=plan.bucket,
+            model_key=self.model_key,
+            runtime_role=self.runtime_role,
+        )
+        session = self.onnxruntime.InferenceSession(
+            str(self.encoder_path),
+            sess_options=session_options,
+            providers=providers,
+            provider_options=provider_options,
+        )
+        return EncoderRuntimeSession(
+            bucket=plan.bucket,
+            provider_label=provider_label,
+            active_provider=session.get_providers()[0] if session.get_providers() else "",
+            cache_dir=cache_dir or plan.cache_dir,
+            cache_hit=cache_hit or plan.cache_hit,
+            session=session,
+            input_names=[node.name for node in session.get_inputs()],
+            output_names=[node.name for node in session.get_outputs()],
+        )
+
+    def _get_or_create_session(self, plan: EncoderRuntimePlan) -> EncoderRuntimeSession:
+        key = self._plan_key(plan.bucket)
+        existing = self._session_by_key.get(key)
+        if existing is not None:
+            return existing
+        created = self._build_encoder_session(plan)
+        self._session_by_key[key] = created
+        return created
+
+    def _select_runtime_session(self, encoded_length: int) -> EncoderRuntimeSession:
+        if len(self.session_plans) == 1:
+            return self._get_or_create_session(self.session_plans[0])
+        for plan in self.session_plans:
+            bucket = plan.bucket
+            if bucket is not None and encoded_length <= bucket.max_length:
+                return self._get_or_create_session(plan)
+        overflow_plan = EncoderRuntimePlan(
+            bucket=TensorRTProfileBucket(
+                name=f"overflow-{encoded_length}",
+                min_length=16,
+                opt_length=encoded_length,
+                max_length=max(encoded_length, 16),
+            ),
+            cache_dir=None,
+            cache_hit=False,
+        )
+        return self._get_or_create_session(overflow_plan)
+
     def transcribe(self, audio: np.ndarray, language: str, beam_size: int) -> TranscriptResult:
         del language, beam_size
         with self._transcribe_lock:
@@ -543,12 +745,14 @@ class ParakeetEncoderRuntimeBackend(TranscriptionBackend):
             audio_length = torch.tensor([audio_tensor.shape[-1]], dtype=torch.int64, device=model_device)
             with torch.inference_mode():
                 processed_signal, processed_signal_len = self.model.preprocessor(input_signal=audio_tensor, length=audio_length)
+            encoded_length = int(np.asarray(processed_signal_len.detach().cpu().numpy()).reshape(-1)[0])
+            runtime_session = self._select_runtime_session(encoded_length)
             encoder_inputs = {
-                self.encoder_input_names[0]: processed_signal.detach().cpu().numpy(),
-                self.encoder_input_names[1]: processed_signal_len.detach().cpu().numpy().astype(np.int64, copy=False),
+                runtime_session.input_names[0]: processed_signal.detach().cpu().numpy(),
+                runtime_session.input_names[1]: processed_signal_len.detach().cpu().numpy().astype(np.int64, copy=False),
             }
             encoder_started = time.perf_counter()
-            encoder_output, encoder_lengths = self.encoder_session.run(self.encoder_output_names[:2], encoder_inputs)
+            encoder_output, encoder_lengths = runtime_session.session.run(runtime_session.output_names[:2], encoder_inputs)
             encoder_ms = (time.perf_counter() - encoder_started) * 1000.0
             encoder_output_t = torch.from_numpy(np.asarray(encoder_output)).to(model_device)
             encoder_lengths_t = torch.from_numpy(np.asarray(encoder_lengths)).to(model_device)
@@ -565,10 +769,15 @@ class ParakeetEncoderRuntimeBackend(TranscriptionBackend):
                 metrics={
                     "onnx_provider_requested": self.provider_label_requested,
                     "onnx_provider_resolved": self.provider_label,
-                    "onnx_provider_active": self.encoder_session.get_providers()[0] if self.encoder_session.get_providers() else "",
+                    "onnx_provider_active": runtime_session.active_provider,
                     "encoder_inference_ms": round(encoder_ms, 3),
                     "decoder_inference_ms": round(decoder_ms, 3),
                     "onnx_encoder_path": str(self.encoder_path),
+                    "trt_profile_bucket": runtime_session.bucket.name if runtime_session.bucket is not None else "",
+                    "trt_profile_max_length": runtime_session.bucket.max_length if runtime_session.bucket is not None else None,
+                    "trt_encoded_length": encoded_length,
+                    "trt_engine_cache_dir": str(runtime_session.cache_dir) if runtime_session.cache_dir is not None else "",
+                    "trt_engine_cache_hit": runtime_session.cache_hit,
                 },
             )
 

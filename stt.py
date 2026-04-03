@@ -1438,13 +1438,24 @@ def main(args=None):
     load_errors = []
     load_errors_lock = threading.Lock()
     warmup_audio = np.zeros(RATE, dtype=np.float32)
-    def _backend_options_for(backend_name: str) -> dict:
+    def _backend_options_for(backend_name: str, runtime_role: str) -> dict:
         key = str(backend_name or "").strip().lower().replace("-", "_")
         value = MICROPHONE_CFG.get(key, {})
-        return dict(value or {}) if isinstance(value, dict) else {}
+        options = dict(value or {}) if isinstance(value, dict) else {}
+        options["runtime_role"] = runtime_role
+        if key == "parakeet_tensorrt":
+            if runtime_role == "microphone-realtime":
+                buckets = options.get("trt_realtime_profile_buckets")
+                if isinstance(buckets, list):
+                    options["trt_profile_buckets"] = list(buckets)
+            elif runtime_role == "microphone-final":
+                buckets = options.get("trt_final_profile_buckets")
+                if isinstance(buckets, list):
+                    options["trt_profile_buckets"] = list(buckets)
+        return options
 
-    final_backend_options = _backend_options_for(FINAL_BACKEND)
-    realtime_backend_options = _backend_options_for(REALTIME_BACKEND)
+    final_backend_options = _backend_options_for(FINAL_BACKEND, "microphone-final")
+    realtime_backend_options = _backend_options_for(REALTIME_BACKEND, "microphone-realtime")
     shared_model_signature = (
         str(FINAL_BACKEND).strip().lower(),
         str(FINAL_MODEL).strip(),
@@ -1464,6 +1475,8 @@ def main(args=None):
         repr(sorted(realtime_backend_options.items())),
     )
     reuse_realtime_model = bool(REALTIME_MODEL) and realtime_model_signature == shared_model_signature
+    if str(FINAL_BACKEND).strip().lower() == "parakeet-tensorrt" and str(REALTIME_BACKEND).strip().lower() == "parakeet-tensorrt":
+        reuse_realtime_model = False
 
     def record_load_error(message: str):
         with load_errors_lock:
@@ -1485,6 +1498,8 @@ def main(args=None):
             )
             m.warmup(warmup_audio)
             resources['final_model'] = m
+            for line in getattr(m, "startup_logs", lambda: [])():
+                logger.info(f"[backend] {line}")
             logger.info("Final model ready.")
         except Exception as e:
             record_load_error(f"Final load error: {e}")
@@ -1511,6 +1526,8 @@ def main(args=None):
             )
             m.warmup(warmup_audio)
             resources['realtime_model'] = m
+            for line in getattr(m, "startup_logs", lambda: [])():
+                logger.info(f"[backend] {line}")
             logger.info("Realtime model ready.")
         except Exception as e:
             record_load_error(f"Realtime load error: {e}")
