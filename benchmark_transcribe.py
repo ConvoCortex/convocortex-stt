@@ -25,8 +25,8 @@ class BenchmarkSpec:
 
 DEFAULT_SPECS = (
     BenchmarkSpec("parakeet", "parakeet", {}),
-    BenchmarkSpec("parakeet-onnx-cuda", "parakeet-onnx", {"provider": "cuda"}),
-    BenchmarkSpec("parakeet-onnx-tensorrt", "parakeet-onnx", {"provider": "tensorrt"}),
+    BenchmarkSpec("parakeet-cuda", "parakeet-cuda", {}),
+    BenchmarkSpec("parakeet-tensorrt", "parakeet-tensorrt", {}),
 )
 
 
@@ -61,13 +61,13 @@ def main(argv: list[str] | None = None) -> int:
         raise FileNotFoundError(f"Benchmark input not found: {input_path}")
 
     audio, audio_meta = _load_audio_for_transcription(input_path, int(cfg.get("audio", {}).get("rate", 16000)))
-    models_cfg = cfg.get("models", {}) or {}
-    final_model = str(models_cfg.get("final", "")).strip()
-    final_device = str(models_cfg.get("final_device", "auto")).strip()
-    final_compute = str(models_cfg.get("final_compute", "default")).strip()
-    language = str(models_cfg.get("language", "")).strip()
-    no_speech_threshold = float(models_cfg.get("no_speech_threshold", 0.6))
-    log_prob_threshold = float(models_cfg.get("log_prob_threshold", -1.0))
+    microphone_cfg = cfg.get("microphone", {}) or {}
+    final_model = str(microphone_cfg.get("final", "")).strip()
+    final_device = str(microphone_cfg.get("final_device", "auto")).strip()
+    final_compute = str(microphone_cfg.get("final_compute", "default")).strip()
+    language = str(microphone_cfg.get("language", "")).strip()
+    no_speech_threshold = float(microphone_cfg.get("no_speech_threshold", 0.6))
+    log_prob_threshold = float(microphone_cfg.get("log_prob_threshold", -1.0))
 
     timestamp = time.strftime("%Y%m%d_%H%M%S")
     output_path = _results_dir() / f"{timestamp}.json"

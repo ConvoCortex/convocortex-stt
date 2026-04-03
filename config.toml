@@ -1,6 +1,15 @@
-[audio]
+[startup]
+# startup is config-driven; runtime state is cleared on each launch
 # false = run the interactive device setup on next startup, then flip back to true
 device_setup_initialized = true
+# enable the live microphone STT runtime on app start
+start_microphone = true
+# enable the watched-folder files engine on app start
+start_files = true
+# "foreground" = leave the console visible after startup, "background" = hide it after startup
+console_startup_mode = "background"
+
+[audio]
 rate            = 16000  # sample rate — required by the current transcription backends, do not change
 chunk           = 512    # audio frames per VAD check — lower = more responsive, higher = more stable
 vad_threshold   = 0.85  # Silero VAD speech-start threshold 0–1 (higher = stricter, rejects more weak/noisy audio)
@@ -9,15 +18,15 @@ min_speech_duration_ms = 250 # require this much continuous voiced audio before 
 buffer_seconds  = 1.0   # ring buffer before speech start — captures audio before VAD triggers
 silence_timeout = 0.6   # seconds of silence before ending an utterance and firing final transcription
 input_stall_reset_seconds = 1.5 # if audio capture stalls this long mid-utterance, drop buffered speech instead of resuming it later
-# exact startup input device when startup.input_device_source = "config"; empty = OS default
+# exact startup input device from config; empty = OS default
 input_device    = ""
 # selected startup/cycling devices are stored here after first-run setup
 device_profiles_file = "device-profiles.toml"
 
-[models]
-# backend: "whisper" or "parakeet"
-final_backend    = "parakeet"
-realtime_backend = "parakeet"
+[microphone]
+# microphone-mode backends: "faster-whisper", "parakeet", "parakeet-cuda", or "parakeet-tensorrt"
+final_backend    = "parakeet-cuda"
+realtime_backend = "parakeet-cuda"
 #
 # faster-whisper models:
 #   tiny, tiny.en, base, base.en, small, small.en, medium, medium.en
@@ -35,7 +44,7 @@ realtime       = "nvidia/parakeet-tdt-0.6b-v2"   # set to "" to disable partials
 final_device    = "cuda"
 realtime_device = "cuda"
 
-# compute_type applies to the whisper backend only (faster-whisper / ctranslate2):
+# compute_type applies to the faster-whisper backend only (ctranslate2):
 #   float16       — GPU only, fastest, recommended for cuda
 #   bfloat16      — GPU, newer cards
 #   int8_float16  — GPU, quantized weights, less VRAM
@@ -48,9 +57,9 @@ realtime_device = "cuda"
 final_compute  = "float16"
 
 # language: BCP-47 code e.g. "en", "fr", "de", "ja" — or remove/set to "" for auto-detect when supported
-# Whisper honors this directly. Parakeet v2 is English-only; Parakeet v3 can auto-detect.
+# faster-whisper honors this directly. Parakeet v2 is English-only; Parakeet v3 can auto-detect.
 language       = "en"
-# Whisper-side skip/silence gating.
+# faster-whisper-side skip/silence gating.
 # faster-whisper library defaults for reference:
 #   no_speech_threshold = 0.6
 #   log_prob_threshold = -1.0
@@ -61,21 +70,19 @@ language       = "en"
 no_speech_threshold = 0.45
 log_prob_threshold = -0.8
 
-[models.parakeet_onnx]
-provider = "tensorrt" # "tensorrt", "cuda", "cpu", or "auto"
+[microphone.parakeet_cuda]
 device_id = 0
 export_dir = ".tmp/onnx-cache"
 trt_cache_dir = ".tmp/trt-cache"
 trt_fp16_enable = true
 max_threads = 0
 
-[startup]
-# startup is config-driven; runtime state is cleared on each launch
-input_device_source = "config"
-output_device_source = "config"
-output_mode_source = "config"
-# "foreground" = leave the console visible after startup, "background" = hide it after startup
-console_startup_mode = "background"
+[microphone.parakeet_tensorrt]
+device_id = 0
+export_dir = ".tmp/onnx-cache"
+trt_cache_dir = ".tmp/trt-cache"
+trt_fp16_enable = true
+max_threads = 0
 
 [realtime]
 # check_interval: how often (seconds) a partial transcription is triggered during speech
@@ -89,17 +96,38 @@ max_chunks       = 100
 queue_size       = 1
 
 [file_drop]
-enabled = false
-auto_start_worker = true
 poll_interval_seconds = 2.0
 settle_seconds = 1.0
-input_dir = "input"
-text_dir = "text"
-done_dir = "done"
-failed_dir = "failed"
+input_dir = "files/speech"
+text_dir = "files/text"
+done_dir = "files/done"
+failed_dir = "files/failed"
 worker_log = "stt-file-worker.log"
 write_json_sidecar = true
 supported_extensions = [".wav", ".mp3", ".m4a", ".flac", ".ogg", ".opus", ".aac", ".wma"]
+# explicit files-engine transcription config
+# files-mode backends: "faster-whisper", "parakeet", "parakeet-cuda", or "parakeet-tensorrt"
+backend = "parakeet"
+model = "nvidia/parakeet-tdt-0.6b-v2"
+device = "cuda"
+compute = "float16"
+language = "en"
+no_speech_threshold = 0.45
+log_prob_threshold = -0.8
+
+[file_drop.parakeet_cuda]
+device_id = 0
+export_dir = ".tmp/onnx-cache"
+trt_cache_dir = ".tmp/trt-cache"
+trt_fp16_enable = true
+max_threads = 0
+
+[file_drop.parakeet_tensorrt]
+device_id = 0
+export_dir = ".tmp/onnx-cache"
+trt_cache_dir = ".tmp/trt-cache"
+trt_fp16_enable = true
+max_threads = 0
 
 # ── Transcript filters - for handling backend/model hallucinations ─────────────────────────────────────────────────
 # Exact phrases to swallow completely from both partial and final output.
@@ -180,7 +208,7 @@ final_sound_enabled = true
 on_volume = 1.0
 off_volume = 1.0
 final_volume = 1.0
-# exact startup feedback output device when startup.output_device_source = "config"; empty = OS default
+# exact startup feedback output device from config; empty = OS default
 output_device = ""
 
 # ── Voice commands ────────────────────────────────────────────────────────────
@@ -281,6 +309,4 @@ enabled         = false
 url             = "nats://localhost:4222"
 subject_emit    = "stt"
 subject_control = "stt.control"
-
-# ── State ────────────────────────────────────────────────────────────────────
 

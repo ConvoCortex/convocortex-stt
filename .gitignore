@@ -18,6 +18,7 @@ done/
 failed/
 input/
 text/
+files/
 benchmark-results/
 onnx-cache/
 manual-temp/

@@ -29,7 +29,7 @@ uv sync
 uv run python stt.py
 ```
 
-Use convocortex-stt.exe to launch STT conveniently.
+Use `convocortex-stt.exe` to launch STT.
 
 ```text
 .\\convocortex-stt.exe
@@ -37,10 +37,20 @@ Use convocortex-stt.exe to launch STT conveniently.
 
 The launcher expects `.venv` to exist, so run `uv sync` first.
 
-If `audio.device_setup_initialized = false` or the device profiles file is
+The single app can start:
+- microphone mode only
+- files mode only
+- both at once
+
+That is controlled by `startup.start_microphone` and `startup.start_files` in `config.toml`.
+
+The app exposes a console and tray icon on Windows.
+If the console window is minimized, it is hidden to the tray instead of staying on the taskbar as a minimized console window.
+
+If `startup.device_setup_initialized = false` or the device profiles file is
 missing, the app runs interactive device setup so you can pick the input and
 output devices in the order they should be used for startup and runtime cycling. To rerun it
-manually, set `audio.device_setup_initialized = false` in `config.toml` and
+manually, set `startup.device_setup_initialized = false` in `config.toml` and
 start the app again.
 
 `device-profiles.toml` is local machine-specific config, not runtime state.
@@ -72,11 +82,17 @@ That gives you a practical loop:
 If you want immediate direct typing instead, switch to `direct-cursor` mode at runtime with the output-mode hotkey or the exact voice command `cursor mode`.
 
 For offline or long-recording work, the repo now also supports a file-drop loop:
-- put audio files into `input/`
-- the separate file worker writes transcript outputs to `text/`
-- handled audio is moved to `done/`
+- put audio files into `files/speech/`
+- the separate file worker writes transcript outputs to `files/text/`
+- handled audio is moved to `files/done/`
 
-That worker is meant to be a separate process from the live microphone loop so a long recording does not stall realtime STT.
+That worker is a separate engine inside the same app process, so long file jobs do not reuse the live final worker.
+The runtime can therefore load up to three engines:
+- realtime partial engine
+- microphone final engine
+- files engine
+
+If realtime and final share a model/backend, they reuse one live engine, so the common shape with files enabled is two engines total.
 
 ## How it actually works
 
@@ -142,8 +158,8 @@ For a proper, richer voice command engine, use the emitted NATS events and imple
 - Sleep/working mode with wake word + stop words
 - Realtime partial transcriptions during speech
 - High-accuracy final transcriptions after pauses
-- Independent realtime/final backend selection with faster-whisper and Parakeet
-- Separate file-drop transcription worker with `input/ -> text/ + done/`
+- Independent realtime/final backend selection with `faster-whisper`, `parakeet`, `parakeet-cuda`, and `parakeet-tensorrt`
+- Separate file-drop transcription worker with `files/speech/ -> files/text/ + files/done/`
 - Per-file timing output for fixed-input comparison runs
 - Built-in audio feedback sounds (on/off/final + silence loop for bluetooth audio issues)
 - Simple built-in voice command actions
@@ -198,7 +214,7 @@ C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.1\bin
 C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.1\libnvvp
 ```
 
-CPU-only is supported by setting `models.final_device = "cpu"` in `config.toml` (slower finals).
+CPU-only is supported by setting `microphone.final_device = "cpu"` in `config.toml` (slower finals).
 
 Parakeet support is included in the normal `uv sync` install.
 
@@ -208,10 +224,10 @@ Optional ONNX/TensorRT acceleration dependencies:
 uv sync --extra onnx
 ```
 
-Example `config.toml` model section for Parakeet:
+Example `config.toml` microphone section for Parakeet:
 
 ```toml
-[models]
+[microphone]
 final_backend    = "parakeet"
 realtime_backend = "parakeet"
 final            = "nvidia/parakeet-tdt-0.6b-v3"
@@ -221,11 +237,10 @@ realtime_device  = "cuda"
 language         = ""
 ```
 
-Example `config.toml` acceleration section for encoder-only Parakeet ONNX/TensorRT:
+Example `config.toml` acceleration sections for encoder-only microphone Parakeet CUDA/TensorRT:
 
 ```toml
-[models.parakeet_onnx]
-provider = "tensorrt"
+[microphone.parakeet_tensorrt]
 device_id = 0
 export_dir = ".tmp/onnx-cache"
 trt_cache_dir = ".tmp/trt-cache"
@@ -250,35 +265,17 @@ Direct launch command:
 D:\projects\convocortex\convocortex-stt\convocortex-stt.exe
 ```
 
-## Build launcher
-
-If you want to rebuild the launcher yourself, the source is:
-- [`convocortex-stt-launcher.cs`](convocortex-stt-launcher.cs)
-- [`convocortex-stt-launcher.csproj`](convocortex-stt-launcher.csproj)
-
-Build command:
-
-```powershell
-dotnet publish .\convocortex-stt-launcher.csproj -c Release -o .\launcher-publish
-```
-
-That produces:
-
-```text
-.\launcher-publish\convocortex-stt.exe
-```
-
 ## Configuration
 
 All runtime settings live in `config.toml` and are loaded at startup.
 
 Important areas:
-- `models`: backend choice plus realtime/final models and device choices
-- `models.parakeet_onnx`: encoder-only ONNX Runtime / TensorRT settings for the `parakeet-onnx` backend
-- `models.no_speech_threshold` / `models.log_prob_threshold`: Whisper-only silence / low-confidence rejection for reducing spurious transcripts
+- `microphone`: backend choice plus realtime/final models and device choices
+- `microphone.parakeet_cuda` / `microphone.parakeet_tensorrt`: encoder-runtime settings for the `parakeet-cuda` and `parakeet-tensorrt` backends
+- `microphone.no_speech_threshold` / `microphone.log_prob_threshold`: faster-whisper-only silence / low-confidence rejection for reducing spurious transcripts
 - `audio`: VAD behavior + silence timeout + preferred input, especially `vad_threshold`, `vad_end_threshold`, and `min_speech_duration_ms` for speech-vs-noise gating
-- `file_drop`: separate worker process for file transcription, including the `input/`, `text/`, `done/`, and `failed/` directories
-- `startup`: whether startup restores last runtime state or uses config defaults for output mode and devices
+- `startup`: startup mode selection and console startup behavior
+- `file_drop`: watched-folder STT settings for the files engine, including the `files/speech/`, `files/text/`, `files/done/`, and `files/failed/` directories
 - `realtime`: partial cadence/window limits
 - `filters.ignored_exact_phrases`: drops matching utterances entirely before partial/final output is shown or dispatched
 - `filters.disfluency_words`: strips configured filler/profanity words from otherwise valid transcripts, then cleans spacing/punctuation
@@ -350,13 +347,17 @@ The default history cap is `10` buffer states and is not persisted across restar
 
 ### File-drop workflow
 
-If `file_drop.enabled = true`, the live runtime starts a second STT worker process for file transcription.
+The single app can start the files engine at launch when `startup.start_files = true`.
+If `startup.start_microphone = true` as well, the files engine runs alongside the live microphone runtime in the same app process, but as its own backend instance.
+
+The files engine is configured explicitly under `file_drop`. It does not inherit backend/model/device settings from `microphone`.
 
 The file worker watches:
 - `file_drop.input_dir` for incoming audio files
 - `file_drop.text_dir` for transcript outputs (`.txt` plus optional `.json` sidecar)
 - `file_drop.done_dir` for handled audio
 - `file_drop.failed_dir` for files that could not be transcribed
+- `file_drop.backend`, `file_drop.model`, `file_drop.device`, `file_drop.compute`, and `file_drop.language` for the transcription engine itself
 
 The transcript `.txt` output includes:
 - transcript text
@@ -369,17 +370,17 @@ The transcript `.txt` output includes:
 Useful commands:
 
 ```bash
-uv run python stt.py --file-drop-worker --once --input-dir transcribe-input
-uv run python benchmark_transcribe.py --input "transcribe-input\\your-file.mp3"
+uv run python stt.py --file-drop-worker --once --input-dir files/speech
+uv run python benchmark_transcribe.py --input "files\\done\\your-file.mp3"
 ```
 
 The file worker can also override the backend for comparison runs, for example:
 
 ```bash
-uv run python stt.py --file-drop-worker --once --input-dir transcribe-input --final-backend parakeet-onnx --onnx-provider tensorrt
+uv run python stt.py --file-drop-worker --once --input-dir files/speech --final-backend parakeet-tensorrt
 ```
 
-The `parakeet-onnx` backend is a hybrid path:
+The `parakeet-cuda` and `parakeet-tensorrt` backends are hybrid paths:
 - ONNX Runtime / TensorRT runs the Parakeet encoder
 - NeMo still handles preprocessing and RNNT decoder/joint logic
 
@@ -433,7 +434,7 @@ NATS is intended as the integration boundary to a larger app:
 {"type": "status",  "value": "idle"}
 {"type": "status",  "value": "sleeping"}
 {"type": "status",  "value": "working"}
-{"type": "system",  "event": "startup", "device": "Microphone (USB)", "models": {"final": "large-v3-turbo", "final_backend": "whisper", "realtime": "tiny.en", "realtime_backend": "whisper"}}
+{"type": "system",  "event": "startup", "device": "Microphone (USB)", "models": {"final": "large-v3-turbo", "final_backend": "faster-whisper", "realtime": "tiny.en", "realtime_backend": "faster-whisper"}}
 {"type": "system",  "event": "device_changed", "device": "Microphone (USB)"}
 {"type": "system",  "event": "output_device_changed", "device": "Speakers (USB)"}
 {"type": "system",  "event": "shutdown"}

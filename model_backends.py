@@ -184,8 +184,8 @@ class TranscriptionBackend:
         raise NotImplementedError
 
 
-class WhisperBackend(TranscriptionBackend):
-    name = "whisper"
+class FasterWhisperBackend(TranscriptionBackend):
+    name = "faster-whisper"
 
     def __init__(
         self,
@@ -195,27 +195,30 @@ class WhisperBackend(TranscriptionBackend):
         no_speech_threshold: float,
         log_prob_threshold: float,
     ) -> None:
+        self._transcribe_lock = threading.Lock()
         self.model = WhisperModel(model_name, device=device, compute_type=compute_type)
         self.no_speech_threshold = float(no_speech_threshold)
         self.log_prob_threshold = float(log_prob_threshold)
 
     def transcribe(self, audio: np.ndarray, language: str, beam_size: int) -> TranscriptResult:
-        kwargs: dict[str, Any] = {
-            "beam_size": int(beam_size),
-            "no_speech_threshold": self.no_speech_threshold,
-            "log_prob_threshold": self.log_prob_threshold,
-        }
-        language = str(language or "").strip()
-        if language:
-            kwargs["language"] = language
-        segs, _ = self.model.transcribe(np.asarray(audio, dtype=np.float32), **kwargs)
-        return TranscriptResult(" ".join(seg.text for seg in segs).strip())
+        with self._transcribe_lock:
+            kwargs: dict[str, Any] = {
+                "beam_size": int(beam_size),
+                "no_speech_threshold": self.no_speech_threshold,
+                "log_prob_threshold": self.log_prob_threshold,
+            }
+            language = str(language or "").strip()
+            if language:
+                kwargs["language"] = language
+            segs, _ = self.model.transcribe(np.asarray(audio, dtype=np.float32), **kwargs)
+            return TranscriptResult(" ".join(seg.text for seg in segs).strip())
 
 
 class ParakeetBackend(TranscriptionBackend):
     name = "parakeet"
 
     def __init__(self, model_name: str, device: str) -> None:
+        self._transcribe_lock = threading.Lock()
         _ensure_runtime_tempdir()
         try:
             import nemo.collections.asr as nemo_asr
@@ -348,8 +351,9 @@ class ParakeetBackend(TranscriptionBackend):
 
     def transcribe(self, audio: np.ndarray, language: str, beam_size: int) -> TranscriptResult:
         del language, beam_size
-        text = self._transcribe_via_temp_wav(np.asarray(audio, dtype=np.float32))
-        return TranscriptResult(text)
+        with self._transcribe_lock:
+            text = self._transcribe_via_temp_wav(np.asarray(audio, dtype=np.float32))
+            return TranscriptResult(text)
 
 
 def _import_onnxruntime_with_cuda_preload():
@@ -418,18 +422,29 @@ def _resolve_path_like(value: Any, default: Path) -> Path:
     return path
 
 
-class ParakeetOnnxEncoderBackend(TranscriptionBackend):
-    name = "parakeet-onnx"
+class ParakeetEncoderRuntimeBackend(TranscriptionBackend):
+    name = "parakeet-cuda"
 
-    def __init__(self, model_name: str, device: str, options: dict[str, Any] | None = None) -> None:
+    def __init__(
+        self,
+        model_name: str,
+        device: str,
+        *,
+        provider_label: str,
+        options: dict[str, Any] | None = None,
+    ) -> None:
+        self._transcribe_lock = threading.Lock()
+        self.provider_label_requested = str(provider_label).strip().lower()
         self.options = _normalize_backend_options(options)
         self.base = ParakeetBackend(model_name=model_name, device=device)
         self.model = self.base.model
         self.device = self.base.device
         self.onnxruntime = _import_onnxruntime_with_cuda_preload()
-        self.model_key = _hash_key(model_name, self.device)
+        self.model_key = _hash_key(model_name, self.device, self.provider_label_requested)
         self.encoder_path = self._ensure_encoder_export()
-        self.providers, self.provider_options, self.provider_label = _resolve_onnx_provider(self.options)
+        self.providers, self.provider_options, self.provider_label = _resolve_onnx_provider(
+            {"provider": self.provider_label_requested, **self.options}
+        )
         session_options = self.onnxruntime.SessionOptions()
         session_options.log_severity_level = 3
         max_threads = int(self.options.get("max_threads", 0))
@@ -445,6 +460,12 @@ class ParakeetOnnxEncoderBackend(TranscriptionBackend):
         self.encoder_input_names = [node.name for node in self.encoder_session.get_inputs()]
         self.encoder_output_names = [node.name for node in self.encoder_session.get_outputs()]
 
+    def warmup(self, audio: np.ndarray) -> None:
+        del audio
+        # TensorRT engine build on synthetic startup audio makes app startup feel
+        # hung. Let the first real decode pay that one-time cost instead.
+        return None
+
     def _ensure_encoder_export(self) -> Path:
         export_dir = _resolve_path_like(self.options.get("export_dir"), _RUNTIME_TEMP_DIR / "onnx-cache")
         export_dir.mkdir(parents=True, exist_ok=True)
@@ -459,39 +480,54 @@ class ParakeetOnnxEncoderBackend(TranscriptionBackend):
 
     def transcribe(self, audio: np.ndarray, language: str, beam_size: int) -> TranscriptResult:
         del language, beam_size
-        model_device = next(self.model.parameters()).device
-        audio_tensor = torch.from_numpy(np.asarray(audio, dtype=np.float32)).unsqueeze(0).to(model_device)
-        audio_length = torch.tensor([audio_tensor.shape[-1]], dtype=torch.int64, device=model_device)
-        with torch.inference_mode():
-            processed_signal, processed_signal_len = self.model.preprocessor(input_signal=audio_tensor, length=audio_length)
-        encoder_inputs = {
-            self.encoder_input_names[0]: processed_signal.detach().cpu().numpy(),
-            self.encoder_input_names[1]: processed_signal_len.detach().cpu().numpy().astype(np.int64, copy=False),
-        }
-        encoder_started = time.perf_counter()
-        encoder_output, encoder_lengths = self.encoder_session.run(self.encoder_output_names[:2], encoder_inputs)
-        encoder_ms = (time.perf_counter() - encoder_started) * 1000.0
-        encoder_output_t = torch.from_numpy(np.asarray(encoder_output)).to(model_device)
-        encoder_lengths_t = torch.from_numpy(np.asarray(encoder_lengths)).to(model_device)
-        decoder_started = time.perf_counter()
-        hypotheses = self.model.decoding.rnnt_decoder_predictions_tensor(
-            encoder_output_t,
-            encoder_lengths_t,
-            return_hypotheses=False,
-        )
-        decoder_ms = (time.perf_counter() - decoder_started) * 1000.0
-        text = hypotheses[0].text if hypotheses else ""
-        return TranscriptResult(
-            text=text,
-            metrics={
-                "onnx_provider_requested": str(self.options.get("provider", "auto")).strip().lower() or "auto",
-                "onnx_provider_resolved": self.provider_label,
-                "onnx_provider_active": self.encoder_session.get_providers()[0] if self.encoder_session.get_providers() else "",
-                "encoder_inference_ms": round(encoder_ms, 3),
-                "decoder_inference_ms": round(decoder_ms, 3),
-                "onnx_encoder_path": str(self.encoder_path),
-            },
-        )
+        with self._transcribe_lock:
+            model_device = next(self.model.parameters()).device
+            audio_tensor = torch.from_numpy(np.asarray(audio, dtype=np.float32)).unsqueeze(0).to(model_device)
+            audio_length = torch.tensor([audio_tensor.shape[-1]], dtype=torch.int64, device=model_device)
+            with torch.inference_mode():
+                processed_signal, processed_signal_len = self.model.preprocessor(input_signal=audio_tensor, length=audio_length)
+            encoder_inputs = {
+                self.encoder_input_names[0]: processed_signal.detach().cpu().numpy(),
+                self.encoder_input_names[1]: processed_signal_len.detach().cpu().numpy().astype(np.int64, copy=False),
+            }
+            encoder_started = time.perf_counter()
+            encoder_output, encoder_lengths = self.encoder_session.run(self.encoder_output_names[:2], encoder_inputs)
+            encoder_ms = (time.perf_counter() - encoder_started) * 1000.0
+            encoder_output_t = torch.from_numpy(np.asarray(encoder_output)).to(model_device)
+            encoder_lengths_t = torch.from_numpy(np.asarray(encoder_lengths)).to(model_device)
+            decoder_started = time.perf_counter()
+            hypotheses = self.model.decoding.rnnt_decoder_predictions_tensor(
+                encoder_output_t,
+                encoder_lengths_t,
+                return_hypotheses=False,
+            )
+            decoder_ms = (time.perf_counter() - decoder_started) * 1000.0
+            text = hypotheses[0].text if hypotheses else ""
+            return TranscriptResult(
+                text=text,
+                metrics={
+                    "onnx_provider_requested": self.provider_label_requested,
+                    "onnx_provider_resolved": self.provider_label,
+                    "onnx_provider_active": self.encoder_session.get_providers()[0] if self.encoder_session.get_providers() else "",
+                    "encoder_inference_ms": round(encoder_ms, 3),
+                    "decoder_inference_ms": round(decoder_ms, 3),
+                    "onnx_encoder_path": str(self.encoder_path),
+                },
+            )
+
+
+class ParakeetCudaBackend(ParakeetEncoderRuntimeBackend):
+    name = "parakeet-cuda"
+
+    def __init__(self, model_name: str, device: str, options: dict[str, Any] | None = None) -> None:
+        super().__init__(model_name=model_name, device=device, provider_label="cuda", options=options)
+
+
+class ParakeetTensorRTBackend(ParakeetEncoderRuntimeBackend):
+    name = "parakeet-tensorrt"
+
+    def __init__(self, model_name: str, device: str, options: dict[str, Any] | None = None) -> None:
+        super().__init__(model_name=model_name, device=device, provider_label="tensorrt", options=options)
 
 
 def load_backend(
@@ -503,10 +539,10 @@ def load_backend(
     log_prob_threshold: float,
     backend_options: dict[str, Any] | None = None,
 ) -> TranscriptionBackend:
-    backend = str(backend_name or "whisper").strip().lower()
+    backend = str(backend_name or "faster-whisper").strip().lower()
     resolved_device = _resolve_device(device)
-    if backend == "whisper":
-        return WhisperBackend(
+    if backend == "faster-whisper":
+        return FasterWhisperBackend(
             model_name=model_name,
             device=resolved_device,
             compute_type=compute_type,
@@ -515,10 +551,8 @@ def load_backend(
         )
     if backend == "parakeet":
         return ParakeetBackend(model_name=model_name, device=resolved_device)
-    if backend in {"parakeet-onnx", "parakeet_onnx"}:
-        return ParakeetOnnxEncoderBackend(
-            model_name=model_name,
-            device=resolved_device,
-            options=backend_options,
-        )
+    if backend == "parakeet-cuda":
+        return ParakeetCudaBackend(model_name=model_name, device=resolved_device, options=backend_options)
+    if backend == "parakeet-tensorrt":
+        return ParakeetTensorRTBackend(model_name=model_name, device=resolved_device, options=backend_options)
     raise ValueError(f"Unsupported transcription backend: {backend_name}")

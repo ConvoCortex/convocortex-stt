@@ -6,6 +6,7 @@ import logging
 import os
 import re
 import sys
+import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -154,8 +155,6 @@ def _load_audio_for_transcription(path: Path, target_rate: int) -> tuple[np.ndar
 
 @dataclass
 class FileDropSettings:
-    enabled: bool
-    auto_start_worker: bool
     poll_interval_seconds: float
     settle_seconds: float
     input_dir: Path
@@ -187,10 +186,8 @@ def resolve_settings(
     final_device: str | None = None,
     final_compute: str | None = None,
     language: str | None = None,
-    onnx_provider: str | None = None,
 ) -> FileDropSettings:
     file_cfg = cfg.get("file_drop", {}) or {}
-    models_cfg = cfg.get("models", {}) or {}
     supported = tuple(
         sorted(
             {
@@ -200,30 +197,38 @@ def resolve_settings(
             }
         )
     ) or SUPPORTED_AUDIO_EXTENSIONS
-    resolved_backend = str(final_backend or models_cfg.get("final_backend", "whisper")).strip()
+    resolved_backend = str(final_backend or file_cfg.get("backend") or "").strip()
+    if not resolved_backend:
+        raise ValueError("file_drop.backend must be set explicitly")
     backend_key = resolved_backend.lower().replace("-", "_")
-    raw_backend_options = models_cfg.get(backend_key, {})
+    raw_backend_options = file_cfg.get(backend_key, {})
     backend_options = dict(raw_backend_options or {}) if isinstance(raw_backend_options, dict) else {}
-    if onnx_provider is not None:
-        backend_options["provider"] = str(onnx_provider).strip()
+    resolved_model = str(final_model or file_cfg.get("model") or "").strip()
+    resolved_device = str(final_device or file_cfg.get("device") or "").strip()
+    resolved_compute = str(final_compute or file_cfg.get("compute") or "").strip()
+    resolved_language = str(language if language is not None else file_cfg.get("language") or "").strip()
+    if not resolved_model:
+        raise ValueError("file_drop.model must be set explicitly")
+    if not resolved_device:
+        raise ValueError("file_drop.device must be set explicitly")
+    if not resolved_compute:
+        raise ValueError("file_drop.compute must be set explicitly")
     return FileDropSettings(
-        enabled=bool(file_cfg.get("enabled", False)),
-        auto_start_worker=bool(file_cfg.get("auto_start_worker", True)),
         poll_interval_seconds=max(0.2, float(file_cfg.get("poll_interval_seconds", 2.0))),
         settle_seconds=max(0.0, float(file_cfg.get("settle_seconds", 1.0))),
-        input_dir=_resolve_path(input_dir or file_cfg.get("input_dir"), "input"),
-        text_dir=_resolve_path(text_dir or file_cfg.get("text_dir"), "text"),
-        done_dir=_resolve_path(done_dir or file_cfg.get("done_dir"), "done"),
-        failed_dir=_resolve_path(failed_dir or file_cfg.get("failed_dir"), "failed"),
+        input_dir=_resolve_path(input_dir or file_cfg.get("input_dir"), "files/speech"),
+        text_dir=_resolve_path(text_dir or file_cfg.get("text_dir"), "files/text"),
+        done_dir=_resolve_path(done_dir or file_cfg.get("done_dir"), "files/done"),
+        failed_dir=_resolve_path(failed_dir or file_cfg.get("failed_dir"), "files/failed"),
         worker_log=_resolve_path(file_cfg.get("worker_log"), "stt-file-worker.log"),
         supported_extensions=supported,
         final_backend=resolved_backend,
-        final_model=str(final_model or models_cfg.get("final", "")).strip(),
-        final_device=str(final_device or models_cfg.get("final_device", "auto")).strip(),
-        final_compute=str(final_compute or models_cfg.get("final_compute", "default")).strip(),
-        language=str(language if language is not None else models_cfg.get("language", "")).strip(),
-        no_speech_threshold=float(models_cfg.get("no_speech_threshold", 0.6)),
-        log_prob_threshold=float(models_cfg.get("log_prob_threshold", -1.0)),
+        final_model=resolved_model,
+        final_device=resolved_device,
+        final_compute=resolved_compute,
+        language=resolved_language,
+        no_speech_threshold=float(file_cfg.get("no_speech_threshold", 0.6)),
+        log_prob_threshold=float(file_cfg.get("log_prob_threshold", -1.0)),
         write_json_sidecar=bool(file_cfg.get("write_json_sidecar", True)),
         backend_options=backend_options,
     )
@@ -408,7 +413,13 @@ class FileDropWorker:
                 }
         return None
 
-    def run(self, *, once: bool = False, idle_exit: bool = False) -> int:
+    def run(
+        self,
+        *,
+        once: bool = False,
+        idle_exit: bool = False,
+        stop_event: threading.Event | None = None,
+    ) -> int:
         self.ensure_ready()
         logger.info(
             "[file-drop] watching input=%s text=%s done=%s failed=%s",
@@ -419,6 +430,9 @@ class FileDropWorker:
         )
         processed_any = False
         while True:
+            if stop_event is not None and stop_event.is_set():
+                logger.info("[file-drop] stop requested.")
+                return 0
             result = self.process_one_available()
             if result is not None:
                 processed_any = True
@@ -427,7 +441,12 @@ class FileDropWorker:
                 continue
             if once or idle_exit:
                 return 0 if processed_any or idle_exit else 1
-            time.sleep(self.settings.poll_interval_seconds)
+            if stop_event is not None:
+                if stop_event.wait(self.settings.poll_interval_seconds):
+                    logger.info("[file-drop] stop requested.")
+                    return 0
+            else:
+                time.sleep(self.settings.poll_interval_seconds)
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
@@ -438,12 +457,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--text-dir", help="Override file-drop transcript output directory")
     parser.add_argument("--done-dir", help="Override processed-audio output directory")
     parser.add_argument("--failed-dir", help="Override failed-audio directory")
-    parser.add_argument("--final-backend", help="Override models.final_backend for this worker")
-    parser.add_argument("--final-model", help="Override models.final for this worker")
-    parser.add_argument("--final-device", help="Override models.final_device for this worker")
-    parser.add_argument("--final-compute", help="Override models.final_compute for this worker")
-    parser.add_argument("--language", help="Override models.language for this worker")
-    parser.add_argument("--onnx-provider", help="Override models.parakeet_onnx.provider for this worker")
+    parser.add_argument("--final-backend", help="Override file_drop.backend for this worker")
+    parser.add_argument("--final-model", help="Override file_drop.model for this worker")
+    parser.add_argument("--final-device", help="Override file_drop.device for this worker")
+    parser.add_argument("--final-compute", help="Override file_drop.compute for this worker")
+    parser.add_argument("--language", help="Override file_drop.language for this worker")
     return parser
 
 
@@ -478,7 +496,6 @@ def run_from_args(argv: list[str] | None = None) -> int:
         final_device=args.final_device,
         final_compute=args.final_compute,
         language=args.language,
-        onnx_provider=args.onnx_provider,
     )
     _ensure_worker_log_handler(settings.worker_log)
     worker = FileDropWorker(cfg, settings)

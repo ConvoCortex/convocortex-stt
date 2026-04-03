@@ -17,7 +17,6 @@ import re
 import threading
 import logging
 import os
-import subprocess
 from collections import deque
 from pathlib import Path
 
@@ -129,6 +128,13 @@ def _cleanup_transcript_text(text: str) -> str:
     return cleaned
 
 
+def _resolve_repo_path(value: str | os.PathLike[str]) -> str:
+    path = Path(str(value))
+    if not path.is_absolute():
+        path = Path(__file__).resolve().parent / path
+    return str(path)
+
+
 cfg = config.load()
 FILTERS_CFG = cfg.get("filters", {})
 
@@ -182,6 +188,8 @@ class WindowsConsoleController:
         self._user32 = None
         self._kernel32 = None
         self._available = False
+        self._minimize_thread = None
+        self._minimize_stop = None
         if os.name != "nt":
             return
         try:
@@ -238,18 +246,70 @@ class WindowsConsoleController:
             return self.hide(reason=reason)
         return self.show(reason=reason)
 
+    def start_minimize_to_tray(self, poll_seconds: float = 0.25) -> bool:
+        if not self.available or not self._user32:
+            return False
+        with self._lock:
+            if self._minimize_thread and self._minimize_thread.is_alive():
+                return True
+            self._minimize_stop = threading.Event()
+            self._minimize_thread = threading.Thread(
+                target=self._minimize_watch_loop,
+                args=(self._minimize_stop, max(0.1, float(poll_seconds))),
+                name="console-minimize-watch",
+                daemon=True,
+            )
+            self._minimize_thread.start()
+            return True
+
+    def stop_minimize_to_tray(self, timeout: float = 1.0):
+        with self._lock:
+            stop_event = self._minimize_stop
+            thread = self._minimize_thread
+            self._minimize_stop = None
+            self._minimize_thread = None
+        if stop_event is not None:
+            stop_event.set()
+        if thread is not None:
+            try:
+                thread.join(timeout=timeout)
+            except Exception:
+                pass
+
+    def _minimize_watch_loop(self, stop_event: threading.Event, poll_seconds: float):
+        was_iconic = False
+        while not stop_event.wait(poll_seconds):
+            try:
+                hwnd = self._console_hwnd()
+                if not hwnd or not self._user32:
+                    continue
+                is_iconic = bool(self._user32.IsIconic(hwnd))
+                if is_iconic and not was_iconic:
+                    self.hide(reason="minimize")
+                was_iconic = is_iconic
+            except Exception:
+                continue
+
 
 class WindowsTrayIcon:
     WMAPP_NOTIFYCALLBACK = 0x8001
     CMD_TOGGLE_CONSOLE = 1001
     CMD_EXIT = 1002
 
-    def __init__(self, console_controller: WindowsConsoleController):
+    def __init__(
+        self,
+        console_controller: WindowsConsoleController,
+        *,
+        tooltip: str = "Convocortex STT",
+        exit_label: str = "Exit STT",
+    ):
         self._console_controller = console_controller
         self._thread = None
         self._ready = threading.Event()
         self._hwnd = None
         self._class_name = f"ConvocortexSTTTray-{os.getpid()}"
+        self._tooltip = str(tooltip or "Convocortex STT")
+        self._exit_label = str(exit_label or "Exit STT")
         self._available = False
         self._win32api = None
         self._win32con = None
@@ -312,7 +372,7 @@ class WindowsTrayIcon:
         try:
             self._win32gui.AppendMenu(menu, self._win32con.MF_STRING, self.CMD_TOGGLE_CONSOLE, self._menu_label())
             self._win32gui.AppendMenu(menu, self._win32con.MF_SEPARATOR, 0, "")
-            self._win32gui.AppendMenu(menu, self._win32con.MF_STRING, self.CMD_EXIT, "Exit STT")
+            self._win32gui.AppendMenu(menu, self._win32con.MF_STRING, self.CMD_EXIT, self._exit_label)
             pos = self._win32gui.GetCursorPos()
             self._win32gui.SetForegroundWindow(self._hwnd)
             self._win32gui.TrackPopupMenu(
@@ -388,7 +448,7 @@ class WindowsTrayIcon:
                 self._win32gui.NIF_ICON | self._win32gui.NIF_MESSAGE | self._win32gui.NIF_TIP,
                 self.WMAPP_NOTIFYCALLBACK,
                 icon_handle,
-                "Convocortex STT",
+                self._tooltip[:127],
             )
             self._win32gui.Shell_NotifyIcon(self._win32gui.NIM_ADD, notify_id)
             logger.info("[tray] Ready.")
@@ -405,17 +465,18 @@ class WindowsTrayIcon:
         finally:
             self._remove_icon()
 
-# ── Models ────────────────────────────────────────────────────────────────────
-FINAL_MODEL        = cfg["models"]["final"]
-FINAL_DEVICE       = cfg["models"]["final_device"]
-FINAL_COMPUTE      = cfg["models"]["final_compute"]
-FINAL_BACKEND      = str(cfg["models"].get("final_backend", "whisper")).strip().lower()
-REALTIME_MODEL     = cfg["models"]["realtime"]
-REALTIME_DEVICE    = cfg["models"]["realtime_device"]
-REALTIME_BACKEND   = str(cfg["models"].get("realtime_backend", "whisper")).strip().lower()
-LANGUAGE           = cfg["models"]["language"]
-WHISPER_NO_SPEECH_THRESHOLD = float(cfg["models"].get("no_speech_threshold", 0.6))
-WHISPER_LOG_PROB_THRESHOLD = float(cfg["models"].get("log_prob_threshold", -1.0))
+# ── Microphone Models ─────────────────────────────────────────────────────────
+MICROPHONE_CFG = cfg["microphone"]
+FINAL_MODEL        = MICROPHONE_CFG["final"]
+FINAL_DEVICE       = MICROPHONE_CFG["final_device"]
+FINAL_COMPUTE      = MICROPHONE_CFG["final_compute"]
+FINAL_BACKEND      = str(MICROPHONE_CFG.get("final_backend", "faster-whisper")).strip().lower()
+REALTIME_MODEL     = MICROPHONE_CFG["realtime"]
+REALTIME_DEVICE    = MICROPHONE_CFG["realtime_device"]
+REALTIME_BACKEND   = str(MICROPHONE_CFG.get("realtime_backend", "faster-whisper")).strip().lower()
+LANGUAGE           = MICROPHONE_CFG["language"]
+WHISPER_NO_SPEECH_THRESHOLD = float(MICROPHONE_CFG.get("no_speech_threshold", 0.6))
+WHISPER_LOG_PROB_THRESHOLD = float(MICROPHONE_CFG.get("log_prob_threshold", -1.0))
 
 # ── Audio ─────────────────────────────────────────────────────────────────────
 RATE            = cfg["audio"]["rate"]
@@ -428,15 +489,8 @@ SILENCE_TIMEOUT = cfg["audio"]["silence_timeout"]
 INPUT_STALL_RESET_SECONDS = float(cfg["audio"].get("input_stall_reset_seconds", 1.5))
 PREFERRED_INPUT_DEVICE = str(cfg["audio"].get("input_device", "")).strip()
 DEVICE_PROFILES_PATH = Path(str(cfg["audio"].get("device_profiles_file", "device-profiles.json")).strip() or "device-profiles.json")
-DEVICE_SETUP_INITIALIZED = bool(cfg["audio"].get("device_setup_initialized", False))
 _startup_cfg = cfg.get("startup", {})
-
-
-def _normalize_startup_source(value, default: str) -> str:
-    normalized = str(value or "").strip().lower()
-    if normalized in {"config", "state"}:
-        return normalized
-    return default
+DEVICE_SETUP_INITIALIZED = bool(_startup_cfg.get("device_setup_initialized", False))
 
 
 def _normalize_console_startup_mode(value, default: str = "foreground") -> str:
@@ -453,13 +507,12 @@ def _normalize_silence_keepalive_mode(value, default: str = "always") -> str:
     return default
 
 
-INPUT_DEVICE_STARTUP_SOURCE = "config"
-OUTPUT_DEVICE_STARTUP_SOURCE = "config"
-OUTPUT_MODE_STARTUP_SOURCE = "config"
 CONSOLE_STARTUP_MODE = _normalize_console_startup_mode(
     _startup_cfg.get("console_startup_mode", "foreground"),
     "foreground",
 )
+START_MICROPHONE_MODE = bool(_startup_cfg.get("start_microphone", True))
+START_FILES_MODE = bool(_startup_cfg.get("start_files", False))
 
 # ── Realtime ──────────────────────────────────────────────────────────────────
 RT_CHECK_INTERVAL = cfg["realtime"]["check_interval"]
@@ -489,11 +542,11 @@ WAKEWORD_DROP_SECONDS = float(_sw_cfg.get("drop_audio_after_wake_seconds", 0.4))
 # ── Feedback sounds ───────────────────────────────────────────────────────────
 _fb_cfg = cfg.get("feedback", {})
 FEEDBACK_ENABLED = bool(_fb_cfg.get("enabled", True))
-FEEDBACK_ON_SOUND = str(_fb_cfg.get("on_sound", "sounds/on.ogg")).strip()
-FEEDBACK_OFF_SOUND = str(_fb_cfg.get("off_sound", "sounds/off.ogg")).strip()
-FEEDBACK_SILENCE_SOUND = str(_fb_cfg.get("silence_sound", "sounds/silence.ogg")).strip()
-FEEDBACK_STARTUP_SOUND = str(_fb_cfg.get("startup_sound", "sounds/startup.ogg")).strip()
-FEEDBACK_FINAL_SOUND = str(_fb_cfg.get("final_sound", "sounds/final.ogg")).strip()
+FEEDBACK_ON_SOUND = _resolve_repo_path(str(_fb_cfg.get("on_sound", "sounds/on.ogg")).strip())
+FEEDBACK_OFF_SOUND = _resolve_repo_path(str(_fb_cfg.get("off_sound", "sounds/off.ogg")).strip())
+FEEDBACK_SILENCE_SOUND = _resolve_repo_path(str(_fb_cfg.get("silence_sound", "sounds/silence.ogg")).strip())
+FEEDBACK_STARTUP_SOUND = _resolve_repo_path(str(_fb_cfg.get("startup_sound", "sounds/startup.ogg")).strip())
+FEEDBACK_FINAL_SOUND = _resolve_repo_path(str(_fb_cfg.get("final_sound", "sounds/final.ogg")).strip())
 FEEDBACK_FINAL_SOUND_ENABLED = bool(_fb_cfg.get("final_sound_enabled", True))
 FEEDBACK_SILENCE_KEEPALIVE_MODE = _normalize_silence_keepalive_mode(
     _fb_cfg.get("silence_keepalive_mode", "always"),
@@ -721,14 +774,14 @@ def _set_device_setup_initialized(value: bool):
         return
 
     lines = text.splitlines()
-    in_audio = False
+    in_startup = False
     updated = False
     for idx, line in enumerate(lines):
         stripped = line.strip()
         if stripped.startswith("[") and stripped.endswith("]"):
-            in_audio = stripped == "[audio]"
+            in_startup = stripped == "[startup]"
             continue
-        if in_audio and stripped.startswith("device_setup_initialized"):
+        if in_startup and stripped.startswith("device_setup_initialized"):
             lines[idx] = f"device_setup_initialized = {'true' if value else 'false'}"
             updated = True
             break
@@ -868,7 +921,6 @@ class FeedbackAudio:
         off_volume: float,
         final_volume: float,
         output_device: str,
-        startup_source: str = "state",
         persisted_output_device_name: str = "",
         persisted_output_device_host_api: int | None = None,
     ):
@@ -884,18 +936,13 @@ class FeedbackAudio:
         self.off_volume = _clamp_volume(off_volume)
         self.final_volume = _clamp_volume(final_volume)
         self.output_device = output_device
-        self.startup_source = _normalize_startup_source(startup_source, "state")
         self._persisted_output_device_name = str(persisted_output_device_name or "").strip()
         self._persisted_output_device_host_api = persisted_output_device_host_api
         configured_output_name = str(output_device or "").strip()
-        if self.startup_source == "config":
-            self._preferred_output_device_name = configured_output_name
-            self._preferred_output_device_host_api = None
-        else:
-            self._preferred_output_device_name = configured_output_name or self._persisted_output_device_name
-            self._preferred_output_device_host_api = (
-                None if configured_output_name else persisted_output_device_host_api
-            )
+        self._preferred_output_device_name = configured_output_name or self._persisted_output_device_name
+        self._preferred_output_device_host_api = (
+            None if configured_output_name else persisted_output_device_host_api
+        )
         self._p_sfx = None
         self._p_silence = None
         self._output_device_index = None
@@ -910,6 +957,8 @@ class FeedbackAudio:
         self._sound_thread = None
         self._output_device_generation = 0
         self._lock = threading.Lock()
+        self.startup_output_source = ""
+        self.startup_disable_reason = ""
 
         if not self.enabled:
             return
@@ -941,12 +990,9 @@ class FeedbackAudio:
                     name="feedback-silence",
                 )
                 self._silence_thread.start()
-            if self._output_device_name:
-                logger.info(f"[feedback] Enabled (output={self._output_device_name})")
-            else:
-                logger.info("[feedback] Enabled (output=default)")
             logger.info(f"[feedback] silence_keepalive_mode={self.silence_keepalive_mode}")
         except Exception as e:
+            self.startup_disable_reason = str(e)
             logger.warning(f"[feedback] Disabled: {e}")
             self.enabled = False
 
@@ -999,7 +1045,7 @@ class FeedbackAudio:
 
         desired_name = str(self._preferred_output_device_name or "").strip()
         desired_host_api = self._preferred_output_device_host_api
-        source = "config" if self.startup_source == "config" else "persisted"
+        source = "config" if desired_name else "persisted"
 
         info = None
         if desired_name:
@@ -1009,13 +1055,15 @@ class FeedbackAudio:
             if info and not self._supports_output_format(self._p_sfx, int(info["index"])):
                 info = None
             if info:
-                logger.info(f"[feedback] Startup output from {source}: {info['name']}")
+                self.startup_output_source = source
             else:
                 logger.warning(f"[feedback] {source} output unavailable: {desired_name}")
 
         if info is None:
             try:
                 info = self._p_sfx.get_default_output_device_info()
+                if info:
+                    self.startup_output_source = "system-default"
             except Exception:
                 info = None
 
@@ -1202,8 +1250,26 @@ def main(args=None):
     parsed, remaining = cli.parse_known_args(argv)
     if parsed.file_drop_worker:
         from file_drop_worker import run_from_args as run_file_drop_worker
-
-        return run_file_drop_worker(remaining)
+        console_controller = WindowsConsoleController()
+        tray_icon = WindowsTrayIcon(
+            console_controller,
+            tooltip="Convocortex Files STT",
+            exit_label="Exit Files STT",
+        )
+        if tray_icon.available and not tray_icon.start():
+            logger.warning("[tray] Failed to start tray icon thread.")
+        console_controller.start_minimize_to_tray()
+        try:
+            return run_file_drop_worker(remaining)
+        finally:
+            try:
+                console_controller.stop_minimize_to_tray()
+            except Exception:
+                pass
+            try:
+                tray_icon.stop()
+            except Exception:
+                pass
 
     def _sigterm(_s, _f):
         raise KeyboardInterrupt
@@ -1219,6 +1285,65 @@ def main(args=None):
             logger.warning("[console] Background mode requested but no Windows console is available.")
     if tray_icon.available and not tray_icon.start():
         logger.warning("[tray] Failed to start tray icon thread.")
+    console_controller.start_minimize_to_tray()
+
+    start_microphone_mode = bool(START_MICROPHONE_MODE)
+    start_files_mode = bool(START_FILES_MODE)
+    if not start_microphone_mode and not start_files_mode:
+        logger.error("[startup] Both startup.start_microphone and startup.start_files are disabled. Nothing to run.")
+        try:
+            tray_icon.stop()
+        except Exception:
+            pass
+        try:
+            console_controller.stop_minimize_to_tray()
+        except Exception:
+            pass
+        return 1
+
+    file_drop_thread = None
+    file_drop_stop_event = None
+    file_drop_settings = None
+    file_drop_errors: list[str] = []
+
+    def start_file_drop_thread() -> None:
+        nonlocal file_drop_thread, file_drop_stop_event, file_drop_settings
+        if file_drop_thread is not None:
+            return
+        from file_drop_worker import FileDropWorker, resolve_settings as resolve_file_drop_settings
+
+        file_drop_settings = resolve_file_drop_settings(cfg)
+        file_drop_stop_event = threading.Event()
+
+        def _runner():
+            try:
+                worker = FileDropWorker(cfg, file_drop_settings)
+                worker.run(stop_event=file_drop_stop_event)
+            except Exception as exc:
+                file_drop_errors.append(f"{type(exc).__name__}: {exc}")
+                logger.exception("[file-drop] in-process worker failed: %s", exc)
+
+        file_drop_thread = threading.Thread(
+            target=_runner,
+            name="file-drop-worker",
+            daemon=True,
+        )
+        file_drop_thread.start()
+        logger.info(
+            "[file-drop] worker started in-process input=%s backend=%s model=%s",
+            file_drop_settings.input_dir,
+            file_drop_settings.final_backend,
+            file_drop_settings.final_model,
+        )
+
+    def stop_file_drop_thread(timeout: float = 5.0) -> None:
+        if file_drop_stop_event is not None:
+            file_drop_stop_event.set()
+        if file_drop_thread is not None:
+            try:
+                file_drop_thread.join(timeout=timeout)
+            except Exception:
+                pass
 
     hotkey_targets: dict[str, list] = {}
     hotkey_not_ready_logged: set[str] = set()
@@ -1287,9 +1412,15 @@ def main(args=None):
                 logger.warning("[hotkey] console_toggle requested but no Windows console is available.")
 
     set_hotkey_target("console_toggle", lambda: console_controller.toggle(reason="hotkey"))
-    register_hotkeys()
+    if start_microphone_mode:
+        register_hotkeys()
 
-    print(f"Initializing STT (Realtime: {REALTIME_DEVICE}, Final: {FINAL_DEVICE})...")
+    print(
+        "Initializing STT "
+        f"(Microphone: {'on' if start_microphone_mode else 'off'}, "
+        f"Files: {'on' if start_files_mode else 'off'}, "
+        f"Realtime: {REALTIME_DEVICE}, Final: {FINAL_DEVICE})..."
+    )
     sys.stdout.flush()
     debug_log(
         "[startup] "
@@ -1297,6 +1428,7 @@ def main(args=None):
         f"vad_end_threshold={VAD_END_THRESHOLD} min_speech_duration_ms={MIN_SPEECH_DURATION_MS} "
         f"silence_timeout={SILENCE_TIMEOUT} rt_interval={RT_CHECK_INTERVAL} "
         f"rt_queue_size={RT_QUEUE_SIZE} start_sleeping={SLEEP_START_SLEEPING} "
+        f"start_microphone={start_microphone_mode} start_files={start_files_mode} "
         f"final_backend={FINAL_BACKEND} realtime_backend={REALTIME_BACKEND} "
         f"whisper_no_speech_threshold={WHISPER_NO_SPEECH_THRESHOLD} "
         f"whisper_log_prob_threshold={WHISPER_LOG_PROB_THRESHOLD}"
@@ -1308,7 +1440,7 @@ def main(args=None):
     warmup_audio = np.zeros(RATE, dtype=np.float32)
     def _backend_options_for(backend_name: str) -> dict:
         key = str(backend_name or "").strip().lower().replace("-", "_")
-        value = cfg["models"].get(key, {})
+        value = MICROPHONE_CFG.get(key, {})
         return dict(value or {}) if isinstance(value, dict) else {}
 
     final_backend_options = _backend_options_for(FINAL_BACKEND)
@@ -1461,8 +1593,8 @@ def main(args=None):
                     if int(candidate_session.capture_rate) != int(RATE):
                         capture_note = f" capture_rate={candidate_session.capture_rate}"
                     logger.info(
-                        f"[device] Startup from {source.lower()}: {candidate['name']} "
-                        f"(probe_read_ms={probe_read_ms:.0f}, rms={probe_rms}{capture_note})"
+                        f"[input] Active device: {candidate['name']} "
+                        f"(source={source.lower()}, probe_read_ms={probe_read_ms:.0f}, rms={probe_rms}{capture_note})"
                     )
                     break
                 except Exception as probe_error:
@@ -1498,10 +1630,38 @@ def main(args=None):
             resources['host_api'] = info['hostApi']
             resources['capture_rate'] = int(input_session.capture_rate)
             logger.info(
-                f"Audio: {info['name']} (capture_rate={int(input_session.capture_rate)}Hz -> stt_rate={RATE}Hz)"
+                f"[input] Capture stream: {info['name']} "
+                f"(capture_rate={int(input_session.capture_rate)}Hz -> stt_rate={RATE}Hz)"
             )
         except Exception as e:
             record_load_error(f"Audio stack error: {e}")
+
+    if not start_microphone_mode and start_files_mode:
+        start_file_drop_thread()
+        logger.info("Files STT Ready!")
+        try:
+            while True:
+                if file_drop_thread is not None and not file_drop_thread.is_alive():
+                    if file_drop_errors:
+                        for err in file_drop_errors:
+                            logger.error(f"[file-drop] {err}")
+                    logger.error("[file-drop] worker stopped unexpectedly.")
+                    return 1
+                time.sleep(0.5)
+        except KeyboardInterrupt:
+            logger.info("Shutting down...")
+        finally:
+            stop_file_drop_thread()
+            try:
+                tray_icon.stop()
+            except Exception:
+                pass
+            try:
+                console_controller.stop_minimize_to_tray()
+            except Exception:
+                pass
+            logger.info("Done.")
+        return 0
 
     threads = [
         threading.Thread(target=load_final),
@@ -1519,27 +1679,17 @@ def main(args=None):
     if reuse_realtime_model:
         resources['realtime_model'] = resources['final_model']
         logger.info("Realtime model ready (shared with final model).")
+        logger.info("[models] Shared realtime/final backend instance will serialize inference calls.")
 
     final_model = resources['final_model']
     rt_model    = resources['realtime_model']
     vad         = resources['vad']
     input_session = resources['input_session']
     stream      = resources['stream']
-
-    file_drop_process = None
-    try:
-        from file_drop_worker import resolve_settings as resolve_file_drop_settings
-
-        file_drop_settings = resolve_file_drop_settings(cfg)
-        if file_drop_settings.enabled and file_drop_settings.auto_start_worker:
-            child_cmd = [sys.executable, str(Path(__file__).resolve()), "--file-drop-worker"]
-            creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0) if background_mode else 0
-            file_drop_process = subprocess.Popen(child_cmd, creationflags=creationflags)
-            logger.info(f"[file-drop] worker started pid={file_drop_process.pid} input={file_drop_settings.input_dir}")
-    except Exception as file_drop_exc:
-        logger.error(f"[file-drop] failed to start worker: {file_drop_exc}")
     p_instance  = resources['p_instance']
     dev_name    = resources['dev_name']
+    if start_files_mode:
+        start_file_drop_thread()
 
     # ── Register handlers ─────────────────────────────────────────────────────
     import handlers as h
@@ -1557,7 +1707,6 @@ def main(args=None):
         off_volume=FEEDBACK_OFF_VOLUME,
         final_volume=FEEDBACK_FINAL_VOLUME,
         output_device=FEEDBACK_OUTPUT_DEVICE,
-        startup_source=OUTPUT_DEVICE_STARTUP_SOURCE,
         persisted_output_device_name="",
         persisted_output_device_host_api=None,
     )
@@ -1574,8 +1723,15 @@ def main(args=None):
                 candidate_info.get("hostApi"),
                 update_preference=False,
             ):
-                logger.info(f"[feedback] Startup output selected from device profiles: {candidate_info['name']}")
+                feedback.startup_output_source = "profile"
                 break
+    if getattr(feedback, "enabled", False):
+        output_state = feedback.get_output_device_state()
+        output_name = str(output_state.get("name", "")).strip() or "system default"
+        output_source = getattr(feedback, "startup_output_source", "") or "system-default"
+        logger.info(f"[feedback] Output active: {output_name} (source={output_source})")
+    else:
+        logger.warning(f"[feedback] Output inactive: {getattr(feedback, 'startup_disable_reason', 'unknown error')}")
 
     # ── State ─────────────────────────────────────────────────────────────────
     final_queue   = queue.Queue()
@@ -2781,6 +2937,8 @@ def main(args=None):
     except: pass
     try: tray_icon.stop()
     except: pass
+    try: console_controller.stop_minimize_to_tray()
+    except: pass
     try: feedback.shutdown()
     except: pass
     try: p_instance.terminate()
@@ -2788,15 +2946,7 @@ def main(args=None):
     if not final_queue.empty():
         logger.info("Waiting for final queue to drain...")
         final_queue.join()
-    if file_drop_process is not None:
-        try:
-            file_drop_process.terminate()
-            file_drop_process.wait(timeout=5.0)
-        except Exception:
-            try:
-                file_drop_process.kill()
-            except Exception:
-                pass
+    stop_file_drop_thread()
     dispatch({"type": "system", "event": "shutdown"})
     logger.info("Done.")
     os._exit(0)
