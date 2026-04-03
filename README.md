@@ -286,6 +286,11 @@ Important areas:
 - `hotkeys`: optional runtime controls
 - `nats`: URL/subjects + enable toggle
 
+Backend guidance:
+- `parakeet` is the normal recommended backend for both microphone mode and files mode.
+- `faster-whisper` stays available when you prefer that tradeoff.
+- `parakeet-cuda` and `parakeet-tensorrt` are experimental accelerated variants, not the default path.
+
 `feedback.silence_keepalive_mode = "always"` keeps `sounds/silence.ogg` looping continuously on the feedback output device. Set it to `"off"` to disable that keepalive.
 
 ### Output workflow sets
@@ -384,7 +389,7 @@ The `parakeet-cuda` and `parakeet-tensorrt` backends are hybrid paths:
 - ONNX Runtime / TensorRT runs the Parakeet encoder
 - NeMo still handles preprocessing and RNNT decoder/joint logic
 
-That keeps the STT stack coherent while still exposing a real TensorRT acceleration surface.
+That keeps the STT stack coherent while still exposing a real acceleration surface, but these accelerated variants remain experimental compared with the native `parakeet` path.
 
 ### Direct cursor output
 

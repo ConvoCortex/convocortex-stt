@@ -5,6 +5,7 @@ device_setup_initialized = true
 # enable the live microphone STT runtime on app start
 start_microphone = true
 # enable the watched-folder files engine on app start
+# keep this off by default so the normal desktop path only loads microphone STT
 start_files = false
 # "foreground" = leave the console visible after startup, "background" = hide it after startup
 console_startup_mode = "background"
@@ -25,8 +26,10 @@ device_profiles_file = "device-profiles.toml"
 
 [microphone]
 # microphone-mode backends: "faster-whisper", "parakeet", "parakeet-cuda", or "parakeet-tensorrt"
-final_backend    = "parakeet-tensorrt"
-realtime_backend = "parakeet-tensorrt"
+# recommended default: "parakeet"
+# experimental: "parakeet-cuda", "parakeet-tensorrt"
+final_backend    = "parakeet"
+realtime_backend = "parakeet"
 #
 # faster-whisper models:
 #   tiny, tiny.en, base, base.en, small, small.en, medium, medium.en
@@ -83,7 +86,6 @@ export_dir = ".tmp/onnx-cache"
 trt_cache_dir = ".tmp/trt-cache"
 trt_fp16_enable = true
 max_threads = 0
-trt_shared_profile_buckets = ["mic-shared-short:16:256:512", "mic-shared-long:16:768:1280"]
 trt_realtime_profile_buckets = ["rt-short:16:96:192", "rt-medium:16:192:384", "rt-long:16:384:768"]
 trt_final_profile_buckets = ["final-short:16:256:512", "final-medium:16:512:896", "final-long:16:896:1280"]
 
@@ -100,7 +102,9 @@ queue_size       = 1
 
 [file_drop]
 # files-mode backends: "faster-whisper", "parakeet", "parakeet-cuda", or "parakeet-tensorrt"
-backend = "parakeet-tensorrt"
+# recommended default: "parakeet"
+# experimental: "parakeet-cuda", "parakeet-tensorrt"
+backend = "parakeet"
 model = "nvidia/parakeet-tdt-0.6b-v2"
 device = "cuda"
 compute = "float16"
