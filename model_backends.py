@@ -22,6 +22,7 @@ from faster_whisper import WhisperModel
 
 _RUNTIME_TEMP_DIR = Path(__file__).resolve().parent / ".tmp"
 _PARAKEET_STDIO_LOCK = threading.Lock()
+_GPU_BACKEND_LOCK = threading.RLock()
 _MANUAL_TEMP_COUNTER = itertools.count()
 
 
@@ -379,7 +380,8 @@ class ParakeetBackend(TranscriptionBackend):
     def transcribe(self, audio: np.ndarray, language: str, beam_size: int) -> TranscriptResult:
         del language, beam_size
         with self._transcribe_lock:
-            text = self._transcribe_via_temp_wav(np.asarray(audio, dtype=np.float32))
+            with _GPU_BACKEND_LOCK:
+                text = self._transcribe_via_temp_wav(np.asarray(audio, dtype=np.float32))
             return TranscriptResult(text)
 
 
@@ -447,6 +449,11 @@ def _parse_trt_profile_bucket(value: Any, index: int) -> TensorRTProfileBucket |
 
 def _default_trt_profile_buckets(runtime_role: str) -> list[TensorRTProfileBucket]:
     role = str(runtime_role or "").strip().lower()
+    if role == "microphone-shared":
+        return [
+            TensorRTProfileBucket("mic-shared-short", 16, 256, 512),
+            TensorRTProfileBucket("mic-shared-long", 16, 768, 1280),
+        ]
     if role == "microphone-realtime":
         return [
             TensorRTProfileBucket("rt-short", 16, 96, 192),
@@ -604,15 +611,16 @@ class ParakeetEncoderRuntimeBackend(TranscriptionBackend):
         del audio
         if self.provider_label != "tensorrt":
             return None
-        for plan in self._warmup_plans():
-            runtime_session = self._get_or_create_session(plan)
-            bucket = runtime_session.bucket
-            opt_length = bucket.opt_length if bucket is not None else 512
-            dummy_inputs = {
-                runtime_session.input_names[0]: np.zeros((1, 128, opt_length), dtype=np.float32),
-                runtime_session.input_names[1]: np.asarray([opt_length], dtype=np.int64),
-            }
-            runtime_session.session.run(runtime_session.output_names[:2], dummy_inputs)
+        with _GPU_BACKEND_LOCK:
+            for plan in self._warmup_plans():
+                runtime_session = self._get_or_create_session(plan)
+                bucket = runtime_session.bucket
+                opt_length = bucket.opt_length if bucket is not None else 512
+                dummy_inputs = {
+                    runtime_session.input_names[0]: np.zeros((1, 128, opt_length), dtype=np.float32),
+                    runtime_session.input_names[1]: np.asarray([opt_length], dtype=np.int64),
+                }
+                runtime_session.session.run(runtime_session.output_names[:2], dummy_inputs)
         return None
 
     def startup_logs(self) -> list[str]:
@@ -665,7 +673,9 @@ class ParakeetEncoderRuntimeBackend(TranscriptionBackend):
         if len(self.session_plans) <= 1:
             return self.session_plans
         role = self.runtime_role
-        if role == "microphone-realtime":
+        if role == "microphone-shared":
+            target_names = {"mic-shared-short"}
+        elif role == "microphone-realtime":
             target_names = {"rt-medium"}
         elif role == "microphone-final":
             target_names = {"final-medium"}
@@ -686,18 +696,19 @@ class ParakeetEncoderRuntimeBackend(TranscriptionBackend):
         if max_threads > 0:
             session_options.inter_op_num_threads = max_threads
             session_options.intra_op_num_threads = max_threads
-        providers, provider_options, provider_label, cache_dir, cache_hit = _resolve_onnx_provider(
-            {"provider": self.provider_label_requested, **self.options},
-            bucket=plan.bucket,
-            model_key=self.model_key,
-            runtime_role=self.runtime_role,
-        )
-        session = self.onnxruntime.InferenceSession(
-            str(self.encoder_path),
-            sess_options=session_options,
-            providers=providers,
-            provider_options=provider_options,
-        )
+        with _GPU_BACKEND_LOCK:
+            providers, provider_options, provider_label, cache_dir, cache_hit = _resolve_onnx_provider(
+                {"provider": self.provider_label_requested, **self.options},
+                bucket=plan.bucket,
+                model_key=self.model_key,
+                runtime_role=self.runtime_role,
+            )
+            session = self.onnxruntime.InferenceSession(
+                str(self.encoder_path),
+                sess_options=session_options,
+                providers=providers,
+                provider_options=provider_options,
+            )
         return EncoderRuntimeSession(
             bucket=plan.bucket,
             provider_label=provider_label,
@@ -740,46 +751,47 @@ class ParakeetEncoderRuntimeBackend(TranscriptionBackend):
     def transcribe(self, audio: np.ndarray, language: str, beam_size: int) -> TranscriptResult:
         del language, beam_size
         with self._transcribe_lock:
-            model_device = next(self.model.parameters()).device
-            audio_tensor = torch.from_numpy(np.asarray(audio, dtype=np.float32)).unsqueeze(0).to(model_device)
-            audio_length = torch.tensor([audio_tensor.shape[-1]], dtype=torch.int64, device=model_device)
-            with torch.inference_mode():
-                processed_signal, processed_signal_len = self.model.preprocessor(input_signal=audio_tensor, length=audio_length)
-            encoded_length = int(np.asarray(processed_signal_len.detach().cpu().numpy()).reshape(-1)[0])
-            runtime_session = self._select_runtime_session(encoded_length)
-            encoder_inputs = {
-                runtime_session.input_names[0]: processed_signal.detach().cpu().numpy(),
-                runtime_session.input_names[1]: processed_signal_len.detach().cpu().numpy().astype(np.int64, copy=False),
-            }
-            encoder_started = time.perf_counter()
-            encoder_output, encoder_lengths = runtime_session.session.run(runtime_session.output_names[:2], encoder_inputs)
-            encoder_ms = (time.perf_counter() - encoder_started) * 1000.0
-            encoder_output_t = torch.from_numpy(np.asarray(encoder_output)).to(model_device)
-            encoder_lengths_t = torch.from_numpy(np.asarray(encoder_lengths)).to(model_device)
-            decoder_started = time.perf_counter()
-            hypotheses = self.model.decoding.rnnt_decoder_predictions_tensor(
-                encoder_output_t,
-                encoder_lengths_t,
-                return_hypotheses=False,
-            )
-            decoder_ms = (time.perf_counter() - decoder_started) * 1000.0
-            text = hypotheses[0].text if hypotheses else ""
-            return TranscriptResult(
-                text=text,
-                metrics={
-                    "onnx_provider_requested": self.provider_label_requested,
-                    "onnx_provider_resolved": self.provider_label,
-                    "onnx_provider_active": runtime_session.active_provider,
-                    "encoder_inference_ms": round(encoder_ms, 3),
-                    "decoder_inference_ms": round(decoder_ms, 3),
-                    "onnx_encoder_path": str(self.encoder_path),
-                    "trt_profile_bucket": runtime_session.bucket.name if runtime_session.bucket is not None else "",
-                    "trt_profile_max_length": runtime_session.bucket.max_length if runtime_session.bucket is not None else None,
-                    "trt_encoded_length": encoded_length,
-                    "trt_engine_cache_dir": str(runtime_session.cache_dir) if runtime_session.cache_dir is not None else "",
-                    "trt_engine_cache_hit": runtime_session.cache_hit,
-                },
-            )
+            with _GPU_BACKEND_LOCK:
+                model_device = next(self.model.parameters()).device
+                audio_tensor = torch.from_numpy(np.asarray(audio, dtype=np.float32)).unsqueeze(0).to(model_device)
+                audio_length = torch.tensor([audio_tensor.shape[-1]], dtype=torch.int64, device=model_device)
+                with torch.inference_mode():
+                    processed_signal, processed_signal_len = self.model.preprocessor(input_signal=audio_tensor, length=audio_length)
+                encoded_length = int(np.asarray(processed_signal_len.detach().cpu().numpy()).reshape(-1)[0])
+                runtime_session = self._select_runtime_session(encoded_length)
+                encoder_inputs = {
+                    runtime_session.input_names[0]: processed_signal.detach().cpu().numpy(),
+                    runtime_session.input_names[1]: processed_signal_len.detach().cpu().numpy().astype(np.int64, copy=False),
+                }
+                encoder_started = time.perf_counter()
+                encoder_output, encoder_lengths = runtime_session.session.run(runtime_session.output_names[:2], encoder_inputs)
+                encoder_ms = (time.perf_counter() - encoder_started) * 1000.0
+                encoder_output_t = torch.from_numpy(np.asarray(encoder_output)).to(model_device)
+                encoder_lengths_t = torch.from_numpy(np.asarray(encoder_lengths)).to(model_device)
+                decoder_started = time.perf_counter()
+                hypotheses = self.model.decoding.rnnt_decoder_predictions_tensor(
+                    encoder_output_t,
+                    encoder_lengths_t,
+                    return_hypotheses=False,
+                )
+                decoder_ms = (time.perf_counter() - decoder_started) * 1000.0
+                text = hypotheses[0].text if hypotheses else ""
+                return TranscriptResult(
+                    text=text,
+                    metrics={
+                        "onnx_provider_requested": self.provider_label_requested,
+                        "onnx_provider_resolved": self.provider_label,
+                        "onnx_provider_active": runtime_session.active_provider,
+                        "encoder_inference_ms": round(encoder_ms, 3),
+                        "decoder_inference_ms": round(decoder_ms, 3),
+                        "onnx_encoder_path": str(self.encoder_path),
+                        "trt_profile_bucket": runtime_session.bucket.name if runtime_session.bucket is not None else "",
+                        "trt_profile_max_length": runtime_session.bucket.max_length if runtime_session.bucket is not None else None,
+                        "trt_encoded_length": encoded_length,
+                        "trt_engine_cache_dir": str(runtime_session.cache_dir) if runtime_session.cache_dir is not None else "",
+                        "trt_engine_cache_hit": runtime_session.cache_hit,
+                    },
+                )
 
 
 class ParakeetCudaBackend(ParakeetEncoderRuntimeBackend):

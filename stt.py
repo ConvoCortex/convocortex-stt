@@ -1438,6 +1438,13 @@ def main(args=None):
     load_errors = []
     load_errors_lock = threading.Lock()
     warmup_audio = np.zeros(RATE, dtype=np.float32)
+    shared_tensorrt_microphone = (
+        str(FINAL_BACKEND).strip().lower() == "parakeet-tensorrt"
+        and str(REALTIME_BACKEND).strip().lower() == "parakeet-tensorrt"
+        and str(FINAL_MODEL).strip() == str(REALTIME_MODEL).strip()
+        and str(FINAL_DEVICE).strip().lower() == str(REALTIME_DEVICE).strip().lower()
+    )
+
     def _backend_options_for(backend_name: str, runtime_role: str) -> dict:
         key = str(backend_name or "").strip().lower().replace("-", "_")
         value = MICROPHONE_CFG.get(key, {})
@@ -1445,7 +1452,11 @@ def main(args=None):
         if key in {"parakeet_tensorrt", "parakeet_cuda"}:
             options["runtime_role"] = runtime_role
         if key == "parakeet_tensorrt":
-            if runtime_role == "microphone-realtime":
+            if runtime_role == "microphone-shared":
+                buckets = options.get("trt_shared_profile_buckets")
+                if isinstance(buckets, list):
+                    options["trt_profile_buckets"] = list(buckets)
+            elif runtime_role == "microphone-realtime":
                 buckets = options.get("trt_realtime_profile_buckets")
                 if isinstance(buckets, list):
                     options["trt_profile_buckets"] = list(buckets)
@@ -1455,8 +1466,10 @@ def main(args=None):
                     options["trt_profile_buckets"] = list(buckets)
         return options
 
-    final_backend_options = _backend_options_for(FINAL_BACKEND, "microphone-final")
-    realtime_backend_options = _backend_options_for(REALTIME_BACKEND, "microphone-realtime")
+    final_runtime_role = "microphone-shared" if shared_tensorrt_microphone else "microphone-final"
+    realtime_runtime_role = "microphone-shared" if shared_tensorrt_microphone else "microphone-realtime"
+    final_backend_options = _backend_options_for(FINAL_BACKEND, final_runtime_role)
+    realtime_backend_options = _backend_options_for(REALTIME_BACKEND, realtime_runtime_role)
     def _reuse_signature(backend_name: str, model_name: str, device: str, compute: str, backend_options: dict) -> tuple:
         backend_key = str(backend_name).strip().lower()
         signature_options = dict(backend_options or {})
@@ -1488,8 +1501,6 @@ def main(args=None):
         realtime_backend_options,
     )
     reuse_realtime_model = bool(REALTIME_MODEL) and realtime_model_signature == shared_model_signature
-    if str(FINAL_BACKEND).strip().lower() == "parakeet-tensorrt" and str(REALTIME_BACKEND).strip().lower() == "parakeet-tensorrt":
-        reuse_realtime_model = False
 
     def record_load_error(message: str):
         with load_errors_lock:
