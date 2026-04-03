@@ -71,6 +71,13 @@ That gives you a practical loop:
 
 If you want immediate direct typing instead, switch to `direct-cursor` mode at runtime with the output-mode hotkey or the exact voice command `cursor mode`.
 
+For offline or long-recording work, the repo now also supports a file-drop loop:
+- put audio files into `input/`
+- the separate file worker writes transcript outputs to `text/`
+- handled audio is moved to `done/`
+
+That worker is meant to be a separate process from the live microphone loop so a long recording does not stall realtime STT.
+
 ## How it actually works
 
 ### 1) Hands-free transcription on pause
@@ -136,6 +143,8 @@ For a proper, richer voice command engine, use the emitted NATS events and imple
 - Realtime partial transcriptions during speech
 - High-accuracy final transcriptions after pauses
 - Independent realtime/final backend selection with faster-whisper and Parakeet
+- Separate file-drop transcription worker with `input/ -> text/ + done/`
+- Per-file timing output for fixed-input comparison runs
 - Built-in audio feedback sounds (on/off/final + silence loop for bluetooth audio issues)
 - Simple built-in voice command actions
 - Draft-buffer workflow for reviewing/editing before release
@@ -166,6 +175,8 @@ Defaults favor practical command responsiveness over nonstop partial spam:
 
 You can tune these if you want denser realtime partial output.
 
+For fixed-input comparisons, use the file worker or `benchmark_transcribe.py` instead of judging backend speed from live microphone timings.
+
 ## Prerequisites
 
 Primary tested target:
@@ -191,6 +202,12 @@ CPU-only is supported by setting `models.final_device = "cpu"` in `config.toml` 
 
 Parakeet support is included in the normal `uv sync` install.
 
+Optional ONNX/TensorRT acceleration dependencies:
+
+```bash
+uv sync --extra onnx
+```
+
 Example `config.toml` model section for Parakeet:
 
 ```toml
@@ -202,6 +219,17 @@ realtime         = "nvidia/parakeet-tdt-0.6b-v2"
 final_device     = "cuda"
 realtime_device  = "cuda"
 language         = ""
+```
+
+Example `config.toml` acceleration section for encoder-only Parakeet ONNX/TensorRT:
+
+```toml
+[models.parakeet_onnx]
+provider = "tensorrt"
+device_id = 0
+export_dir = ".tmp/onnx-cache"
+trt_cache_dir = ".tmp/trt-cache"
+trt_fp16_enable = true
 ```
 
 ## Windows Startup
@@ -246,8 +274,10 @@ All runtime settings live in `config.toml` and are loaded at startup.
 
 Important areas:
 - `models`: backend choice plus realtime/final models and device choices
+- `models.parakeet_onnx`: encoder-only ONNX Runtime / TensorRT settings for the `parakeet-onnx` backend
 - `models.no_speech_threshold` / `models.log_prob_threshold`: Whisper-only silence / low-confidence rejection for reducing spurious transcripts
 - `audio`: VAD behavior + silence timeout + preferred input, especially `vad_threshold`, `vad_end_threshold`, and `min_speech_duration_ms` for speech-vs-noise gating
+- `file_drop`: separate worker process for file transcription, including the `input/`, `text/`, `done/`, and `failed/` directories
 - `startup`: whether startup restores last runtime state or uses config defaults for output mode and devices
 - `realtime`: partial cadence/window limits
 - `filters.ignored_exact_phrases`: drops matching utterances entirely before partial/final output is shown or dispatched
@@ -317,6 +347,43 @@ Relevant settings:
 If the file buffer is active, the built-in exact voice command `enter` releases the current buffer and then presses Enter. This makes `draft-buffer` practical for chat boxes, terminals, and other submit-oriented text fields.
 
 The default history cap is `10` buffer states and is not persisted across restarts.
+
+### File-drop workflow
+
+If `file_drop.enabled = true`, the live runtime starts a second STT worker process for file transcription.
+
+The file worker watches:
+- `file_drop.input_dir` for incoming audio files
+- `file_drop.text_dir` for transcript outputs (`.txt` plus optional `.json` sidecar)
+- `file_drop.done_dir` for handled audio
+- `file_drop.failed_dir` for files that could not be transcribed
+
+The transcript `.txt` output includes:
+- transcript text
+- audio duration
+- audio load / resample time
+- inference time
+- total job time
+- realtime factor / throughput
+
+Useful commands:
+
+```bash
+uv run python stt.py --file-drop-worker --once --input-dir transcribe-input
+uv run python benchmark_transcribe.py --input "transcribe-input\\your-file.mp3"
+```
+
+The file worker can also override the backend for comparison runs, for example:
+
+```bash
+uv run python stt.py --file-drop-worker --once --input-dir transcribe-input --final-backend parakeet-onnx --onnx-provider tensorrt
+```
+
+The `parakeet-onnx` backend is a hybrid path:
+- ONNX Runtime / TensorRT runs the Parakeet encoder
+- NeMo still handles preprocessing and RNNT decoder/joint logic
+
+That keeps the STT stack coherent while still exposing a real TensorRT acceleration surface.
 
 ### Direct cursor output
 

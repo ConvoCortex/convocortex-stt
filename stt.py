@@ -6,6 +6,7 @@ accurate GPU model for final results after silence.
 Output via configurable local handlers. NATS optional.
 """
 
+import argparse
 import copy
 import _thread
 import math
@@ -16,6 +17,7 @@ import re
 import threading
 import logging
 import os
+import subprocess
 from collections import deque
 from pathlib import Path
 
@@ -1194,6 +1196,15 @@ class FeedbackAudio:
 
 def main(args=None):
     import signal
+    argv = list(sys.argv[1:] if args is None else args)
+    cli = argparse.ArgumentParser(add_help=False)
+    cli.add_argument("--file-drop-worker", action="store_true")
+    parsed, remaining = cli.parse_known_args(argv)
+    if parsed.file_drop_worker:
+        from file_drop_worker import run_from_args as run_file_drop_worker
+
+        return run_file_drop_worker(remaining)
+
     def _sigterm(_s, _f):
         raise KeyboardInterrupt
     signal.signal(signal.SIGTERM, _sigterm)
@@ -1295,6 +1306,13 @@ def main(args=None):
     load_errors = []
     load_errors_lock = threading.Lock()
     warmup_audio = np.zeros(RATE, dtype=np.float32)
+    def _backend_options_for(backend_name: str) -> dict:
+        key = str(backend_name or "").strip().lower().replace("-", "_")
+        value = cfg["models"].get(key, {})
+        return dict(value or {}) if isinstance(value, dict) else {}
+
+    final_backend_options = _backend_options_for(FINAL_BACKEND)
+    realtime_backend_options = _backend_options_for(REALTIME_BACKEND)
     shared_model_signature = (
         str(FINAL_BACKEND).strip().lower(),
         str(FINAL_MODEL).strip(),
@@ -1302,6 +1320,7 @@ def main(args=None):
         str(FINAL_COMPUTE).strip().lower(),
         float(WHISPER_NO_SPEECH_THRESHOLD),
         float(WHISPER_LOG_PROB_THRESHOLD),
+        repr(sorted(final_backend_options.items())),
     )
     realtime_model_signature = (
         str(REALTIME_BACKEND).strip().lower(),
@@ -1310,6 +1329,7 @@ def main(args=None):
         str("default" if REALTIME_DEVICE == "cpu" else FINAL_COMPUTE).strip().lower(),
         float(WHISPER_NO_SPEECH_THRESHOLD),
         float(WHISPER_LOG_PROB_THRESHOLD),
+        repr(sorted(realtime_backend_options.items())),
     )
     reuse_realtime_model = bool(REALTIME_MODEL) and realtime_model_signature == shared_model_signature
 
@@ -1329,6 +1349,7 @@ def main(args=None):
                 compute_type=FINAL_COMPUTE,
                 no_speech_threshold=WHISPER_NO_SPEECH_THRESHOLD,
                 log_prob_threshold=WHISPER_LOG_PROB_THRESHOLD,
+                backend_options=final_backend_options,
             )
             m.warmup(warmup_audio)
             resources['final_model'] = m
@@ -1354,6 +1375,7 @@ def main(args=None):
                 compute_type=compute,
                 no_speech_threshold=WHISPER_NO_SPEECH_THRESHOLD,
                 log_prob_threshold=WHISPER_LOG_PROB_THRESHOLD,
+                backend_options=realtime_backend_options,
             )
             m.warmup(warmup_audio)
             resources['realtime_model'] = m
@@ -1503,6 +1525,19 @@ def main(args=None):
     vad         = resources['vad']
     input_session = resources['input_session']
     stream      = resources['stream']
+
+    file_drop_process = None
+    try:
+        from file_drop_worker import resolve_settings as resolve_file_drop_settings
+
+        file_drop_settings = resolve_file_drop_settings(cfg)
+        if file_drop_settings.enabled and file_drop_settings.auto_start_worker:
+            child_cmd = [sys.executable, str(Path(__file__).resolve()), "--file-drop-worker"]
+            creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0) if background_mode else 0
+            file_drop_process = subprocess.Popen(child_cmd, creationflags=creationflags)
+            logger.info(f"[file-drop] worker started pid={file_drop_process.pid} input={file_drop_settings.input_dir}")
+    except Exception as file_drop_exc:
+        logger.error(f"[file-drop] failed to start worker: {file_drop_exc}")
     p_instance  = resources['p_instance']
     dev_name    = resources['dev_name']
 
@@ -2753,6 +2788,15 @@ def main(args=None):
     if not final_queue.empty():
         logger.info("Waiting for final queue to drain...")
         final_queue.join()
+    if file_drop_process is not None:
+        try:
+            file_drop_process.terminate()
+            file_drop_process.wait(timeout=5.0)
+        except Exception:
+            try:
+                file_drop_process.kill()
+            except Exception:
+                pass
     dispatch({"type": "system", "event": "shutdown"})
     logger.info("Done.")
     os._exit(0)

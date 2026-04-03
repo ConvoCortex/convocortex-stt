@@ -20,6 +20,11 @@ dependencies = [
 
 [project.optional-dependencies]
 windows  = ["pywin32"]
+onnx = [
+    "onnxruntime-gpu>=1.24.3",
+    "tensorrt-cu12-bindings>=10.16.0.72",
+    "tensorrt-cu12-libs>=10.16.0.72",
+]
 
 [tool.uv.sources]
 torch = { index = "pytorch-cu121" }

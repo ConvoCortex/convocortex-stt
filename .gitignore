@@ -14,6 +14,14 @@ inbox/
 output.txt
 buffer.txt
 device-profiles.toml
+done/
+failed/
+input/
+text/
+benchmark-results/
+onnx-cache/
+manual-temp/
+runtime-temp-check/
 .dotnet/
 .nuget-packages/
 bin/

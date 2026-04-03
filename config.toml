@@ -61,6 +61,14 @@ language       = "en"
 no_speech_threshold = 0.45
 log_prob_threshold = -0.8
 
+[models.parakeet_onnx]
+provider = "tensorrt" # "tensorrt", "cuda", "cpu", or "auto"
+device_id = 0
+export_dir = ".tmp/onnx-cache"
+trt_cache_dir = ".tmp/trt-cache"
+trt_fp16_enable = true
+max_threads = 0
+
 [startup]
 # startup is config-driven; runtime state is cleared on each launch
 input_device_source = "config"
@@ -79,6 +87,19 @@ min_chunks       = 10
 max_chunks       = 100
 # queue_size: max pending partial jobs — oldest dropped if full (keeps latency low)
 queue_size       = 1
+
+[file_drop]
+enabled = false
+auto_start_worker = true
+poll_interval_seconds = 2.0
+settle_seconds = 1.0
+input_dir = "input"
+text_dir = "text"
+done_dir = "done"
+failed_dir = "failed"
+worker_log = "stt-file-worker.log"
+write_json_sidecar = true
+supported_extensions = [".wav", ".mp3", ".m4a", ".flac", ".ogg", ".opus", ".aac", ".wma"]
 
 # ── Transcript filters - for handling backend/model hallucinations ─────────────────────────────────────────────────
 # Exact phrases to swallow completely from both partial and final output.
@@ -172,7 +193,7 @@ enabled = true
 
 [voice_commands.enter]
 enabled = true
-words   = ["enter", "And there"] # Exact match or detected at the end of utterance, not detected in the middle.
+words   = ["enter"] # Exact match or detected at the end of utterance, not detected in the middle.
 
 [voice_commands.type_at_cursor_toggle]
 enabled = false
