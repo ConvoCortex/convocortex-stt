@@ -378,6 +378,24 @@ def _normalize_backend_options(options: dict[str, Any] | None) -> dict[str, Any]
     return dict(options or {})
 
 
+def _parse_shape_profile(value: str) -> dict[str, tuple[int, ...]]:
+    parsed: dict[str, tuple[int, ...]] = {}
+    for item in str(value or "").split(","):
+        chunk = item.strip()
+        if not chunk or ":" not in chunk:
+            continue
+        name, dims_raw = chunk.split(":", 1)
+        dims = []
+        for dim in dims_raw.split("x"):
+            dim_value = str(dim).strip()
+            if not dim_value:
+                continue
+            dims.append(int(dim_value))
+        if name.strip() and dims:
+            parsed[name.strip()] = tuple(dims)
+    return parsed
+
+
 def _resolve_onnx_provider(options: dict[str, Any]) -> tuple[list[str], list[dict[str, Any]] | None, str]:
     onnxruntime = _import_onnxruntime_with_cuda_preload()
     requested = str(options.get("provider", "auto")).strip().lower()
@@ -387,11 +405,24 @@ def _resolve_onnx_provider(options: dict[str, Any]) -> tuple[list[str], list[dic
     if requested in {"tensorrt", "tensorrtexecutionprovider", "trt"} and "TensorrtExecutionProvider" in available:
         cache_dir = _resolve_path_like(options.get("trt_cache_dir"), _RUNTIME_TEMP_DIR / "trt-cache")
         cache_dir.mkdir(parents=True, exist_ok=True)
+        profile_min = str(options.get("trt_profile_min_shapes", "")).strip()
+        profile_opt = str(options.get("trt_profile_opt_shapes", "")).strip()
+        profile_max = str(options.get("trt_profile_max_shapes", "")).strip()
+        if not (profile_min and profile_opt and profile_max):
+            profile_min = "audio_signal:1x128x16,length:1"
+            profile_opt = "audio_signal:1x128x1024,length:1"
+            profile_max = "audio_signal:1x128x1536,length:1"
         trt_options = {
             "device_id": device_id,
             "trt_fp16_enable": bool(options.get("trt_fp16_enable", True)),
             "trt_engine_cache_enable": True,
             "trt_engine_cache_path": str(cache_dir),
+            "trt_timing_cache_enable": bool(options.get("trt_timing_cache_enable", True)),
+            "trt_timing_cache_path": str(_resolve_path_like(options.get("trt_timing_cache_path"), cache_dir)),
+            "trt_builder_optimization_level": int(options.get("trt_builder_optimization_level", 0)),
+            "trt_profile_min_shapes": profile_min,
+            "trt_profile_opt_shapes": profile_opt,
+            "trt_profile_max_shapes": profile_max,
         } | extra
         return ["TensorrtExecutionProvider", "CUDAExecutionProvider"], [trt_options, {"device_id": device_id}], "tensorrt"
     if requested in {"cuda", "cudaexecutionprovider"} and "CUDAExecutionProvider" in available:
@@ -401,11 +432,24 @@ def _resolve_onnx_provider(options: dict[str, Any]) -> tuple[list[str], list[dic
     if "TensorrtExecutionProvider" in available:
         cache_dir = _resolve_path_like(options.get("trt_cache_dir"), _RUNTIME_TEMP_DIR / "trt-cache")
         cache_dir.mkdir(parents=True, exist_ok=True)
+        profile_min = str(options.get("trt_profile_min_shapes", "")).strip()
+        profile_opt = str(options.get("trt_profile_opt_shapes", "")).strip()
+        profile_max = str(options.get("trt_profile_max_shapes", "")).strip()
+        if not (profile_min and profile_opt and profile_max):
+            profile_min = "audio_signal:1x128x16,length:1"
+            profile_opt = "audio_signal:1x128x1024,length:1"
+            profile_max = "audio_signal:1x128x1536,length:1"
         trt_options = {
             "device_id": device_id,
             "trt_fp16_enable": bool(options.get("trt_fp16_enable", True)),
             "trt_engine_cache_enable": True,
             "trt_engine_cache_path": str(cache_dir),
+            "trt_timing_cache_enable": bool(options.get("trt_timing_cache_enable", True)),
+            "trt_timing_cache_path": str(_resolve_path_like(options.get("trt_timing_cache_path"), cache_dir)),
+            "trt_builder_optimization_level": int(options.get("trt_builder_optimization_level", 0)),
+            "trt_profile_min_shapes": profile_min,
+            "trt_profile_opt_shapes": profile_opt,
+            "trt_profile_max_shapes": profile_max,
         } | extra
         return ["TensorrtExecutionProvider", "CUDAExecutionProvider"], [trt_options, {"device_id": device_id}], "tensorrt"
     if "CUDAExecutionProvider" in available:
@@ -462,8 +506,21 @@ class ParakeetEncoderRuntimeBackend(TranscriptionBackend):
 
     def warmup(self, audio: np.ndarray) -> None:
         del audio
-        # TensorRT engine build on synthetic startup audio makes app startup feel
-        # hung. Let the first real decode pay that one-time cost instead.
+        if self.provider_label != "tensorrt":
+            return None
+        opt_profile = _parse_shape_profile(str(self.options.get("trt_profile_opt_shapes", "")).strip())
+        audio_shape = opt_profile.get(self.encoder_input_names[0], (1, 128, 512))
+        length_shape = opt_profile.get(self.encoder_input_names[1], (1,))
+        if len(audio_shape) != 3:
+            audio_shape = (1, 128, 512)
+        if len(length_shape) != 1:
+            length_shape = (1,)
+        length_value = np.full(length_shape, audio_shape[-1], dtype=np.int64)
+        dummy_inputs = {
+            self.encoder_input_names[0]: np.zeros(audio_shape, dtype=np.float32),
+            self.encoder_input_names[1]: length_value,
+        }
+        self.encoder_session.run(self.encoder_output_names[:2], dummy_inputs)
         return None
 
     def _ensure_encoder_export(self) -> Path:

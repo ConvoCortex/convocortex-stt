@@ -25,8 +25,8 @@ device_profiles_file = "device-profiles.toml"
 
 [microphone]
 # microphone-mode backends: "faster-whisper", "parakeet", "parakeet-cuda", or "parakeet-tensorrt"
-final_backend    = "parakeet-cuda"
-realtime_backend = "parakeet-cuda"
+final_backend    = "parakeet"
+realtime_backend = "parakeet"
 #
 # faster-whisper models:
 #   tiny, tiny.en, base, base.en, small, small.en, medium, medium.en
@@ -96,6 +96,12 @@ max_chunks       = 100
 queue_size       = 1
 
 [file_drop]
+# files-mode backends: "faster-whisper", "parakeet", "parakeet-cuda", or "parakeet-tensorrt"
+backend = "parakeet-tensorrt"
+model = "nvidia/parakeet-tdt-0.6b-v2"
+device = "cuda"
+compute = "float16"
+language = "en"
 poll_interval_seconds = 2.0
 settle_seconds = 1.0
 input_dir = "files/speech"
@@ -105,13 +111,6 @@ failed_dir = "files/failed"
 worker_log = "stt-file-worker.log"
 write_json_sidecar = true
 supported_extensions = [".wav", ".mp3", ".m4a", ".flac", ".ogg", ".opus", ".aac", ".wma"]
-# explicit files-engine transcription config
-# files-mode backends: "faster-whisper", "parakeet", "parakeet-cuda", or "parakeet-tensorrt"
-backend = "parakeet"
-model = "nvidia/parakeet-tdt-0.6b-v2"
-device = "cuda"
-compute = "float16"
-language = "en"
 no_speech_threshold = 0.45
 log_prob_threshold = -0.8
 

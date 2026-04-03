@@ -5,6 +5,7 @@ import json
 import logging
 import os
 import re
+import shutil
 import sys
 import threading
 import time
@@ -30,6 +31,7 @@ SUPPORTED_AUDIO_EXTENSIONS = (
     ".wav",
     ".wma",
 )
+PROCESSING_NAME_RE = re.compile(r"^(?P<base>.+)\.processing-(?P<pid>\d+)(?P<suffix>\.[^.]+)$", re.IGNORECASE)
 
 
 def _resolve_path(value: str | None, default: str) -> Path:
@@ -116,6 +118,36 @@ def _unique_path(directory: Path, stem: str, suffix: str) -> Path:
 
 def _claim_name(path: Path, pid: int) -> Path:
     return path.with_name(f"{path.stem}.processing-{pid}{path.suffix}")
+
+
+def _split_processing_name(path: Path) -> tuple[str, int, str] | None:
+    match = PROCESSING_NAME_RE.match(path.name)
+    if not match:
+        return None
+    return (
+        str(match.group("base")),
+        int(match.group("pid")),
+        str(match.group("suffix")),
+    )
+
+
+def _pid_exists(pid: int) -> bool:
+    if pid <= 0:
+        return False
+    try:
+        if os.name == "nt":
+            import ctypes
+
+            PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+            handle = ctypes.windll.kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+            if handle:
+                ctypes.windll.kernel32.CloseHandle(handle)
+                return True
+            return False
+        os.kill(pid, 0)
+        return True
+    except Exception:
+        return False
 
 
 def _load_audio_for_transcription(path: Path, target_rate: int) -> tuple[np.ndarray, dict]:
@@ -243,6 +275,31 @@ class FileDropWorker:
         self.disfluency_words = tuple(cfg.get("filters", {}).get("disfluency_words", []) or [])
         self._backend = None
 
+    def _recover_orphaned_processing_files(self) -> None:
+        for directory in (self.settings.input_dir, self.settings.done_dir, self.settings.failed_dir):
+            if not directory.exists():
+                continue
+            for path in directory.iterdir():
+                if not path.is_file():
+                    continue
+                parsed = _split_processing_name(path)
+                if parsed is None:
+                    continue
+                base, pid, suffix = parsed
+                if _pid_exists(pid):
+                    continue
+                target = _unique_path(directory, base, suffix)
+                try:
+                    path.replace(target)
+                    logger.warning(
+                        "[file-drop] recovered orphaned claimed file %s -> %s (dead_pid=%s)",
+                        path.name,
+                        target.name,
+                        pid,
+                    )
+                except Exception as exc:
+                    logger.warning("[file-drop] failed to recover orphaned file %s: %s", path.name, exc)
+
     def ensure_ready(self) -> None:
         for directory in (
             self.settings.input_dir,
@@ -252,6 +309,7 @@ class FileDropWorker:
         ):
             directory.mkdir(parents=True, exist_ok=True)
         self.settings.worker_log.parent.mkdir(parents=True, exist_ok=True)
+        self._recover_orphaned_processing_files()
         if self._backend is None:
             logger.info(
                 "[file-drop] loading backend=%s model=%s device=%s",
@@ -337,7 +395,20 @@ class FileDropWorker:
         self.ensure_ready()
         started = time.perf_counter()
         source_name = claimed_path.name.replace(f".processing-{os.getpid()}", "")
+        logger.info(
+            "[file-drop] claimed %s backend=%s model=%s device=%s",
+            source_name,
+            self.settings.final_backend,
+            self.settings.final_model,
+            self.settings.final_device,
+        )
         audio, audio_meta = _load_audio_for_transcription(claimed_path, self.rate)
+        logger.info(
+            "[file-drop] transcribing %s duration=%ss backend=%s",
+            source_name,
+            audio_meta["audio_duration_s"],
+            self.settings.final_backend,
+        )
 
         infer_started = time.perf_counter()
         result = self._backend.transcribe(
@@ -347,6 +418,15 @@ class FileDropWorker:
         )
         raw_text = result.text
         inference_ms = (time.perf_counter() - infer_started) * 1000.0
+        metrics = dict(getattr(result, "metrics", {}) or {})
+        if metrics.get("onnx_provider_active"):
+            logger.info(
+                "[file-drop] %s provider=%s encoder_ms=%s decoder_ms=%s",
+                source_name,
+                metrics.get("onnx_provider_active"),
+                metrics.get("encoder_inference_ms", ""),
+                metrics.get("decoder_inference_ms", ""),
+            )
 
         ignored_exact_match = _should_ignore_transcript(raw_text, self.ignored_phrases)
         cleaned_text = "" if ignored_exact_match else _strip_disfluencies(raw_text, self.disfluency_words)
@@ -369,7 +449,7 @@ class FileDropWorker:
             "realtime_factor": _format_seconds(realtime_factor),
             "throughput_x": _format_seconds(throughput_x),
             **audio_meta,
-            **dict(getattr(result, "metrics", {}) or {}),
+            **metrics,
         }
         text_path, json_path = self._write_outputs(source_name, cleaned_text, metadata)
         done_path = self._move_claimed(claimed_path, self.settings.done_dir)
