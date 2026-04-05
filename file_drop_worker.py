@@ -254,7 +254,7 @@ def resolve_settings(
         text_dir=_resolve_path(text_dir or file_cfg.get("text_dir"), "files/text"),
         done_dir=_resolve_path(done_dir or file_cfg.get("done_dir"), "files/done"),
         failed_dir=_resolve_path(failed_dir or file_cfg.get("failed_dir"), "files/failed"),
-        rejected_dir=_resolve_path(file_cfg.get("rejected_dir"), "files/rejected"),
+        rejected_dir=_resolve_path(file_cfg.get("rejected_dir"), "file-drop/rejected"),
         worker_log=_resolve_path(file_cfg.get("worker_log"), "stt-file-worker.log"),
         supported_extensions=supported,
         final_backend=resolved_backend,
@@ -278,7 +278,7 @@ class FileDropWorker:
         self.disfluency_words = tuple(cfg.get("filters", {}).get("disfluency_words", []) or [])
         self._backend = None
         self._speaker_verifier = None
-        self._speaker_cfg = cfg.get("speaker", {}) or {}
+        self._speaker_cfg = cfg.get("speaker_recognition", {}) or {}
 
     def _recover_orphaned_processing_files(self) -> None:
         for directory in (self.settings.input_dir, self.settings.done_dir, self.settings.failed_dir):
@@ -339,10 +339,10 @@ class FileDropWorker:
         if (
             self._speaker_verifier is None
             and bool(self._speaker_cfg.get("enabled", False))
-            and bool(self._speaker_cfg.get("apply_to_files", True))
+            and bool(self._speaker_cfg.get("apply_to_files", False))
         ):
             self._speaker_verifier = SpeakerVerifier(
-                profile_path=_resolve_path(self._speaker_cfg.get("profile_file"), "speaker-profile.json"),
+                profile_path=_resolve_path(self._speaker_cfg.get("profile_file"), "speaker-recognition/profile.json"),
                 model_name=str(self._speaker_cfg.get("model", "ecapa_tdnn")).strip() or "ecapa_tdnn",
                 requested_device=str(self._speaker_cfg.get("device", "cuda")).strip().lower() or "cuda",
                 sample_rate=self.rate,

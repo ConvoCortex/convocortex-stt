@@ -47,10 +47,9 @@ That is controlled by `startup.start_microphone` and `startup.start_files` in `c
 The app exposes a console and tray icon on Windows.
 If the console window is minimized, it is hidden to the tray instead of staying on the taskbar as a minimized console window.
 
-If any interactive startup setup is pending, the app stays in the foreground
+If interactive startup setup is pending, the app stays in the foreground
 instead of hiding to tray first. Today that means:
 - `startup.device_setup_initialized = false`
-- `startup.speaker_recognition_setup_initialized = false`
 - missing device profiles file
 
 If `startup.device_setup_initialized = false` or the device profiles file is
@@ -169,7 +168,8 @@ For a proper, richer voice command engine, use the emitted NATS events and imple
 - Per-file timing output for fixed-input comparison runs
 - Built-in audio feedback sounds (on/off/final + silence loop for bluetooth audio issues)
 - Simple built-in voice command actions
-- Optional me-only speaker verification with explicit enrollment
+- Optional me-only speaker recognition from curated sample files
+- Optional saved microphone utterance clips for later review/training
 - Draft-buffer workflow for reviewing/editing before release
 - Local output handlers:
   - append file
@@ -278,7 +278,8 @@ All runtime settings live in `config.toml` and are loaded at startup.
 
 Important areas:
 - `microphone`: backend choice plus realtime/final models and device choices
-- `speaker`: me-only speaker verification, enrollment, threshold, and profile location
+- `speaker_recognition`: me-only speaker recognition, threshold, and sample/profile paths
+- `recording`: optional saved microphone utterance clips
 - `microphone.parakeet_cuda` / `microphone.parakeet_tensorrt`: encoder-runtime settings for the `parakeet-cuda` and `parakeet-tensorrt` backends
 - `microphone.no_speech_threshold` / `microphone.log_prob_threshold`: faster-whisper-only silence / low-confidence rejection for reducing spurious transcripts
 - `audio`: VAD behavior + silence timeout + preferred input, especially `vad_threshold`, `vad_end_threshold`, and `min_speech_duration_ms` for speech-vs-noise gating
@@ -299,7 +300,7 @@ Backend guidance:
 - `faster-whisper` stays available when you prefer that tradeoff.
 - `parakeet-cuda` and `parakeet-tensorrt` are experimental accelerated variants, not the default path.
 
-### Speaker verification
+### Speaker recognition
 
 The repo can optionally run in a me-only mode:
 - your speech passes through
@@ -308,14 +309,15 @@ The repo can optionally run in a me-only mode:
 
 This is not diarization and not spoof-resistant identity security. It is a practical ownership filter so the system does not respond to other voices nearby.
 
-The speaker profile is local-only and stored in `speaker.profile_file` such as `speaker-profile.json`.
+The speaker profile is local-only and stored in `speaker_recognition.profile_file`, while the source-of-truth voice corpus lives in `speaker_recognition.samples_dir`.
 
-Enrollment is explicit:
-- set `speaker.enabled = true`
-- if no profile exists, or `startup.speaker_recognition_setup_initialized = false`, the app runs enrollment before normal startup
-- or run `uv run python stt.py --speaker-enroll`
+There is no interactive enrollment wizard anymore. The workflow is:
+- put curated `me` voice clips into `speaker-recognition/samples/`
+- set `speaker_recognition.enabled = true`
+- startup rebuilds `speaker-recognition/profile.json` once if those sample files changed
+- live microphone STT and file-drop use that built profile when enabled
 
-Enrollment records a fixed number of fixed-length samples with explicit countdown prompts. It does not use hidden start/stop logic.
+If you want the app to also behave like a simple pause-chunked microphone recorder, turn on `recording.save_utterance_clips = true`. It saves finalized live utterance audio clips into `recordings/utterance-clips/`, and you can copy the good ones into `speaker-recognition/samples/`.
 
 `feedback.silence_keepalive_mode = "always"` keeps `sounds/silence.ogg` looping continuously on the feedback output device. Set it to `"off"` to disable that keepalive.
 
@@ -388,7 +390,7 @@ The file worker watches:
 - `file_drop.text_dir` for transcript outputs (`.txt` plus optional `.json` sidecar)
 - `file_drop.done_dir` for handled audio
 - `file_drop.failed_dir` for files that could not be transcribed
-- `file_drop.rejected_dir` for files blocked by speaker verification
+- `file_drop.rejected_dir` for files blocked by speaker recognition
 - `file_drop.backend`, `file_drop.model`, `file_drop.device`, `file_drop.compute`, and `file_drop.language` for the transcription engine itself
 
 The transcript `.txt` output includes:
@@ -399,7 +401,7 @@ The transcript `.txt` output includes:
 - total job time
 - realtime factor / throughput
 
-If speaker verification blocks a file, it is moved to `file_drop.rejected_dir` and the sidecar metadata records the speaker score, threshold, and rejection reason instead of producing a transcript.
+If speaker recognition blocks a file, it is moved to `file_drop.rejected_dir` and the sidecar metadata records the speaker score, threshold, and rejection reason instead of producing a transcript.
 
 Useful commands:
 

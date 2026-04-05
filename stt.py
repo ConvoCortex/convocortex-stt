@@ -17,6 +17,7 @@ import re
 import threading
 import logging
 import os
+import wave
 from collections import deque
 from pathlib import Path
 
@@ -492,7 +493,6 @@ PREFERRED_INPUT_DEVICE = str(cfg["audio"].get("input_device", "")).strip()
 DEVICE_PROFILES_PATH = Path(str(cfg["audio"].get("device_profiles_file", "device-profiles.json")).strip() or "device-profiles.json")
 _startup_cfg = cfg.get("startup", {})
 DEVICE_SETUP_INITIALIZED = bool(_startup_cfg.get("device_setup_initialized", False))
-SPEAKER_SETUP_INITIALIZED = bool(_startup_cfg.get("speaker_recognition_setup_initialized", True))
 
 
 def _normalize_console_startup_mode(value, default: str = "foreground") -> str:
@@ -520,7 +520,7 @@ START_FILES_MODE = bool(_startup_cfg.get("start_files", False))
 def _interactive_startup_pending(force_speaker: bool = False) -> bool:
     if not DEVICE_SETUP_INITIALIZED or not DEVICE_PROFILES_PATH.exists():
         return True
-    return _speaker_enrollment_pending(force=force_speaker)
+    return False
 
 # ── Realtime ──────────────────────────────────────────────────────────────────
 RT_CHECK_INTERVAL = cfg["realtime"]["check_interval"]
@@ -528,21 +528,24 @@ MIN_CHUNKS        = cfg["realtime"]["min_chunks"]
 MAX_CHUNKS        = cfg["realtime"]["max_chunks"]
 RT_QUEUE_SIZE     = cfg["realtime"]["queue_size"]
 
-# ── Speaker verification ──────────────────────────────────────────────────────
-_speaker_cfg = cfg.get("speaker", {}) or {}
+# ── Speaker recognition ───────────────────────────────────────────────────────
+_speaker_cfg = cfg.get("speaker_recognition", {}) or {}
 SPEAKER_ENABLED = bool(_speaker_cfg.get("enabled", False))
 SPEAKER_MODE = str(_speaker_cfg.get("mode", "me-only")).strip() or "me-only"
 SPEAKER_APPLY_TO_MICROPHONE = bool(_speaker_cfg.get("apply_to_microphone", True))
-SPEAKER_APPLY_TO_FILES = bool(_speaker_cfg.get("apply_to_files", True))
+SPEAKER_APPLY_TO_FILES = bool(_speaker_cfg.get("apply_to_files", False))
 SPEAKER_GATE_WAKE = bool(_speaker_cfg.get("gate_wake", True))
 SPEAKER_DEVICE = str(_speaker_cfg.get("device", "cuda")).strip().lower() or "cuda"
 SPEAKER_MODEL = str(_speaker_cfg.get("model", "ecapa_tdnn")).strip() or "ecapa_tdnn"
-SPEAKER_PROFILE_FILE = _resolve_repo_path(_speaker_cfg.get("profile_file", "speaker-profile.json"))
+SPEAKER_SAMPLES_DIR = _resolve_repo_path(_speaker_cfg.get("samples_dir", "speaker-recognition/samples"))
+SPEAKER_PROFILE_FILE = _resolve_repo_path(_speaker_cfg.get("profile_file", "speaker-recognition/profile.json"))
 SPEAKER_THRESHOLD = float(_speaker_cfg.get("threshold", 0.72))
 SPEAKER_MIN_VERIFY_SPEECH_SECONDS = float(_speaker_cfg.get("min_verify_speech_seconds", 1.2))
-SPEAKER_ENROLLMENT_SAMPLES = max(1, int(_speaker_cfg.get("enrollment_samples", 3)))
-SPEAKER_ENROLLMENT_SAMPLE_SECONDS = max(1.0, float(_speaker_cfg.get("enrollment_sample_seconds", 6.0)))
-SPEAKER_ADAPT_ACCEPTED_AUDIO = bool(_speaker_cfg.get("adapt_accepted_audio", False))
+
+# ── Recording ─────────────────────────────────────────────────────────────────
+_recording_cfg = cfg.get("recording", {}) or {}
+SAVE_UTTERANCE_CLIPS = bool(_recording_cfg.get("save_utterance_clips", False))
+UTTERANCE_CLIPS_DIR = _resolve_repo_path(_recording_cfg.get("utterance_clips_dir", "recordings/utterance-clips"))
 
 # ── Sleep / Wake ───────────────────────────────────────────────────────────────
 _sw_cfg = cfg.get("sleep_wake", {})
@@ -1015,14 +1018,28 @@ def _open_startup_input_capture(p: pyaudio.PyAudio, *, log_prefix: str = "[input
     )
 
 
-def _run_speaker_enrollment() -> bool:
-    logger.info(
-        "[speaker] Starting enrollment samples=%s seconds=%s model=%s device_preference=%s",
-        SPEAKER_ENROLLMENT_SAMPLES,
-        SPEAKER_ENROLLMENT_SAMPLE_SECONDS,
-        SPEAKER_MODEL,
-        SPEAKER_DEVICE,
+def _speaker_sample_paths(samples_dir: Path) -> list[Path]:
+    supported = {".wav", ".mp3", ".m4a", ".flac", ".ogg", ".opus", ".aac", ".wma"}
+    if not samples_dir.exists():
+        return []
+    return sorted(
+        [
+            path
+            for path in samples_dir.iterdir()
+            if path.is_file() and path.suffix.lower() in supported
+        ],
+        key=lambda item: item.name.lower(),
     )
+
+
+def _ensure_speaker_profile() -> bool:
+    if not SPEAKER_ENABLED:
+        return False
+    sample_paths = _speaker_sample_paths(SPEAKER_SAMPLES_DIR)
+    if not sample_paths:
+        raise RuntimeError(
+            f"Speaker recognition is enabled but no sample files were found in {SPEAKER_SAMPLES_DIR}"
+        )
     verifier = SpeakerVerifier(
         profile_path=SPEAKER_PROFILE_FILE,
         model_name=SPEAKER_MODEL,
@@ -1031,94 +1048,54 @@ def _run_speaker_enrollment() -> bool:
         threshold=SPEAKER_THRESHOLD,
         mode=SPEAKER_MODE,
     )
-
-    p = pyaudio.PyAudio()
-    input_session = None
-    try:
-        device_info, input_session = _open_startup_input_capture(p, log_prefix="[speaker]", emit_logs=True)
+    rebuild_required = not verifier.profile_matches_corpus(sample_paths)
+    if rebuild_required:
         logger.info(
-            "[speaker] Enrollment input: %s (capture_rate=%sHz -> verify_rate=%sHz)",
-            device_info["name"],
-            int(input_session.capture_rate),
-            RATE,
+            "[speaker] rebuilding profile from %s sample file(s) in %s",
+            len(sample_paths),
+            SPEAKER_SAMPLES_DIR,
         )
-        sample_count = int(math.ceil(SPEAKER_ENROLLMENT_SAMPLE_SECONDS * RATE / CHUNK))
-        accepted_samples: list[np.ndarray] = []
-        sample_metadata: list[dict] = []
-        sample_index = 0
-        while sample_index < SPEAKER_ENROLLMENT_SAMPLES:
-            logger.info("[speaker] Enrollment sample %s/%s", sample_index + 1, SPEAKER_ENROLLMENT_SAMPLES)
-            for count in (3, 2, 1):
-                logger.info("[speaker] %s...", count)
-                time.sleep(1.0)
-            logger.info("[speaker] Start speaking now.")
-            chunks: list[np.ndarray] = []
-            for _ in range(sample_count):
-                data, _ = input_session.read_chunk()
-                chunks.append(np.frombuffer(data, dtype=np.int16))
-            logger.info("[speaker] Stop.")
-            audio = np.concatenate(chunks).astype(np.float32) / 32768.0 if chunks else np.zeros(0, dtype=np.float32)
-            duration_s = float(audio.size) / float(RATE) if audio.size else 0.0
-            rms = float(np.sqrt(np.mean(audio ** 2))) if audio.size else 0.0
-            speech_ratio = float(np.mean(np.abs(audio) > 0.01)) if audio.size else 0.0
-            if duration_s < 1.0 or rms < 0.005 or speech_ratio < 0.02:
-                logger.warning(
-                    "[speaker] Sample rejected duration=%ss rms=%.4f speech_ratio=%.4f; try again.",
-                    round(duration_s, 3),
-                    rms,
-                    speech_ratio,
-                )
-                continue
-            accepted_samples.append(audio)
-            sample_metadata.append(
-                {
-                    "sample_index": sample_index + 1,
-                    "duration_s": round(duration_s, 3),
-                    "rms": round(rms, 6),
-                    "speech_ratio": round(speech_ratio, 6),
-                }
-            )
-            sample_index += 1
-
-        profile = verifier.create_profile(
-            accepted_samples,
-            sample_rate=RATE,
-            sample_metadata=sample_metadata,
-        )
+        profile = verifier.build_profile_from_paths(sample_paths)
+        SPEAKER_PROFILE_FILE.parent.mkdir(parents=True, exist_ok=True)
         verifier.save_profile(profile)
-        for line in verifier.startup_logs():
-            logger.info(f"[speaker] {line}")
-        _set_config_bool_flag("startup", "speaker_recognition_setup_initialized", True, log_label="speaker")
-        logger.info("[speaker] Enrollment complete profile=%s", SPEAKER_PROFILE_FILE)
-        return True
-    finally:
-        try:
-            if input_session is not None:
-                input_session.close()
-        except Exception:
-            pass
-        try:
-            p.terminate()
-        except Exception:
-            pass
+    else:
+        logger.info(
+            "[speaker] reusing existing profile from %s for %s sample file(s)",
+            SPEAKER_PROFILE_FILE,
+            len(sample_paths),
+        )
+    verifier.ensure_ready(load_profile=True)
+    for line in verifier.startup_logs():
+        logger.info(f"[speaker] {line}")
+    return rebuild_required
 
 
-def _maybe_run_speaker_enrollment(*, force: bool = False) -> bool:
-    if not force and not SPEAKER_ENABLED:
-        return False
-    profile_exists = Path(SPEAKER_PROFILE_FILE).exists()
-    if not force and profile_exists and SPEAKER_SETUP_INITIALIZED:
-        return False
-    return _run_speaker_enrollment()
-
-
-def _speaker_enrollment_pending(*, force: bool = False) -> bool:
-    if force:
-        return True
-    if not SPEAKER_ENABLED:
-        return False
-    profile_exists = Path(SPEAKER_PROFILE_FILE).exists()
-    return (not profile_exists) or (not SPEAKER_SETUP_INITIALIZED)
+def _save_utterance_clip(epoch: int, audio_chunks: list[np.ndarray], *, started_at: float | None = None) -> Path | None:
+    if not SAVE_UTTERANCE_CLIPS or not audio_chunks:
+        return None
+    try:
+        UTTERANCE_CLIPS_DIR.mkdir(parents=True, exist_ok=True)
+        stamp = time.strftime("%Y%m%d-%H%M%S")
+        millis = int((time.time() % 1.0) * 1000.0)
+        filename = f"utterance-{stamp}-{millis:03d}-e{int(epoch)}.wav"
+        out_path = UTTERANCE_CLIPS_DIR / filename
+        pcm = np.concatenate(audio_chunks).astype(np.int16, copy=False)
+        with wave.open(str(out_path), "wb") as handle:
+            handle.setnchannels(1)
+            handle.setsampwidth(2)
+            handle.setframerate(RATE)
+            handle.writeframes(pcm.tobytes())
+        duration_s = float(pcm.size) / float(RATE) if RATE else 0.0
+        logger.info(
+            "[recording] saved utterance clip epoch=%s duration=%.2fs path=%s",
+            epoch,
+            duration_s,
+            out_path,
+        )
+        return out_path
+    except Exception as exc:
+        logger.error("[recording] failed to save utterance clip epoch=%s: %s", epoch, exc)
+        return None
 
 # ── Event dispatch ────────────────────────────────────────────────────────────
 # Handlers are registered at startup. Each receives every event dict.
@@ -1493,7 +1470,6 @@ def main(args=None):
     argv = list(sys.argv[1:] if args is None else args)
     cli = argparse.ArgumentParser(add_help=False)
     cli.add_argument("--file-drop-worker", action="store_true")
-    cli.add_argument("--speaker-enroll", action="store_true")
     parsed, remaining = cli.parse_known_args(argv)
     if parsed.file_drop_worker:
         from file_drop_worker import run_from_args as run_file_drop_worker
@@ -1508,7 +1484,7 @@ def main(args=None):
         console_controller.start_minimize_to_tray()
         try:
             if SPEAKER_ENABLED and SPEAKER_APPLY_TO_FILES:
-                _maybe_run_speaker_enrollment(force=False)
+                _ensure_speaker_profile()
             return run_file_drop_worker(remaining)
         finally:
             try:
@@ -1517,24 +1493,6 @@ def main(args=None):
                 pass
             try:
                 tray_icon.stop()
-            except Exception:
-                pass
-
-    if parsed.speaker_enroll:
-        console_controller = WindowsConsoleController()
-        tray_icon = WindowsTrayIcon(console_controller)
-        if tray_icon.available and not tray_icon.start():
-            logger.warning("[tray] Failed to start tray icon thread.")
-        console_controller.start_minimize_to_tray()
-        try:
-            return 0 if _maybe_run_speaker_enrollment(force=True) else 1
-        finally:
-            try:
-                tray_icon.stop()
-            except Exception:
-                pass
-            try:
-                console_controller.stop_minimize_to_tray()
             except Exception:
                 pass
 
@@ -1572,7 +1530,7 @@ def main(args=None):
         return 1
 
     if SPEAKER_ENABLED:
-        _maybe_run_speaker_enrollment(force=False)
+        _ensure_speaker_profile()
 
     file_drop_thread = None
     file_drop_stop_event = None
@@ -3189,7 +3147,9 @@ def main(args=None):
                     if silence_counter > silence_limit:
                         with state_lock: epoch = state['speech_epoch']
                         is_recording = False
-                        final_queue.put((epoch, current_t0, list(recording_buffer)))
+                        finalized_chunks = list(recording_buffer)
+                        _save_utterance_clip(epoch, finalized_chunks, started_at=current_t0)
+                        final_queue.put((epoch, current_t0, finalized_chunks))
                         debug_log(
                             f"[speech] finalize epoch={epoch} chunks={len(recording_buffer)} "
                             f"silence_counter={silence_counter} final_queue={final_queue.qsize()}"

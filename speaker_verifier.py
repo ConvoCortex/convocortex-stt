@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
-import math
+import hashlib
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -97,6 +97,21 @@ class SpeakerVerifier:
     def has_profile(self) -> bool:
         return self.profile_path.exists()
 
+    def corpus_fingerprint(self, sample_paths: list[Path]) -> str:
+        hasher = hashlib.sha256()
+        for path in sorted(sample_paths, key=lambda item: str(item).lower()):
+            stat = path.stat()
+            hasher.update(str(path.resolve()).encode("utf-8"))
+            hasher.update(str(int(stat.st_mtime_ns)).encode("ascii"))
+            hasher.update(str(int(stat.st_size)).encode("ascii"))
+        return hasher.hexdigest()
+
+    def profile_matches_corpus(self, sample_paths: list[Path]) -> bool:
+        if not self.profile_path.exists():
+            return False
+        payload = json.loads(self.profile_path.read_text(encoding="utf-8"))
+        return str(payload.get("samples_fingerprint") or "") == self.corpus_fingerprint(sample_paths)
+
     def load_profile(self) -> dict[str, Any]:
         if not self.profile_path.exists():
             raise FileNotFoundError(f"speaker profile not found: {self.profile_path}")
@@ -118,6 +133,18 @@ class SpeakerVerifier:
             **serializable,
             "centroid": centroid,
         }
+
+    def load_audio_file(self, path: Path) -> tuple[np.ndarray, int]:
+        import torchaudio
+
+        waveform, source_rate = torchaudio.load(str(path))
+        if waveform.numel() == 0:
+            raise ValueError(f"speaker sample is empty: {path}")
+        if waveform.ndim == 1:
+            mono = waveform
+        else:
+            mono = waveform.mean(dim=0)
+        return mono.detach().cpu().numpy().astype(np.float32).reshape(-1), int(source_rate)
 
     def embed_audio(self, audio: np.ndarray, sample_rate: int) -> np.ndarray:
         self.ensure_ready(load_profile=False)
@@ -143,9 +170,10 @@ class SpeakerVerifier:
         *,
         sample_rate: int,
         sample_metadata: list[dict[str, Any]] | None = None,
+        samples_fingerprint: str | None = None,
     ) -> dict[str, Any]:
         if not samples:
-            raise ValueError("speaker enrollment requires at least one sample")
+            raise ValueError("speaker profile build requires at least one sample")
         embeddings = [self.embed_audio(sample, sample_rate) for sample in samples]
         centroid = np.mean(np.stack(embeddings, axis=0), axis=0).astype(np.float32)
         return {
@@ -157,7 +185,38 @@ class SpeakerVerifier:
             "created_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
             "embedding_dim": int(centroid.size),
             "centroid": centroid,
-            "enrollment_samples": sample_metadata or [],
+            "samples_fingerprint": str(samples_fingerprint or ""),
+            "samples": sample_metadata or [],
+        }
+
+    def build_profile_from_paths(self, sample_paths: list[Path]) -> dict[str, Any]:
+        normalized_paths = [Path(path) for path in sample_paths]
+        if not normalized_paths:
+            raise ValueError("speaker sample directory is empty")
+        embeddings: list[np.ndarray] = []
+        metadata: list[dict[str, Any]] = []
+        for path in sorted(normalized_paths, key=lambda item: str(item).lower()):
+            audio, source_rate = self.load_audio_file(path)
+            embeddings.append(self.embed_audio(audio, source_rate))
+            metadata.append(
+                {
+                    "path": str(path),
+                    "source_sample_rate": int(source_rate),
+                    "duration_s": round(float(audio.size) / float(source_rate), 6) if source_rate else 0.0,
+                }
+            )
+        centroid = np.mean(np.stack(embeddings, axis=0), axis=0).astype(np.float32)
+        return {
+            "version": 1,
+            "mode": self.mode,
+            "model": self.model_name,
+            "device": self._device,
+            "sample_rate": self.sample_rate,
+            "created_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+            "embedding_dim": int(centroid.size),
+            "centroid": centroid,
+            "samples_fingerprint": self.corpus_fingerprint(normalized_paths),
+            "samples": metadata,
         }
 
     def verify_audio(
@@ -188,4 +247,3 @@ class SpeakerVerifier:
             reason="accepted" if accepted else "below_threshold",
             duration_s=duration_s,
         )
-
