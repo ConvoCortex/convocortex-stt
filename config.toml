@@ -100,6 +100,22 @@ max_chunks       = 100
 # queue_size: max pending partial jobs — oldest dropped if full (keeps latency low)
 queue_size       = 1
 
+[speaker]
+enabled = false
+mode = "me-only"
+apply_to_microphone = true
+apply_to_files = true
+gate_wake = true
+device = "cuda"
+model = "ecapa_tdnn"
+profile_file = "speaker-profile.json"
+threshold = 0.72
+min_verify_speech_seconds = 1.2
+enrollment_required = false
+enrollment_samples = 3
+enrollment_sample_seconds = 6.0
+adapt_accepted_audio = false
+
 [file_drop]
 # files-mode backends: "faster-whisper", "parakeet", "parakeet-cuda", or "parakeet-tensorrt"
 # recommended default: "parakeet"
@@ -115,6 +131,7 @@ input_dir = "files/speech"
 text_dir = "files/text"
 done_dir = "files/done"
 failed_dir = "files/failed"
+rejected_dir = "files/rejected"
 worker_log = "stt-file-worker.log"
 write_json_sidecar = true
 supported_extensions = [".wav", ".mp3", ".m4a", ".flac", ".ogg", ".opus", ".aac", ".wma"]
