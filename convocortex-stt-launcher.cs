@@ -56,6 +56,7 @@ internal static class Program
         if (!File.Exists(configPath)) return "background";
         string deviceProfilesFile = "device-profiles.toml";
         bool deviceSetupInitialized = false;
+        bool interactiveStartupPending = false;
         bool inStartup = false;
         bool inAudio = false;
 
@@ -81,6 +82,20 @@ internal static class Program
             if (inStartup && string.Equals(key, "device_setup_initialized", StringComparison.OrdinalIgnoreCase))
             {
                 deviceSetupInitialized = string.Equals(value, "true", StringComparison.OrdinalIgnoreCase);
+                if (!deviceSetupInitialized)
+                {
+                    interactiveStartupPending = true;
+                }
+                continue;
+            }
+
+            if (inStartup && key.EndsWith("_setup_initialized", StringComparison.OrdinalIgnoreCase))
+            {
+                bool initialized = string.Equals(value, "true", StringComparison.OrdinalIgnoreCase);
+                if (!initialized)
+                {
+                    interactiveStartupPending = true;
+                }
                 continue;
             }
 
@@ -105,7 +120,7 @@ internal static class Program
             string deviceProfilesPath = Path.IsPathRooted(deviceProfilesFile)
                 ? deviceProfilesFile
                 : Path.Combine(repoRoot, deviceProfilesFile);
-            if (!deviceSetupInitialized || !File.Exists(deviceProfilesPath))
+            if (interactiveStartupPending || !deviceSetupInitialized || !File.Exists(deviceProfilesPath))
             {
                 return "foreground";
             }
@@ -115,7 +130,7 @@ internal static class Program
         string fallbackProfilesPath = Path.IsPathRooted(deviceProfilesFile)
             ? deviceProfilesFile
             : Path.Combine(repoRoot, deviceProfilesFile);
-        if (!deviceSetupInitialized || !File.Exists(fallbackProfilesPath))
+        if (interactiveStartupPending || !deviceSetupInitialized || !File.Exists(fallbackProfilesPath))
         {
             return "foreground";
         }

@@ -47,11 +47,17 @@ That is controlled by `startup.start_microphone` and `startup.start_files` in `c
 The app exposes a console and tray icon on Windows.
 If the console window is minimized, it is hidden to the tray instead of staying on the taskbar as a minimized console window.
 
+If any interactive startup setup is pending, the app stays in the foreground
+instead of hiding to tray first. Today that means:
+- `startup.device_setup_initialized = false`
+- `startup.speaker_recognition_setup_initialized = false`
+- missing device profiles file
+
 If `startup.device_setup_initialized = false` or the device profiles file is
 missing, the app runs interactive device setup so you can pick the input and
-output devices in the order they should be used for startup and runtime cycling. To rerun it
-manually, set `startup.device_setup_initialized = false` in `config.toml` and
-start the app again.
+output devices in the order they should be used for startup and runtime cycling.
+To rerun it manually, set `startup.device_setup_initialized = false` in
+`config.toml` and start the app again.
 
 `device-profiles.toml` is local machine-specific config, not runtime state.
 Order matters there:
@@ -306,7 +312,7 @@ The speaker profile is local-only and stored in `speaker.profile_file` such as `
 
 Enrollment is explicit:
 - set `speaker.enabled = true`
-- if no profile exists, or `speaker.enrollment_required = true`, the app runs enrollment before normal startup
+- if no profile exists, or `startup.speaker_recognition_setup_initialized = false`, the app runs enrollment before normal startup
 - or run `uv run python stt.py --speaker-enroll`
 
 Enrollment records a fixed number of fixed-length samples with explicit countdown prompts. It does not use hidden start/stop logic.

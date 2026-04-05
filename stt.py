@@ -492,6 +492,7 @@ PREFERRED_INPUT_DEVICE = str(cfg["audio"].get("input_device", "")).strip()
 DEVICE_PROFILES_PATH = Path(str(cfg["audio"].get("device_profiles_file", "device-profiles.json")).strip() or "device-profiles.json")
 _startup_cfg = cfg.get("startup", {})
 DEVICE_SETUP_INITIALIZED = bool(_startup_cfg.get("device_setup_initialized", False))
+SPEAKER_SETUP_INITIALIZED = bool(_startup_cfg.get("speaker_recognition_setup_initialized", True))
 
 
 def _normalize_console_startup_mode(value, default: str = "foreground") -> str:
@@ -515,6 +516,12 @@ CONSOLE_STARTUP_MODE = _normalize_console_startup_mode(
 START_MICROPHONE_MODE = bool(_startup_cfg.get("start_microphone", True))
 START_FILES_MODE = bool(_startup_cfg.get("start_files", False))
 
+
+def _interactive_startup_pending(force_speaker: bool = False) -> bool:
+    if not DEVICE_SETUP_INITIALIZED or not DEVICE_PROFILES_PATH.exists():
+        return True
+    return _speaker_enrollment_pending(force=force_speaker)
+
 # ── Realtime ──────────────────────────────────────────────────────────────────
 RT_CHECK_INTERVAL = cfg["realtime"]["check_interval"]
 MIN_CHUNKS        = cfg["realtime"]["min_chunks"]
@@ -533,7 +540,6 @@ SPEAKER_MODEL = str(_speaker_cfg.get("model", "ecapa_tdnn")).strip() or "ecapa_t
 SPEAKER_PROFILE_FILE = _resolve_repo_path(_speaker_cfg.get("profile_file", "speaker-profile.json"))
 SPEAKER_THRESHOLD = float(_speaker_cfg.get("threshold", 0.72))
 SPEAKER_MIN_VERIFY_SPEECH_SECONDS = float(_speaker_cfg.get("min_verify_speech_seconds", 1.2))
-SPEAKER_ENROLLMENT_REQUIRED = bool(_speaker_cfg.get("enrollment_required", False))
 SPEAKER_ENROLLMENT_SAMPLES = max(1, int(_speaker_cfg.get("enrollment_samples", 3)))
 SPEAKER_ENROLLMENT_SAMPLE_SECONDS = max(1.0, float(_speaker_cfg.get("enrollment_sample_seconds", 6.0)))
 SPEAKER_ADAPT_ACCEPTED_AUDIO = bool(_speaker_cfg.get("adapt_accepted_audio", False))
@@ -1082,7 +1088,7 @@ def _run_speaker_enrollment() -> bool:
         verifier.save_profile(profile)
         for line in verifier.startup_logs():
             logger.info(f"[speaker] {line}")
-        _set_config_bool_flag("speaker", "enrollment_required", False, log_label="speaker")
+        _set_config_bool_flag("startup", "speaker_recognition_setup_initialized", True, log_label="speaker")
         logger.info("[speaker] Enrollment complete profile=%s", SPEAKER_PROFILE_FILE)
         return True
     finally:
@@ -1101,9 +1107,18 @@ def _maybe_run_speaker_enrollment(*, force: bool = False) -> bool:
     if not force and not SPEAKER_ENABLED:
         return False
     profile_exists = Path(SPEAKER_PROFILE_FILE).exists()
-    if not force and profile_exists and not SPEAKER_ENROLLMENT_REQUIRED:
+    if not force and profile_exists and SPEAKER_SETUP_INITIALIZED:
         return False
     return _run_speaker_enrollment()
+
+
+def _speaker_enrollment_pending(*, force: bool = False) -> bool:
+    if force:
+        return True
+    if not SPEAKER_ENABLED:
+        return False
+    profile_exists = Path(SPEAKER_PROFILE_FILE).exists()
+    return (not profile_exists) or (not SPEAKER_SETUP_INITIALIZED)
 
 # ── Event dispatch ────────────────────────────────────────────────────────────
 # Handlers are registered at startup. Each receives every event dict.
@@ -1530,11 +1545,14 @@ def main(args=None):
     console_controller = WindowsConsoleController()
     tray_icon = WindowsTrayIcon(console_controller)
     background_mode = CONSOLE_STARTUP_MODE == "background"
-    if background_mode:
+    interactive_startup_pending = _interactive_startup_pending(force_speaker=False)
+    if background_mode and not interactive_startup_pending:
         if console_controller.available:
             console_controller.hide(reason="startup-init")
         else:
             logger.warning("[console] Background mode requested but no Windows console is available.")
+    elif background_mode and interactive_startup_pending:
+        logger.info("[console] Startup remains visible for interactive setup.")
     if tray_icon.available and not tray_icon.start():
         logger.warning("[tray] Failed to start tray icon thread.")
     console_controller.start_minimize_to_tray()
