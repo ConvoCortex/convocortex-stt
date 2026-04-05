@@ -13,6 +13,39 @@ It is built for daily hands-free use rather than one-shot dictation: wake/sleep 
 - wake/sleep state, audio feedback, hotkeys, device switching, reconnect behavior, and persisted runtime state.
 - It works as a standalone local tool and also as a component inside a larger voice system through NATS.
 
+## Features
+
+- No GUI
+- Hands-free transcription on pause
+- Sleep/working mode with wake word + stop words
+- Wake-word transition audio dropping to keep the wake phrase out of transcripts
+- Realtime partial transcriptions during speech
+- High-accuracy final transcriptions after pauses
+- Independent realtime/final backend selection with  `parakeet` (recommended), `faster-whisper`, and experimental: `parakeet-cuda`, and `parakeet-tensorrt`
+- Shared realtime/final backend reuse when both sides use the same model/backend
+- Separate file-drop transcription worker with `files/speech/ -> files/text/ + files/done/`
+- File-drop rejection path with sidecar metadata for blocked or failed files
+- Per-file timing output for fixed-input comparison runs
+- Voice-match recognition from curated sample files for microphone STT and file-drop
+- Recognition-gated wake transitions when enabled
+- Optional saved microphone utterance clips for later review and corpus curation
+- Built-in audio feedback sounds (on/off/final + silence loop for bluetooth audio issues)
+- Simple built-in voice command actions
+- Draft-buffer workflow for reviewing/editing before release
+- Local output handlers: append file, overwrite file, file buffer accumulate/release, type at cursor
+- Runtime output mode switching between draft-buffer and direct-cursor workflows
+- Hotkeys for sleep toggle, typing toggle, input device cycle, output device cycle, output mode cycle, and console toggle
+- Exact voice commands for buffer release, mode switching, device cycling, sleep/wake control, and console show/hide
+- NATS integration with event stream (`partial`, `final`, `status`, `system`) and control surface (`sleep`, `wake`, `typing_*`, device cycle, etc.)
+- Config-driven startup with runtime state cleared on launch
+- Interactive device setup with persisted device order in `device-profiles.toml`
+- Input/output device switching and reconnect behavior
+- Windows console hide/show control with tray icon support
+- Launcher EXE for Windows startup/integration
+- Debug logging and crash logging to file
+- Benchmark script for fixed-input backend comparisons
+- Friendly to virtual-audio and remote-audio bridge setups
+
 ## Quick start
 
 Prerequisites:
@@ -156,40 +189,6 @@ If a command has no configured `words`, it is treated as disabled and is not loa
 
 For a proper, richer voice command engine, use the emitted NATS events and implement command logic externally.
 
-## Features
-
-- No GUI
-- Hands-free transcription on pause
-- Sleep/working mode with wake word + stop words
-- Realtime partial transcriptions during speech
-- High-accuracy final transcriptions after pauses
-- Independent realtime/final backend selection with `faster-whisper`, `parakeet`, `parakeet-cuda`, and `parakeet-tensorrt`
-- Separate file-drop transcription worker with `files/speech/ -> files/text/ + files/done/`
-- Per-file timing output for fixed-input comparison runs
-- Built-in audio feedback sounds (on/off/final + silence loop for bluetooth audio issues)
-- Simple built-in voice command actions
-- Optional me-only recognition from curated sample files
-- Optional saved microphone utterance clips for later review/training
-- Draft-buffer workflow for reviewing/editing before release
-- Local output handlers:
-  - append file
-  - overwrite file
-  - file buffer accumulate/release
-  - type at cursor
-- Hotkeys:
-  - sleep toggle
-  - typing toggle
-  - input device cycle
-  - output device cycle
-  - output mode cycle
-  - clipboard-accumulate reset cycle
-- NATS integration:
-  - event stream (`partial`, `final`, `status`, `system`)
-  - control surface (`sleep`, `wake`, `typing_*`, device cycle, etc.)
-- Config-driven startup with runtime state cleared on launch
-- Input/output device switching and reconnect behavior
-- Friendly to virtual-audio and remote-audio bridge setups
-
 ## Performance behavior
 
 Defaults favor practical command responsiveness over nonstop partial spam:
@@ -278,7 +277,7 @@ All runtime settings live in `config.toml` and are loaded at startup.
 
 Important areas:
 - `microphone`: backend choice plus realtime/final models and device choices
-- `recognition`: me-only recognition, thresholding, and sample/profile paths
+- `recognition`: voice-match recognition, thresholding, and sample/profile paths
 - `recording`: optional saved microphone utterance clips
 - `microphone.parakeet_cuda` / `microphone.parakeet_tensorrt`: encoder-runtime settings for the `parakeet-cuda` and `parakeet-tensorrt` backends
 - `microphone.no_speech_threshold` / `microphone.log_prob_threshold`: faster-whisper-only silence / low-confidence rejection for reducing spurious transcripts
@@ -302,12 +301,12 @@ Backend guidance:
 
 ### Recognition
 
-The repo can optionally run in a me-only mode:
-- your speech passes through
-- non-matching speech is blocked
+The repo can optionally run a voice-match recognition filter:
+- speech that matches the curated reference voice corpus passes through
+- speech that does not match that corpus is blocked
 - this applies to live microphone STT and file-drop when enabled
 
-This is not diarization and not spoof-resistant identity security. It is a practical ownership filter so the system does not respond to other voices nearby.
+This is not diarization and not spoof-resistant identity security. It is a practical voice-match filter so the system does not respond to nearby voices that do not match the curated corpus.
 
 The recognition profile is local-only and stored in `recognition.profile_file`, while the source-of-truth voice corpus lives in `recognition.samples_dir`.
 
