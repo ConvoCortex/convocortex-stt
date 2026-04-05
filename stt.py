@@ -254,6 +254,21 @@ logger = _setup_logging()
 _install_crash_logging_hooks()
 
 
+def _pause_before_crash_exit() -> None:
+    try:
+        if not sys.stdin or not sys.stdin.isatty():
+            return
+    except Exception:
+        return
+    try:
+        print("\n[fatal] Press Enter to exit...", file=sys.stderr, flush=True)
+        input()
+    except EOFError:
+        pass
+    except Exception:
+        pass
+
+
 class WindowsConsoleController:
     SW_HIDE = 0
     SW_SHOW = 5
@@ -833,6 +848,7 @@ def _prompt_profile_selection(
     else:
         print("[device-setup] Press Enter to keep the current selection. Choose at least one device.")
 
+    fatal_main_loop_error = False
     while True:
         prompt = f"{label} selection"
         if default_text:
@@ -3516,10 +3532,12 @@ def main(args=None):
 
         except KeyboardInterrupt:
             break
-        except Exception as e:
-            logger.error(f"Unexpected: {e}")
+        except Exception:
+            logger.exception("[fatal] Unexpected main loop crash")
+            fatal_main_loop_error = True
             break
 
+    exit_code = 1 if fatal_main_loop_error else 0
     logger.info("Shutting down...")
     try:
         input_session.close()
@@ -3543,7 +3561,7 @@ def main(args=None):
     stop_file_drop_thread()
     dispatch({"type": "system", "event": "shutdown"})
     logger.info("Done.")
-    os._exit(0)
+    return exit_code
 
 
 if __name__ == '__main__':
@@ -3551,8 +3569,15 @@ if __name__ == '__main__':
         raise SystemExit(main())
     except KeyboardInterrupt:
         raise
-    except SystemExit:
+    except SystemExit as exc:
+        try:
+            code = exc.code
+        except Exception:
+            code = 1
+        if code not in (None, 0):
+            _pause_before_crash_exit()
         raise
     except Exception:
         logger.exception("[fatal] Top-level crash")
+        _pause_before_crash_exit()
         sys.exit(1)
