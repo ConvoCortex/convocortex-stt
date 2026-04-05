@@ -1040,7 +1040,7 @@ def _run_recognition_setup(force: bool = False) -> bool:
     p = pyaudio.PyAudio()
     session = None
     try:
-        session, device_name, _, _, _ = _open_startup_input_capture(
+        session, device_name = _open_startup_input_capture(
             p,
             log_prefix="[recognition-setup]",
             emit_logs=True,
