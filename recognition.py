@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import json
 import logging
@@ -11,14 +11,18 @@ from typing import Any
 import numpy as np
 
 logger = logging.getLogger("STT")
-PROFILE_FORMAT_VERSION = 3
+PROFILE_FORMAT_VERSION = 4
+DEFAULT_THRESHOLD_MARGIN = 0.03
+DEFAULT_THRESHOLD_FLOOR = 0.65
+DEFAULT_THRESHOLD_CEILING = 0.92
 
 
 @dataclass(frozen=True)
-class SpeakerVerificationResult:
+class RecognitionResult:
     accepted: bool
     score: float | None
     threshold: float
+    delta: float | None
     reason: str
     duration_s: float
     window_scores: tuple[float, ...] = ()
@@ -35,14 +39,29 @@ def _normalize_audio(audio: np.ndarray) -> np.ndarray:
     return np.clip(arr, -1.0, 1.0)
 
 
-def _cosine_similarity(a: np.ndarray, b: np.ndarray) -> float:
-    denom = float(np.linalg.norm(a) * np.linalg.norm(b))
-    if denom <= 1e-12:
-        return 0.0
-    return float(np.dot(a, b) / denom)
+def _clamp(value: float, lower: float, upper: float) -> float:
+    return float(min(max(float(value), float(lower)), float(upper)))
 
 
-class SpeakerVerifier:
+def derive_threshold_from_self_scores(
+    scores: list[float] | tuple[float, ...],
+    *,
+    margin: float = DEFAULT_THRESHOLD_MARGIN,
+    floor: float = DEFAULT_THRESHOLD_FLOOR,
+    ceiling: float = DEFAULT_THRESHOLD_CEILING,
+) -> float:
+    if not scores:
+        return _clamp(floor, floor, ceiling)
+    return _clamp(float(min(scores)) - float(margin), floor, ceiling)
+
+
+def format_recognition_annotation(score: float | None, threshold: float, delta: float | None) -> str:
+    score_text = "n/a" if score is None else f"{float(score):.3f}"
+    delta_text = "n/a" if delta is None else f"{float(delta):+0.3f}"
+    return f"recognition {score_text}/{float(threshold):.3f} ({delta_text})"
+
+
+class RecognitionEngine:
     def __init__(
         self,
         *,
@@ -50,14 +69,14 @@ class SpeakerVerifier:
         model_name: str = "ecapa_tdnn",
         requested_device: str = "cuda",
         sample_rate: int = 16000,
-        threshold: float = 0.72,
+        threshold_override: float | None = None,
         mode: str = "me-only",
     ) -> None:
         self.profile_path = Path(profile_path)
         self.model_name = str(model_name or "ecapa_tdnn").strip() or "ecapa_tdnn"
         self.requested_device = str(requested_device or "cuda").strip().lower() or "cuda"
         self.sample_rate = int(sample_rate)
-        self.threshold = float(threshold)
+        self.threshold_override = None if threshold_override is None else float(threshold_override)
         self.mode = str(mode or "me-only").strip() or "me-only"
         self._model = None
         self._device = None
@@ -126,7 +145,15 @@ class SpeakerVerifier:
         payload = json.loads(self.profile_path.read_text(encoding="utf-8"))
         if int(payload.get("version") or 0) < PROFILE_FORMAT_VERSION:
             return False
-        if "profile_self_score_min" not in payload or "profile_self_score_avg" not in payload or "profile_self_score_max" not in payload:
+        required = {
+            "corpus_self_score_min",
+            "corpus_self_score_p10",
+            "corpus_self_score_avg",
+            "corpus_self_score_max",
+            "active_threshold",
+            "threshold_source",
+        }
+        if not required.issubset(payload.keys()):
             return False
         if not payload.get("reference_embeddings"):
             return False
@@ -137,15 +164,18 @@ class SpeakerVerifier:
 
     def load_profile(self) -> dict[str, Any]:
         if not self.profile_path.exists():
-            raise FileNotFoundError(f"speaker profile not found: {self.profile_path}")
+            raise FileNotFoundError(f"recognition profile not found: {self.profile_path}")
         payload = json.loads(self.profile_path.read_text(encoding="utf-8"))
         raw_centroid = payload.get("centroid")
         if raw_centroid is None:
             raw_centroid = []
         centroid = np.asarray(raw_centroid, dtype=np.float32)
         if centroid.size == 0:
-            raise ValueError(f"speaker profile centroid missing: {self.profile_path}")
-        reference_embeddings = np.asarray(payload.get("reference_embeddings") or [], dtype=np.float32)
+            raise ValueError(f"recognition profile centroid missing: {self.profile_path}")
+        raw_reference_embeddings = payload.get("reference_embeddings")
+        if raw_reference_embeddings is None:
+            raw_reference_embeddings = []
+        reference_embeddings = np.asarray(raw_reference_embeddings, dtype=np.float32)
         if reference_embeddings.ndim == 1 and reference_embeddings.size:
             reference_embeddings = reference_embeddings.reshape(1, -1)
         payload["centroid"] = centroid
@@ -159,7 +189,7 @@ class SpeakerVerifier:
             raw_centroid = []
         centroid = np.asarray(raw_centroid, dtype=np.float32).reshape(-1)
         if centroid.size == 0:
-            raise ValueError("speaker profile centroid is empty")
+            raise ValueError("recognition profile centroid is empty")
         raw_references = serializable.get("reference_embeddings")
         if raw_references is None:
             raw_references = []
@@ -180,7 +210,7 @@ class SpeakerVerifier:
 
         waveform, source_rate = torchaudio.load(str(path))
         if waveform.numel() == 0:
-            raise ValueError(f"speaker sample is empty: {path}")
+            raise ValueError(f"recognition sample is empty: {path}")
         if waveform.ndim == 1:
             mono = waveform
         else:
@@ -190,7 +220,7 @@ class SpeakerVerifier:
     def _prepare_audio(self, audio: np.ndarray, sample_rate: int) -> np.ndarray:
         normalized = _normalize_audio(audio)
         if normalized.size == 0:
-            raise ValueError("speaker embedding audio is empty")
+            raise ValueError("recognition embedding audio is empty")
         if int(sample_rate) != self.sample_rate:
             import torchaudio
             import torch
@@ -209,7 +239,7 @@ class SpeakerVerifier:
         emb, _ = self._model.infer_segment(normalized)
         vector = emb.detach().cpu().numpy().astype(np.float32).reshape(-1)
         if vector.size == 0:
-            raise ValueError("speaker embedding vector is empty")
+            raise ValueError("recognition embedding vector is empty")
         return vector
 
     def _iter_prepared_windows(self, normalized: np.ndarray) -> list[np.ndarray]:
@@ -242,10 +272,31 @@ class SpeakerVerifier:
             windows.append(normalized[start:end])
         return windows
 
+    def active_threshold(self, override: float | None = None) -> float:
+        self.ensure_ready(load_profile=True)
+        if override is not None:
+            return float(override)
+        if self.threshold_override is not None:
+            return float(self.threshold_override)
+        active = self._profile.get("active_threshold")
+        if active is None:
+            scores = [float(entry.get("self_score")) for entry in (self._profile.get("samples") or []) if entry.get("self_score") is not None]
+            return derive_threshold_from_self_scores(scores)
+        return float(active)
+
+    def threshold_source(self, override: float | None = None) -> str:
+        if override is not None or self.threshold_override is not None:
+            return "config"
+        self.ensure_ready(load_profile=True)
+        return str(self._profile.get("threshold_source") or "derived")
+
     def _windowed_scores(self, audio: np.ndarray) -> list[float]:
         self.ensure_ready(load_profile=True)
         normalized = self._prepare_audio(audio, self.sample_rate)
-        reference_embeddings = np.asarray(self._profile.get("reference_embeddings") or [], dtype=np.float32)
+        raw_reference_embeddings = self._profile.get("reference_embeddings")
+        if raw_reference_embeddings is None:
+            raw_reference_embeddings = []
+        reference_embeddings = np.asarray(raw_reference_embeddings, dtype=np.float32)
         if reference_embeddings.ndim == 1 and reference_embeddings.size:
             reference_embeddings = reference_embeddings.reshape(1, -1)
         if reference_embeddings.size == 0:
@@ -257,35 +308,11 @@ class SpeakerVerifier:
             scores.append(self._embedding_to_score(vector, reference_embeddings))
         return scores
 
-    def create_profile(
-        self,
-        samples: list[np.ndarray],
-        *,
-        sample_rate: int,
-        sample_metadata: list[dict[str, Any]] | None = None,
-        samples_fingerprint: str | None = None,
-    ) -> dict[str, Any]:
-        if not samples:
-            raise ValueError("speaker profile build requires at least one sample")
-        embeddings = [self.embed_audio(sample, sample_rate) for sample in samples]
-        centroid = np.mean(np.stack(embeddings, axis=0), axis=0).astype(np.float32)
-        return {
-            "version": PROFILE_FORMAT_VERSION,
-            "mode": self.mode,
-            "model": self.model_name,
-            "device": self._device,
-            "sample_rate": self.sample_rate,
-            "created_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
-            "embedding_dim": int(centroid.size),
-            "centroid": centroid,
-            "samples_fingerprint": str(samples_fingerprint or ""),
-            "samples": sample_metadata or [],
-        }
-
     def build_profile_from_paths(self, sample_paths: list[Path]) -> dict[str, Any]:
+        self.ensure_ready(load_profile=False)
         normalized_paths = [Path(path) for path in sample_paths]
         if not normalized_paths:
-            raise ValueError("speaker sample directory is empty")
+            raise ValueError("recognition sample directory is empty")
         all_embeddings: list[np.ndarray] = []
         metadata: list[dict[str, Any]] = []
         sample_embeddings: list[list[np.ndarray]] = []
@@ -307,7 +334,7 @@ class SpeakerVerifier:
                 }
             )
         if not all_embeddings:
-            raise ValueError("speaker sample directory did not yield any usable windows")
+            raise ValueError("recognition sample directory did not yield any usable windows")
         reference_embeddings = np.stack(all_embeddings, axis=0).astype(np.float32)
         centroid = np.mean(reference_embeddings, axis=0).astype(np.float32)
         self_scores: list[float] = []
@@ -327,6 +354,12 @@ class SpeakerVerifier:
             self_scores.append(score)
             metadata[idx]["self_score"] = round(score, 6)
             metadata[idx]["window_scores"] = [round(float(item), 6) for item in window_scores]
+        self_score_p10 = float(np.percentile(np.asarray(self_scores, dtype=np.float32), 10))
+        active_threshold = derive_threshold_from_self_scores(self_scores)
+        threshold_source = "derived"
+        if self.threshold_override is not None:
+            active_threshold = float(self.threshold_override)
+            threshold_source = "config"
         return {
             "version": PROFILE_FORMAT_VERSION,
             "mode": self.mode,
@@ -339,9 +372,12 @@ class SpeakerVerifier:
             "reference_embeddings": reference_embeddings,
             "samples_fingerprint": self.corpus_fingerprint(normalized_paths),
             "samples": metadata,
-            "profile_self_score_min": round(float(min(self_scores)), 6),
-            "profile_self_score_avg": round(float(sum(self_scores) / len(self_scores)), 6),
-            "profile_self_score_max": round(float(max(self_scores)), 6),
+            "corpus_self_score_min": round(float(min(self_scores)), 6),
+            "corpus_self_score_p10": round(self_score_p10, 6),
+            "corpus_self_score_avg": round(float(sum(self_scores) / len(self_scores)), 6),
+            "corpus_self_score_max": round(float(max(self_scores)), 6),
+            "active_threshold": round(float(active_threshold), 6),
+            "threshold_source": threshold_source,
         }
 
     def verify_audio(
@@ -351,26 +387,29 @@ class SpeakerVerifier:
         *,
         threshold: float | None = None,
         min_duration_s: float = 0.0,
-    ) -> SpeakerVerificationResult:
+    ) -> RecognitionResult:
         self.ensure_ready(load_profile=True)
         normalized = _normalize_audio(audio)
         duration_s = float(normalized.size) / float(sample_rate) if sample_rate else 0.0
-        target_threshold = float(self.threshold if threshold is None else threshold)
+        target_threshold = self.active_threshold(threshold)
         if normalized.size == 0:
-            return SpeakerVerificationResult(False, None, target_threshold, "empty_audio", duration_s)
+            return RecognitionResult(False, None, target_threshold, None, "empty_audio", duration_s)
         if duration_s < float(min_duration_s):
-            return SpeakerVerificationResult(False, None, target_threshold, "insufficient_audio", duration_s)
+            return RecognitionResult(False, None, target_threshold, None, "insufficient_audio", duration_s)
         prepared = self._prepare_audio(normalized, sample_rate)
         window_scores = self._windowed_scores(prepared)
         if not window_scores:
-            return SpeakerVerificationResult(False, None, target_threshold, "insufficient_audio", duration_s)
+            return RecognitionResult(False, None, target_threshold, None, "insufficient_audio", duration_s)
         score = float(max(window_scores))
         accepted = bool(score >= target_threshold)
-        return SpeakerVerificationResult(
+        delta = float(score - target_threshold)
+        return RecognitionResult(
             accepted=accepted,
             score=float(score),
             threshold=target_threshold,
+            delta=round(delta, 6),
             reason="accepted" if accepted else "below_threshold",
             duration_s=duration_s,
             window_scores=tuple(round(float(item), 6) for item in window_scores),
         )
+

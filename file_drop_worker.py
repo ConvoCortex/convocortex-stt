@@ -16,7 +16,7 @@ import numpy as np
 
 import config
 from model_backends import load_backend
-from speaker_verifier import SpeakerVerifier
+from recognition import RecognitionEngine
 
 
 logger = logging.getLogger("STT")
@@ -277,8 +277,8 @@ class FileDropWorker:
         self.ignored_phrases = tuple(cfg.get("filters", {}).get("ignored_exact_phrases", []) or [])
         self.disfluency_words = tuple(cfg.get("filters", {}).get("disfluency_words", []) or [])
         self._backend = None
-        self._speaker_verifier = None
-        self._speaker_cfg = cfg.get("speaker_recognition", {}) or {}
+        self._recognition_engine = None
+        self._recognition_cfg = cfg.get("recognition", {}) or {}
 
     def _recover_orphaned_processing_files(self) -> None:
         for directory in (self.settings.input_dir, self.settings.done_dir, self.settings.failed_dir):
@@ -337,21 +337,21 @@ class FileDropWorker:
             except Exception as exc:
                 logger.warning("[file-drop] warmup failed: %s", exc)
         if (
-            self._speaker_verifier is None
-            and bool(self._speaker_cfg.get("enabled", False))
-            and bool(self._speaker_cfg.get("apply_to_files", False))
+            self._recognition_engine is None
+            and bool(self._recognition_cfg.get("enabled", False))
+            and bool(self._recognition_cfg.get("apply_to_files", False))
         ):
-            self._speaker_verifier = SpeakerVerifier(
-                profile_path=_resolve_path(self._speaker_cfg.get("profile_file"), "speaker-recognition/profile.json"),
-                model_name=str(self._speaker_cfg.get("model", "ecapa_tdnn")).strip() or "ecapa_tdnn",
-                requested_device=str(self._speaker_cfg.get("device", "cuda")).strip().lower() or "cuda",
+            self._recognition_engine = RecognitionEngine(
+                profile_path=_resolve_path(self._recognition_cfg.get("profile_file"), "recognition/profile.json"),
+                model_name=str(self._recognition_cfg.get("model", "ecapa_tdnn")).strip() or "ecapa_tdnn",
+                requested_device=str(self._recognition_cfg.get("device", "cuda")).strip().lower() or "cuda",
                 sample_rate=self.rate,
-                threshold=float(self._speaker_cfg.get("threshold", 0.72)),
-                mode=str(self._speaker_cfg.get("mode", "me-only")).strip() or "me-only",
+                threshold_override=float(self._recognition_cfg.get("threshold_override")) if str(self._recognition_cfg.get("threshold_override", "")).strip() else None,
+                mode=str(self._recognition_cfg.get("mode", "me-only")).strip() or "me-only",
             )
-            self._speaker_verifier.ensure_ready(load_profile=True)
-            for line in self._speaker_verifier.startup_logs():
-                logger.info("[speaker] %s", line)
+            self._recognition_engine.ensure_ready(load_profile=True)
+            for line in self._recognition_engine.startup_logs():
+                logger.info("[recognition] %s", line)
 
     def _discover_candidates(self) -> list[Path]:
         input_dir = self.settings.input_dir
@@ -429,12 +429,12 @@ class FileDropWorker:
             "\n".join(
                 [
                     f"# source_file: {metadata['source_file']}",
-                    "# speaker_match: false",
-                    f"# speaker_score: {metadata.get('speaker_score')}",
-                    f"# speaker_threshold: {metadata.get('speaker_threshold')}",
-                    f"# rejection_reason: {metadata.get('speaker_reason')}",
+                    "# recognition_match: false",
+                    f"# recognition_score: {metadata.get('recognition_score')}",
+                    f"# recognition_threshold: {metadata.get('recognition_threshold')}",
+                    f"# rejection_reason: {metadata.get('recognition_reason')}",
                     "",
-                    "blocked: non-me speaker\n",
+                    "blocked: non-me recognition\n",
                 ]
             ),
             encoding="utf-8",
@@ -463,22 +463,22 @@ class FileDropWorker:
             audio_meta["audio_duration_s"],
             self.settings.final_backend,
         )
-        speaker_metadata = {}
-        if self._speaker_verifier is not None:
-            speaker_result = self._speaker_verifier.verify_audio(
+        recognition_metadata = {}
+        if self._recognition_engine is not None:
+            recognition_result = self._recognition_engine.verify_audio(
                 audio,
                 self.rate,
-                threshold=float(self._speaker_cfg.get("threshold", 0.72)),
-                min_duration_s=float(self._speaker_cfg.get("min_verify_speech_seconds", 1.2)),
+                threshold=float(self._recognition_cfg.get("threshold_override")) if str(self._recognition_cfg.get("threshold_override", "")).strip() else None,
+                min_duration_s=float(self._recognition_cfg.get("min_verify_speech_seconds", 1.2)),
             )
-            speaker_metadata = {
-                "speaker_mode": str(self._speaker_cfg.get("mode", "me-only")).strip() or "me-only",
-                "speaker_score": _format_seconds(speaker_result.score) if speaker_result.score is not None else None,
-                "speaker_threshold": _format_seconds(speaker_result.threshold),
-                "speaker_match": bool(speaker_result.accepted),
-                "speaker_reason": speaker_result.reason,
+            recognition_metadata = {
+                "recognition_mode": str(self._recognition_cfg.get("mode", "me-only")).strip() or "me-only",
+                "recognition_score": _format_seconds(recognition_result.score) if recognition_result.score is not None else None,
+                "recognition_threshold": _format_seconds(recognition_result.threshold),
+                "recognition_match": bool(recognition_result.accepted),
+                "recognition_reason": recognition_result.reason,
             }
-            if not speaker_result.accepted:
+            if not recognition_result.accepted:
                 rejected_path = self._move_claimed(claimed_path, self.settings.rejected_dir)
                 metadata = {
                     "source_file": source_name,
@@ -488,17 +488,17 @@ class FileDropWorker:
                     "language": self.settings.language,
                     "generated_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
                     **audio_meta,
-                    **speaker_metadata,
+                    **recognition_metadata,
                 }
                 text_path, json_path = self._write_rejection_outputs(source_name, metadata)
                 metadata["text_path"] = str(text_path)
                 metadata["json_path"] = str(json_path) if json_path else ""
                 metadata["rejected_path"] = str(rejected_path)
                 logger.info(
-                    "[speaker] file blocked source=%s score=%s threshold=%s",
+                    "[recognition] file blocked source=%s score=%s threshold=%s",
                     source_name,
-                    speaker_metadata.get("speaker_score"),
-                    speaker_metadata.get("speaker_threshold"),
+                    recognition_metadata.get("recognition_score"),
+                    recognition_metadata.get("recognition_threshold"),
                 )
                 return metadata
 
@@ -544,7 +544,7 @@ class FileDropWorker:
             "throughput_x": _format_seconds(throughput_x),
             **audio_meta,
             **metrics,
-            **speaker_metadata,
+            **recognition_metadata,
         }
         text_path, json_path = self._write_outputs(source_name, cleaned_text, metadata)
         done_path = self._move_claimed(claimed_path, self.settings.done_dir)

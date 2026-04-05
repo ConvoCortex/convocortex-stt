@@ -43,7 +43,7 @@ from audio_devices import (
 )
 import config
 from model_backends import load_backend
-from speaker_verifier import SpeakerVerifier
+from recognition import RecognitionEngine, format_recognition_annotation
 
 
 def _bootstrap_owned_console():
@@ -591,7 +591,7 @@ START_MICROPHONE_MODE = bool(_startup_cfg.get("start_microphone", True))
 START_FILES_MODE = bool(_startup_cfg.get("start_files", False))
 
 
-def _interactive_startup_pending(force_speaker: bool = False) -> bool:
+def _interactive_startup_pending(force_recognition: bool = False) -> bool:
     if not DEVICE_SETUP_INITIALIZED or not DEVICE_PROFILES_PATH.exists():
         return True
     return False
@@ -602,20 +602,31 @@ MIN_CHUNKS        = cfg["realtime"]["min_chunks"]
 MAX_CHUNKS        = cfg["realtime"]["max_chunks"]
 RT_QUEUE_SIZE     = cfg["realtime"]["queue_size"]
 
-# ── Speaker recognition ───────────────────────────────────────────────────────
-_speaker_cfg = cfg.get("speaker_recognition", {}) or {}
-SPEAKER_ENABLED = bool(_speaker_cfg.get("enabled", False))
-SPEAKER_MODE = str(_speaker_cfg.get("mode", "me-only")).strip() or "me-only"
-SPEAKER_APPLY_TO_MICROPHONE = bool(_speaker_cfg.get("apply_to_microphone", True))
-SPEAKER_APPLY_TO_FILES = bool(_speaker_cfg.get("apply_to_files", False))
-SPEAKER_GATE_WAKE = bool(_speaker_cfg.get("gate_wake", True))
-SPEAKER_DEVICE = str(_speaker_cfg.get("device", "cuda")).strip().lower() or "cuda"
-SPEAKER_MODEL = str(_speaker_cfg.get("model", "ecapa_tdnn")).strip() or "ecapa_tdnn"
-SPEAKER_SAMPLES_DIR = Path(_resolve_repo_path(_speaker_cfg.get("samples_dir", "speaker-recognition/samples")))
-SPEAKER_PROFILE_FILE = Path(_resolve_repo_path(_speaker_cfg.get("profile_file", "speaker-recognition/profile.json")))
-SPEAKER_THRESHOLD = float(_speaker_cfg.get("threshold", 0.72))
-SPEAKER_MIN_VERIFY_SPEECH_SECONDS = float(_speaker_cfg.get("min_verify_speech_seconds", 1.2))
-SPEAKER_LOG_ALL_SCORES = bool(_speaker_cfg.get("log_all_scores", False))
+def _optional_float(value):
+    if value is None:
+        return None
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return None
+        return float(text)
+    return float(value)
+
+
+# ── Recognition ───────────────────────────────────────────────────────────────
+_recognition_cfg = cfg.get("recognition", {}) or {}
+RECOGNITION_ENABLED = bool(_recognition_cfg.get("enabled", False))
+RECOGNITION_MODE = str(_recognition_cfg.get("mode", "me-only")).strip() or "me-only"
+RECOGNITION_APPLY_TO_MICROPHONE = bool(_recognition_cfg.get("apply_to_microphone", True))
+RECOGNITION_APPLY_TO_FILES = bool(_recognition_cfg.get("apply_to_files", False))
+RECOGNITION_GATE_WAKE = bool(_recognition_cfg.get("gate_wake", True))
+RECOGNITION_DEVICE = str(_recognition_cfg.get("device", "cuda")).strip().lower() or "cuda"
+RECOGNITION_MODEL = str(_recognition_cfg.get("model", "ecapa_tdnn")).strip() or "ecapa_tdnn"
+RECOGNITION_SAMPLES_DIR = Path(_resolve_repo_path(_recognition_cfg.get("samples_dir", "recognition/samples")))
+RECOGNITION_PROFILE_FILE = Path(_resolve_repo_path(_recognition_cfg.get("profile_file", "recognition/profile.json")))
+RECOGNITION_THRESHOLD_OVERRIDE = _optional_float(_recognition_cfg.get("threshold_override"))
+RECOGNITION_MIN_VERIFY_SPEECH_SECONDS = float(_recognition_cfg.get("min_verify_speech_seconds", 1.2))
+RECOGNITION_LOG_SCORES = bool(_recognition_cfg.get("log_scores", False))
 
 # ── Recording ─────────────────────────────────────────────────────────────────
 _recording_cfg = cfg.get("recording", {}) or {}
@@ -1093,7 +1104,7 @@ def _open_startup_input_capture(p: pyaudio.PyAudio, *, log_prefix: str = "[input
     )
 
 
-def _speaker_sample_paths(samples_dir: Path) -> list[Path]:
+def _recognition_sample_paths(samples_dir: Path) -> list[Path]:
     supported = {".wav", ".mp3", ".m4a", ".flac", ".ogg", ".opus", ".aac", ".wma"}
     if not samples_dir.exists():
         return []
@@ -1107,58 +1118,63 @@ def _speaker_sample_paths(samples_dir: Path) -> list[Path]:
     )
 
 
-def _ensure_speaker_profile() -> bool:
-    if not SPEAKER_ENABLED:
+def _ensure_recognition_profile() -> bool:
+    if not RECOGNITION_ENABLED:
         return False
-    sample_paths = _speaker_sample_paths(SPEAKER_SAMPLES_DIR)
+    sample_paths = _recognition_sample_paths(RECOGNITION_SAMPLES_DIR)
     if not sample_paths:
         raise RuntimeError(
-            f"Speaker recognition is enabled but no sample files were found in {SPEAKER_SAMPLES_DIR}"
+            f"Recognition is enabled but no sample files were found in {RECOGNITION_SAMPLES_DIR}"
         )
-    verifier = SpeakerVerifier(
-        profile_path=SPEAKER_PROFILE_FILE,
-        model_name=SPEAKER_MODEL,
-        requested_device=SPEAKER_DEVICE,
+    engine = RecognitionEngine(
+        profile_path=RECOGNITION_PROFILE_FILE,
+        model_name=RECOGNITION_MODEL,
+        requested_device=RECOGNITION_DEVICE,
         sample_rate=RATE,
-        threshold=SPEAKER_THRESHOLD,
-        mode=SPEAKER_MODE,
+        threshold_override=RECOGNITION_THRESHOLD_OVERRIDE,
+        mode=RECOGNITION_MODE,
     )
-    rebuild_required = not verifier.profile_matches_corpus(sample_paths)
+    rebuild_required = not engine.profile_matches_corpus(sample_paths)
     if rebuild_required:
         logger.info(
-            "[speaker] rebuilding profile from %s sample file(s) in %s",
+            "[recognition] rebuilding profile from %s sample file(s) in %s",
             len(sample_paths),
-            SPEAKER_SAMPLES_DIR,
+            RECOGNITION_SAMPLES_DIR,
         )
-        profile = verifier.build_profile_from_paths(sample_paths)
-        SPEAKER_PROFILE_FILE.parent.mkdir(parents=True, exist_ok=True)
-        verifier.save_profile(profile)
+        profile = engine.build_profile_from_paths(sample_paths)
+        RECOGNITION_PROFILE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        engine.save_profile(profile)
     else:
         logger.info(
-            "[speaker] reusing existing profile from %s for %s sample file(s)",
-            SPEAKER_PROFILE_FILE,
+            "[recognition] reusing existing profile from %s for %s sample file(s)",
+            RECOGNITION_PROFILE_FILE,
             len(sample_paths),
         )
-    verifier.ensure_ready(load_profile=True)
-    for line in verifier.startup_logs():
-        logger.info(f"[speaker] {line}")
-    profile_payload = verifier.load_profile()
+    engine.ensure_ready(load_profile=True)
+    for line in engine.startup_logs():
+        logger.info(f"[recognition] {line}")
+    profile_payload = engine.load_profile()
     sample_entries = list(profile_payload.get("samples") or [])
     if sample_entries:
-        min_score = profile_payload.get("profile_self_score_min")
-        avg_score = profile_payload.get("profile_self_score_avg")
-        max_score = profile_payload.get("profile_self_score_max")
+        min_score = profile_payload.get("corpus_self_score_min")
+        p10_score = profile_payload.get("corpus_self_score_p10")
+        avg_score = profile_payload.get("corpus_self_score_avg")
+        max_score = profile_payload.get("corpus_self_score_max")
+        active_threshold = profile_payload.get("active_threshold")
+        threshold_source = profile_payload.get("threshold_source")
         logger.info(
-            "[speaker] corpus self-scores min=%s avg=%s max=%s threshold=%.3f",
+            "[recognition] corpus self-scores min=%s p10=%s avg=%s max=%s threshold=%s source=%s",
             min_score,
+            p10_score,
             avg_score,
             max_score,
-            SPEAKER_THRESHOLD,
+            active_threshold,
+            threshold_source,
         )
-        if SPEAKER_LOG_ALL_SCORES:
+        if RECOGNITION_LOG_SCORES:
             for entry in sample_entries:
                 logger.info(
-                    "[speaker] corpus sample score=%s duration=%ss path=%s",
+                    "[recognition] corpus sample score=%s duration=%ss path=%s",
                     entry.get("self_score"),
                     entry.get("duration_s"),
                     entry.get("path"),
@@ -1579,8 +1595,8 @@ def main(args=None):
             logger.warning("[tray] Failed to start tray icon thread.")
         console_controller.start_minimize_to_tray()
         try:
-            if SPEAKER_ENABLED and SPEAKER_APPLY_TO_FILES:
-                _ensure_speaker_profile()
+            if RECOGNITION_ENABLED and RECOGNITION_APPLY_TO_FILES:
+                _ensure_recognition_profile()
             return run_file_drop_worker(remaining)
         finally:
             try:
@@ -1599,7 +1615,7 @@ def main(args=None):
     console_controller = WindowsConsoleController()
     tray_icon = WindowsTrayIcon(console_controller)
     background_mode = CONSOLE_STARTUP_MODE == "background"
-    interactive_startup_pending = _interactive_startup_pending(force_speaker=False)
+    interactive_startup_pending = _interactive_startup_pending(force_recognition=False)
     if background_mode and not interactive_startup_pending:
         if console_controller.available:
             console_controller.hide(reason="startup-init")
@@ -1625,8 +1641,8 @@ def main(args=None):
             pass
         return 1
 
-    if SPEAKER_ENABLED:
-        _ensure_speaker_profile()
+    if RECOGNITION_ENABLED:
+        _ensure_recognition_profile()
 
     file_drop_thread = None
     file_drop_stop_event = None
@@ -1911,25 +1927,25 @@ def main(args=None):
         except Exception as e:
             record_load_error(f"Audio stack error: {e}")
 
-    def load_speaker_verifier():
-        if not (SPEAKER_ENABLED and SPEAKER_APPLY_TO_MICROPHONE and start_microphone_mode):
-            resources["speaker_verifier"] = None
+    def load_recognition_engine():
+        if not (RECOGNITION_ENABLED and RECOGNITION_APPLY_TO_MICROPHONE and start_microphone_mode):
+            resources["recognition_engine"] = None
             return
         try:
-            verifier = SpeakerVerifier(
-                profile_path=SPEAKER_PROFILE_FILE,
-                model_name=SPEAKER_MODEL,
-                requested_device=SPEAKER_DEVICE,
+            engine = RecognitionEngine(
+                profile_path=RECOGNITION_PROFILE_FILE,
+                model_name=RECOGNITION_MODEL,
+                requested_device=RECOGNITION_DEVICE,
                 sample_rate=RATE,
-                threshold=SPEAKER_THRESHOLD,
-                mode=SPEAKER_MODE,
+                threshold_override=RECOGNITION_THRESHOLD_OVERRIDE,
+                mode=RECOGNITION_MODE,
             )
-            verifier.ensure_ready(load_profile=True)
-            resources["speaker_verifier"] = verifier
-            for line in verifier.startup_logs():
-                logger.info(f"[speaker] {line}")
+            engine.ensure_ready(load_profile=True)
+            resources["recognition_engine"] = engine
+            for line in engine.startup_logs():
+                logger.info(f"[recognition] {line}")
         except Exception as e:
-            record_load_error(f"Speaker verifier load error: {e}")
+            record_load_error(f"Recognition engine load error: {e}")
 
     if not start_microphone_mode and start_files_mode:
         start_file_drop_thread()
@@ -1963,8 +1979,8 @@ def main(args=None):
         threading.Thread(target=load_realtime),
         threading.Thread(target=load_audio_stack),
     ]
-    if SPEAKER_ENABLED and SPEAKER_APPLY_TO_MICROPHONE and start_microphone_mode:
-        threads.append(threading.Thread(target=load_speaker_verifier))
+    if RECOGNITION_ENABLED and RECOGNITION_APPLY_TO_MICROPHONE and start_microphone_mode:
+        threads.append(threading.Thread(target=load_recognition_engine))
     for t in threads: t.start()
     for t in threads: t.join()
 
@@ -1985,7 +2001,7 @@ def main(args=None):
     stream      = resources['stream']
     p_instance  = resources['p_instance']
     dev_name    = resources['dev_name']
-    speaker_verifier = resources.get('speaker_verifier')
+    recognition_engine = resources.get('recognition_engine')
     if start_files_mode:
         start_file_drop_thread()
 
@@ -2446,66 +2462,68 @@ def main(args=None):
 
         return _cleanup_transcript_text(cleaned)
 
-    speaker_epoch_state: dict[int, dict] = {}
-    speaker_epoch_lock = threading.Lock()
+    recognition_epoch_state: dict[int, dict] = {}
+    recognition_epoch_lock = threading.Lock()
 
-    def check_speaker_epoch(epoch: int, audio: np.ndarray):
-        if not (speaker_verifier and SPEAKER_ENABLED and SPEAKER_APPLY_TO_MICROPHONE):
+    def _recognition_annotation(meta: dict | None) -> str:
+        if not meta:
+            return ""
+        return format_recognition_annotation(
+            meta.get("score"),
+            float(meta.get("threshold") or 0.0),
+            meta.get("delta"),
+        )
+
+    def _log_recognition_outcome(label: str, t: float, inf_ms: int, meta: dict | None, *, text: str | None = None, blocked: bool = False) -> None:
+        annotation = _recognition_annotation(meta)
+        prefix = f"[{label} +{t:.2f}s]"
+        if annotation:
+            prefix = f"{prefix} {annotation}"
+        if blocked:
+            logger.info(f"{prefix} → BLOCKED ({inf_ms}ms)")
+            return
+        if text:
+            logger.info(f"{prefix} → OUT  '{text}' ({inf_ms}ms)")
+        else:
+            logger.info(f"{prefix} → OUT  <action-only> ({inf_ms}ms)")
+
+    def check_recognition_epoch(epoch: int, audio: np.ndarray):
+        if not (recognition_engine and RECOGNITION_ENABLED and RECOGNITION_APPLY_TO_MICROPHONE):
             return True, None
         if epoch >= 0:
-            with speaker_epoch_lock:
-                cached = speaker_epoch_state.get(epoch)
+            with recognition_epoch_lock:
+                cached = recognition_epoch_state.get(epoch)
             if cached is not None:
                 return bool(cached["accepted"]), cached
 
-        result = speaker_verifier.verify_audio(
+        result = recognition_engine.verify_audio(
             audio,
             RATE,
-            threshold=SPEAKER_THRESHOLD,
-            min_duration_s=SPEAKER_MIN_VERIFY_SPEECH_SECONDS,
+            threshold=RECOGNITION_THRESHOLD_OVERRIDE,
+            min_duration_s=RECOGNITION_MIN_VERIFY_SPEECH_SECONDS,
         )
         cached = {
             "accepted": bool(result.accepted),
             "score": result.score,
             "threshold": result.threshold,
+            "delta": result.delta,
             "reason": result.reason,
             "duration_s": result.duration_s,
             "window_scores": list(result.window_scores),
+            "partial_block_logged": False,
         }
         should_cache = epoch >= 0 and result.reason != "insufficient_audio"
         if should_cache:
-            with speaker_epoch_lock:
-                speaker_epoch_state[epoch] = cached
-        score_text = f"{result.score:.3f}" if result.score is not None else "n/a"
-        if result.reason != "insufficient_audio":
-            window_scores_text = ",".join(f"{value:.3f}" for value in result.window_scores)
-            if result.accepted:
-                if SPEAKER_LOG_ALL_SCORES:
-                    logger.info(
-                        "[speaker] epoch accepted epoch=%s score=%s threshold=%.3f windows=[%s]",
-                        epoch,
-                        score_text,
-                        result.threshold,
-                        window_scores_text,
-                    )
-            else:
-                if SPEAKER_LOG_ALL_SCORES:
-                    logger.info(
-                        "[speaker] epoch blocked epoch=%s score=%s threshold=%.3f reason=%s windows=[%s]",
-                        epoch,
-                        score_text,
-                        result.threshold,
-                        result.reason,
-                        window_scores_text,
-                    )
-                else:
-                    logger.info(
-                        "[speaker] epoch blocked epoch=%s score=%s threshold=%.3f reason=%s",
-                        epoch,
-                        score_text,
-                        result.threshold,
-                        result.reason,
-                    )
+            with recognition_epoch_lock:
+                recognition_epoch_state[epoch] = cached
+        if RECOGNITION_LOG_SCORES:
+            logger.info(
+                "[recognition] epoch=%s %s reason=%s windows=[%s]",
+                epoch,
+                _recognition_annotation(cached),
+                result.reason,
+                ",".join(f"{value:.3f}" for value in result.window_scores),
+            )
         return bool(result.accepted), cached
 
     def final_worker():
@@ -2535,12 +2553,9 @@ def main(args=None):
                 inf_ms = int((time.time() - t_start) * 1000)
                 t = time.time() - t0
 
-                speaker_ok, speaker_meta = check_speaker_epoch(epoch, audio)
-                if not speaker_ok:
-                    debug_log(
-                        f"[final_worker] blocked_by_speaker epoch={epoch} "
-                        f"score={speaker_meta.get('score')} reason={speaker_meta.get('reason')}"
-                    )
+                recognition_ok, recognition_meta = check_recognition_epoch(epoch, audio)
+                if not recognition_ok:
+                    _log_recognition_outcome("FINAL", t, inf_ms, recognition_meta, blocked=True)
                     continue
 
                 if apply_exact_voice_command(raw_text, epoch, t, inf_ms, source="final"):
@@ -2570,10 +2585,7 @@ def main(args=None):
                     if currently_sleeping:
                         logger.info(f"[FINAL +{t:.2f}s] → SLEEPING (dropped) ({inf_ms}ms)")
                     else:
-                        if text:
-                            logger.info(f"[FINAL +{t:.2f}s] → OUT  '{text}' ({inf_ms}ms)")
-                        else:
-                            logger.info(f"[FINAL +{t:.2f}s] → OUT  <action-only> ({inf_ms}ms)")
+                        _log_recognition_outcome("FINAL", t, inf_ms, recognition_meta, text=text if text else None, blocked=False)
                         dispatch(ev)
                         if text:
                             feedback.play_final()
@@ -2641,12 +2653,19 @@ def main(args=None):
                 inf_ms = int((time.time() - t_start) * 1000)
                 t = time.time() - t0
 
-                speaker_ok, speaker_meta = check_speaker_epoch(epoch, audio)
-                if not speaker_ok:
-                    debug_log(
-                        f"[realtime_worker] blocked_by_speaker epoch={epoch} "
-                        f"score={speaker_meta.get('score')} reason={speaker_meta.get('reason')}"
-                    )
+                recognition_ok, recognition_meta = check_recognition_epoch(epoch, audio)
+                if not recognition_ok:
+                    if recognition_meta and recognition_meta.get("reason") != "insufficient_audio":
+                        should_log_block = True
+                        if epoch >= 0:
+                            with recognition_epoch_lock:
+                                cached_meta = recognition_epoch_state.get(epoch)
+                                if cached_meta is not None and cached_meta.get("partial_block_logged"):
+                                    should_log_block = False
+                                elif cached_meta is not None:
+                                    cached_meta["partial_block_logged"] = True
+                        if should_log_block:
+                            _log_recognition_outcome("PARTIAL", t, inf_ms, recognition_meta, blocked=True)
                     continue
 
                 with state_lock:
@@ -2671,7 +2690,7 @@ def main(args=None):
                     ev = {"type": "partial", "text": text, "epoch": epoch,
                           "t": round(t, 3), "inference_ms": inf_ms}
                     ev["text"] = cleaned_text
-                    logger.info(f"[PARTIAL +{t:.2f}s] → OUT  '{cleaned_text}' ({inf_ms}ms)")
+                    _log_recognition_outcome("PARTIAL", t, inf_ms, recognition_meta, text=cleaned_text, blocked=False)
                     dispatch(ev)
             except Exception as e:
                 logger.error(f"[realtime_worker] {e}")
@@ -3009,10 +3028,10 @@ def main(args=None):
             state["speech_epoch"] += 1
             state["finalized_epoch"] = state["speech_epoch"]
             epoch = state["speech_epoch"]
-        with speaker_epoch_lock:
-            stale_epochs = [key for key in speaker_epoch_state.keys() if key < epoch - 8]
+        with recognition_epoch_lock:
+            stale_epochs = [key for key in recognition_epoch_state.keys() if key < epoch - 8]
             for key in stale_epochs:
-                speaker_epoch_state.pop(key, None)
+                recognition_epoch_state.pop(key, None)
         if had_audio:
             logger.info(f"[speech] reset active utterance epoch={epoch} reason={reason}")
             dispatch({"type": "status", "value": "idle"})
@@ -3154,7 +3173,7 @@ def main(args=None):
                 debug_log(f"[wake] detected word={WAKEWORD} rms={chunk_rms:.1f}")
                 with mode_lock:
                     sleeping_for_feedback = mode_state["sleeping"]
-                if not (sleeping_for_feedback and speaker_verifier and SPEAKER_ENABLED and SPEAKER_GATE_WAKE):
+                if not (sleeping_for_feedback and recognition_engine and RECOGNITION_ENABLED and RECOGNITION_GATE_WAKE):
                     trigger_wake_feedback(reason=f"wake:{WAKEWORD}")
             wakeword_prev_detected = wake_detected
 
@@ -3170,32 +3189,32 @@ def main(args=None):
                         wake_verify_buffer.append(chunk)
                     verify_audio = np.concatenate(wake_verify_buffer).astype(np.float32) / 32768.0 if wake_verify_buffer else np.zeros(0, dtype=np.float32)
                     verify_duration = float(verify_audio.size) / float(RATE) if verify_audio.size else 0.0
-                    timed_out = (time.time() - wake_verify_started_at) > max(4.0, SPEAKER_MIN_VERIFY_SPEECH_SECONDS + 2.0)
-                    if verify_duration >= SPEAKER_MIN_VERIFY_SPEECH_SECONDS:
-                        wake_ok, wake_meta = check_speaker_epoch(-1, verify_audio)
+                    timed_out = (time.time() - wake_verify_started_at) > max(4.0, RECOGNITION_MIN_VERIFY_SPEECH_SECONDS + 2.0)
+                    if verify_duration >= RECOGNITION_MIN_VERIFY_SPEECH_SECONDS:
+                        wake_ok, wake_meta = check_recognition_epoch(-1, verify_audio)
                         wake_verify_pending = False
                         wake_verify_buffer = []
                         if wake_ok:
-                            trigger_wake_feedback(reason=f"wake:{WAKEWORD}:speaker")
+                            trigger_wake_feedback(reason=f"wake:{WAKEWORD}:recognition")
                             set_sleeping(False, reason=f"wake:{WAKEWORD}", play_feedback=False)
                             drop_chunks_after_wake = int(max(0.0, WAKEWORD_DROP_SECONDS) * RATE / CHUNK)
                             reset_active_utterance(reason="wake_transition")
                             debug_log(f"[wake] dropping_chunks_after_wake={drop_chunks_after_wake}")
                         else:
                             debug_log(
-                                f"[wake] blocked_by_speaker score={wake_meta.get('score')} "
+                                f"[wake] blocked_by_recognition score={wake_meta.get('score')} "
                                 f"reason={wake_meta.get('reason')}"
                             )
                     elif timed_out:
                         wake_verify_pending = False
                         wake_verify_buffer = []
-                        debug_log("[wake] speaker verification timed out")
+                        debug_log("[wake] recognition timed out")
                 elif wake_detected:
-                    if speaker_verifier and SPEAKER_ENABLED and SPEAKER_GATE_WAKE:
+                    if recognition_engine and RECOGNITION_ENABLED and RECOGNITION_GATE_WAKE:
                         wake_verify_pending = True
                         wake_verify_buffer = []
                         wake_verify_started_at = time.time()
-                        debug_log("[wake] pending speaker verification")
+                        debug_log("[wake] pending recognition")
                     else:
                         set_sleeping(False, reason=f"wake:{WAKEWORD}", play_feedback=False)
                         drop_chunks_after_wake = int(max(0.0, WAKEWORD_DROP_SECONDS) * RATE / CHUNK)

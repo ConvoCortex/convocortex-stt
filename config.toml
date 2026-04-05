@@ -105,9 +105,9 @@ queue_size       = 1
 save_utterance_clips = false
 utterance_clips_dir = "recordings/utterance-clips"
 
-[speaker_recognition]
+[recognition]
 # use curated voice sample files in samples_dir as the enrolled "me" corpus
-# accepted speaker passes through; non-matching speech is blocked
+# accepted recognition passes through; non-matching speech is blocked
 # this is not diarization and not anti-spoof security
 enabled = true
 mode = "me-only"
@@ -117,11 +117,11 @@ gate_wake = true
 # prefer cuda when available; falls back to cpu automatically
 device = "cuda"
 model = "ecapa_tdnn"
-samples_dir = "speaker-recognition/samples"
-profile_file = "speaker-recognition/profile.json"
-threshold = 0.72
+samples_dir = "recognition/samples"
+profile_file = "recognition/profile.json"
+threshold_override = ""
 min_verify_speech_seconds = 1.2
-log_all_scores = true
+log_scores = true
 
 [file_drop]
 # files-mode backends: "faster-whisper", "parakeet", "parakeet-cuda", or "parakeet-tensorrt"

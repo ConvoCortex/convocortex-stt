@@ -168,7 +168,7 @@ For a proper, richer voice command engine, use the emitted NATS events and imple
 - Per-file timing output for fixed-input comparison runs
 - Built-in audio feedback sounds (on/off/final + silence loop for bluetooth audio issues)
 - Simple built-in voice command actions
-- Optional me-only speaker recognition from curated sample files
+- Optional me-only recognition from curated sample files
 - Optional saved microphone utterance clips for later review/training
 - Draft-buffer workflow for reviewing/editing before release
 - Local output handlers:
@@ -278,7 +278,7 @@ All runtime settings live in `config.toml` and are loaded at startup.
 
 Important areas:
 - `microphone`: backend choice plus realtime/final models and device choices
-- `speaker_recognition`: me-only speaker recognition, threshold, and sample/profile paths
+- `recognition`: me-only recognition, thresholding, and sample/profile paths
 - `recording`: optional saved microphone utterance clips
 - `microphone.parakeet_cuda` / `microphone.parakeet_tensorrt`: encoder-runtime settings for the `parakeet-cuda` and `parakeet-tensorrt` backends
 - `microphone.no_speech_threshold` / `microphone.log_prob_threshold`: faster-whisper-only silence / low-confidence rejection for reducing spurious transcripts
@@ -300,7 +300,7 @@ Backend guidance:
 - `faster-whisper` stays available when you prefer that tradeoff.
 - `parakeet-cuda` and `parakeet-tensorrt` are experimental accelerated variants, not the default path.
 
-### Speaker recognition
+### Recognition
 
 The repo can optionally run in a me-only mode:
 - your speech passes through
@@ -309,15 +309,15 @@ The repo can optionally run in a me-only mode:
 
 This is not diarization and not spoof-resistant identity security. It is a practical ownership filter so the system does not respond to other voices nearby.
 
-The speaker profile is local-only and stored in `speaker_recognition.profile_file`, while the source-of-truth voice corpus lives in `speaker_recognition.samples_dir`.
+The recognition profile is local-only and stored in `recognition.profile_file`, while the source-of-truth voice corpus lives in `recognition.samples_dir`.
 
 There is no interactive enrollment wizard anymore. The workflow is:
-- put curated `me` voice clips into `speaker-recognition/samples/`
-- set `speaker_recognition.enabled = true`
-- startup rebuilds `speaker-recognition/profile.json` once if those sample files changed
+- put curated `me` voice clips into `recognition/samples/`
+- set `recognition.enabled = true`
+- startup rebuilds `recognition/profile.json` once if those sample files changed
 - live microphone STT and file-drop use that built profile when enabled
 
-If you want the app to also behave like a simple pause-chunked microphone recorder, turn on `recording.save_utterance_clips = true`. It saves finalized live utterance audio clips into `recordings/utterance-clips/`, and you can copy the good ones into `speaker-recognition/samples/`.
+If you want the app to also behave like a simple pause-chunked microphone recorder, turn on `recording.save_utterance_clips = true`. It saves finalized live utterance audio clips into `recordings/utterance-clips/`, and you can copy the good ones into `recognition/samples/`.
 
 `feedback.silence_keepalive_mode = "always"` keeps `sounds/silence.ogg` looping continuously on the feedback output device. Set it to `"off"` to disable that keepalive.
 
@@ -390,7 +390,7 @@ The file worker watches:
 - `file_drop.text_dir` for transcript outputs (`.txt` plus optional `.json` sidecar)
 - `file_drop.done_dir` for handled audio
 - `file_drop.failed_dir` for files that could not be transcribed
-- `file_drop.rejected_dir` for files blocked by speaker recognition
+- `file_drop.rejected_dir` for files blocked by recognition
 - `file_drop.backend`, `file_drop.model`, `file_drop.device`, `file_drop.compute`, and `file_drop.language` for the transcription engine itself
 
 The transcript `.txt` output includes:
@@ -401,7 +401,7 @@ The transcript `.txt` output includes:
 - total job time
 - realtime factor / throughput
 
-If speaker recognition blocks a file, it is moved to `file_drop.rejected_dir` and the sidecar metadata records the speaker score, threshold, and rejection reason instead of producing a transcript.
+If recognition blocks a file, it is moved to `file_drop.rejected_dir` and the sidecar metadata records the recognition score, threshold, and rejection reason instead of producing a transcript.
 
 Useful commands:
 
