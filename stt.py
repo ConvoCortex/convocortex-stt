@@ -610,8 +610,6 @@ START_FILES_MODE = bool(_startup_cfg.get("start_files", False))
 def _interactive_startup_pending(force_recognition: bool = False) -> bool:
     if not DEVICE_SETUP_INITIALIZED or not DEVICE_PROFILES_PATH.exists():
         return True
-    if force_recognition or not RECOGNITION_SETUP_INITIALIZED:
-        return True
     return False
 
 # ── Realtime ──────────────────────────────────────────────────────────────────
@@ -1053,6 +1051,11 @@ def _run_recognition_setup(force: bool = False) -> bool:
     minimum_seconds = 3.0
     accepted_paths: list[Path] = []
 
+    def _run_setup_countdown(prefix: str, seconds: int) -> None:
+        for remaining in range(int(seconds), 0, -1):
+            logger.info("[recognition-setup] %s %s", prefix, remaining)
+            time.sleep(1.0)
+
     p = pyaudio.PyAudio()
     session = None
     try:
@@ -1079,18 +1082,19 @@ def _run_recognition_setup(force: bool = False) -> bool:
                     input()
                 except EOFError:
                     pass
-                for remaining in range(countdown_seconds, 0, -1):
-                    logger.info("[recognition-setup] %s...", remaining)
-                    time.sleep(1.0)
+                _run_setup_countdown("Starting in", countdown_seconds)
                 logger.info("[recognition-setup] START")
                 chunks: list[np.ndarray] = []
                 total_chunks = max(1, int(round((record_seconds * RATE) / CHUNK)))
+                last_stop_seconds_left = None
                 for step in range(total_chunks):
                     raw, _ = session.read_chunk()
                     chunks.append(np.frombuffer(raw, dtype=np.int16).copy())
-                    seconds_left = record_seconds - int((step * CHUNK) / RATE)
-                    if ((step + 1) * CHUNK) % RATE == 0:
-                        logger.info("[recognition-setup] %ss until stop", max(0, seconds_left - 1))
+                    elapsed_s = float((step + 1) * CHUNK) / float(RATE)
+                    seconds_left = max(0, int(math.ceil(record_seconds - elapsed_s)))
+                    if seconds_left <= countdown_seconds and seconds_left != last_stop_seconds_left:
+                        logger.info("[recognition-setup] Stopping in %s", seconds_left)
+                        last_stop_seconds_left = seconds_left
                 logger.info("[recognition-setup] STOP")
                 pcm = np.concatenate(chunks).astype(np.int16, copy=False) if chunks else np.zeros(0, dtype=np.int16)
                 duration_s = float(pcm.size) / float(RATE) if RATE else 0.0
@@ -1816,8 +1820,6 @@ def main(args=None):
         return 1
 
     if RECOGNITION_ENABLED:
-        if not RECOGNITION_SETUP_INITIALIZED:
-            _run_recognition_setup()
         _ensure_recognition_profile()
 
     file_drop_thread = None

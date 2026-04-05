@@ -50,7 +50,6 @@ If the console window is minimized, it is hidden to the tray instead of staying 
 If interactive startup setup is pending, the app stays in the foreground
 instead of hiding to tray first. Today that means:
 - `startup.device_setup_initialized = false`
-- `startup.recognition_setup_initialized = false`
 - missing device profiles file
 
 If `startup.device_setup_initialized = false` or the device profiles file is
@@ -58,11 +57,6 @@ missing, the app runs interactive device setup so you can pick the input and
 output devices in the order they should be used for startup and runtime cycling.
 To rerun it manually, set `startup.device_setup_initialized = false` in
 `config.toml` and start the app again.
-
-If `startup.recognition_setup_initialized = false`, the app runs guided
-recognition setup before normal STT startup. It records short curated clips
-into `recognition/samples/`, rebuilds `recognition/profile.json`, and then
-flips the flag back to `true`.
 
 `device-profiles.toml` is local machine-specific config, not runtime state.
 Order matters there:
@@ -317,16 +311,14 @@ This is not diarization and not spoof-resistant identity security. It is a pract
 
 The recognition profile is local-only and stored in `recognition.profile_file`, while the source-of-truth voice corpus lives in `recognition.samples_dir`.
 
-There are now two ways to build the recognition corpus:
-- guided setup: set `startup.recognition_setup_initialized = false` and restart, or run `uv run python stt.py --recognition-setup`
-- manual curation: put curated `me` voice clips into `recognition/samples/`
-
-In both cases:
-- set `recognition.enabled = true`
-- startup rebuilds `recognition/profile.json` once if those sample files changed
+The practical recognition workflow is now:
+- turn on `recording.save_utterance_clips = true`
+- let the app save normal pause-chunked microphone recordings into `recordings/utterance-clips/`
+- point `recognition.samples_dir` at that directory
+- startup rebuilds `recognition/profile.json` once if those recordings changed
 - live microphone STT and file-drop use that built profile when enabled
 
-If you want the app to also behave like a simple pause-chunked microphone recorder, turn on `recording.save_utterance_clips = true`. It saves finalized live utterance audio clips into `recordings/utterance-clips/`, and you can copy the good ones into `recognition/samples/`.
+If you later want a separate curated corpus, you can still point `recognition.samples_dir` at another directory, but the default path is to reuse the system's own saved utterance recordings.
 
 `feedback.silence_keepalive_mode = "always"` keeps `sounds/silence.ogg` looping continuously on the feedback output device. Set it to `"off"` to disable that keepalive.
 
