@@ -119,7 +119,7 @@ device = "cuda"
 model = "ecapa_tdnn"
 samples_dir = "recognition/samples"
 profile_file = "recognition/profile.json"
-threshold_override = 0.8
+threshold_override = 0.76
 min_verify_speech_seconds = 1.2
 log_scores = true
 
