@@ -95,14 +95,14 @@ check_interval   = 0.3
 # min_chunks: minimum audio chunks before attempting a partial (avoids transcribing too little audio)
 # max_chunks: stop attempting partials beyond this length (avoids slow inference on long utterances)
 # 1 chunk = 512 samples at 16000hz = ~32ms
-min_chunks       = 10
+min_chunks       = 20
 max_chunks       = 100
 # queue_size: max pending partial jobs — oldest dropped if full (keeps latency low)
 queue_size       = 1
 
 [recording]
 # save microphone utterance clips chunked on pauses to disk
-save_utterance_clips = true
+save_utterance_clips = false
 utterance_clips_dir = "recordings/utterance-clips"
 
 [recognition]
