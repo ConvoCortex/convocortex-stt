@@ -314,11 +314,15 @@ The recognition profile is local-only and stored in `recognition.profile_file`, 
 The practical recognition workflow is now:
 - turn on `recording.save_utterance_clips = true`
 - let the app save normal pause-chunked microphone recordings into `recordings/utterance-clips/`
-- point `recognition.samples_dir` at that directory
+- copy or move only the good short clips into `recognition/samples/`
 - startup rebuilds `recognition/profile.json` once if those recordings changed
 - live microphone STT and file-drop use that built profile when enabled
 
-If you later want a separate curated corpus, you can still point `recognition.samples_dir` at another directory, but the default path is to reuse the system's own saved utterance recordings. There is no guided recognition setup wizard in the active workflow anymore.
+The raw recordings folder and the recognition corpus should be treated as different things:
+- `recordings/utterance-clips/` = raw intake
+- `recognition/samples/` = curated recognition corpus
+
+There is no guided recognition setup wizard in the active workflow anymore.
 
 `feedback.silence_keepalive_mode = "always"` keeps `sounds/silence.ogg` looping continuously on the feedback output device. Set it to `"off"` to disable that keepalive.
 

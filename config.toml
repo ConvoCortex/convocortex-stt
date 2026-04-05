@@ -106,7 +106,7 @@ save_utterance_clips = true
 utterance_clips_dir = "recordings/utterance-clips"
 
 [recognition]
-# use pause-chunked microphone recordings in samples_dir as the enrolled "me" corpus
+# use curated voice sample files in samples_dir as the enrolled "me" corpus
 # accepted recognition passes through; non-matching speech is blocked
 # this is not diarization and not anti-spoof security
 enabled = true
@@ -117,7 +117,7 @@ gate_wake = true
 # prefer cuda when available; falls back to cpu automatically
 device = "cuda"
 model = "ecapa_tdnn"
-samples_dir = "recordings/utterance-clips"
+samples_dir = "recognition/samples"
 profile_file = "recognition/profile.json"
 threshold_override = 0.8
 min_verify_speech_seconds = 1.2
