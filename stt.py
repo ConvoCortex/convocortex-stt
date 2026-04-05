@@ -619,7 +619,7 @@ SPEAKER_MIN_VERIFY_SPEECH_SECONDS = float(_speaker_cfg.get("min_verify_speech_se
 # ── Recording ─────────────────────────────────────────────────────────────────
 _recording_cfg = cfg.get("recording", {}) or {}
 SAVE_UTTERANCE_CLIPS = bool(_recording_cfg.get("save_utterance_clips", False))
-UTTERANCE_CLIPS_DIR = _resolve_repo_path(_recording_cfg.get("utterance_clips_dir", "recordings/utterance-clips"))
+UTTERANCE_CLIPS_DIR = Path(_resolve_repo_path(_recording_cfg.get("utterance_clips_dir", "recordings/utterance-clips")))
 
 # ── Sleep / Wake ───────────────────────────────────────────────────────────────
 _sw_cfg = cfg.get("sleep_wake", {})
