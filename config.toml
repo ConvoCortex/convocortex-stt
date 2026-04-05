@@ -2,8 +2,6 @@
 # startup is config-driven; runtime state is cleared on each launch
 # false = run the interactive device setup on next startup, then flip back to true
 device_setup_initialized = true
-# false = run the guided recognition setup on next startup, then flip back to true
-recognition_setup_initialized = true
 # enable the live microphone STT runtime on app start
 start_microphone = true
 # enable the watched-folder files engine on app start

@@ -318,7 +318,7 @@ The practical recognition workflow is now:
 - startup rebuilds `recognition/profile.json` once if those recordings changed
 - live microphone STT and file-drop use that built profile when enabled
 
-If you later want a separate curated corpus, you can still point `recognition.samples_dir` at another directory, but the default path is to reuse the system's own saved utterance recordings.
+If you later want a separate curated corpus, you can still point `recognition.samples_dir` at another directory, but the default path is to reuse the system's own saved utterance recordings. There is no guided recognition setup wizard in the active workflow anymore.
 
 `feedback.silence_keepalive_mode = "always"` keeps `sounds/silence.ogg` looping continuously on the feedback output device. Set it to `"off"` to disable that keepalive.
 
