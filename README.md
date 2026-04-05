@@ -163,6 +163,7 @@ For a proper, richer voice command engine, use the emitted NATS events and imple
 - Per-file timing output for fixed-input comparison runs
 - Built-in audio feedback sounds (on/off/final + silence loop for bluetooth audio issues)
 - Simple built-in voice command actions
+- Optional me-only speaker verification with explicit enrollment
 - Draft-buffer workflow for reviewing/editing before release
 - Local output handlers:
   - append file
@@ -271,6 +272,7 @@ All runtime settings live in `config.toml` and are loaded at startup.
 
 Important areas:
 - `microphone`: backend choice plus realtime/final models and device choices
+- `speaker`: me-only speaker verification, enrollment, threshold, and profile location
 - `microphone.parakeet_cuda` / `microphone.parakeet_tensorrt`: encoder-runtime settings for the `parakeet-cuda` and `parakeet-tensorrt` backends
 - `microphone.no_speech_threshold` / `microphone.log_prob_threshold`: faster-whisper-only silence / low-confidence rejection for reducing spurious transcripts
 - `audio`: VAD behavior + silence timeout + preferred input, especially `vad_threshold`, `vad_end_threshold`, and `min_speech_duration_ms` for speech-vs-noise gating
@@ -290,6 +292,24 @@ Backend guidance:
 - `parakeet` is the normal recommended backend for both microphone mode and files mode.
 - `faster-whisper` stays available when you prefer that tradeoff.
 - `parakeet-cuda` and `parakeet-tensorrt` are experimental accelerated variants, not the default path.
+
+### Speaker verification
+
+The repo can optionally run in a me-only mode:
+- your speech passes through
+- non-matching speech is blocked
+- this applies to live microphone STT and file-drop when enabled
+
+This is not diarization and not spoof-resistant identity security. It is a practical ownership filter so the system does not respond to other voices nearby.
+
+The speaker profile is local-only and stored in `speaker.profile_file` such as `speaker-profile.json`.
+
+Enrollment is explicit:
+- set `speaker.enabled = true`
+- if no profile exists, or `speaker.enrollment_required = true`, the app runs enrollment before normal startup
+- or run `uv run python stt.py --speaker-enroll`
+
+Enrollment records a fixed number of fixed-length samples with explicit countdown prompts. It does not use hidden start/stop logic.
 
 `feedback.silence_keepalive_mode = "always"` keeps `sounds/silence.ogg` looping continuously on the feedback output device. Set it to `"off"` to disable that keepalive.
 
@@ -362,6 +382,7 @@ The file worker watches:
 - `file_drop.text_dir` for transcript outputs (`.txt` plus optional `.json` sidecar)
 - `file_drop.done_dir` for handled audio
 - `file_drop.failed_dir` for files that could not be transcribed
+- `file_drop.rejected_dir` for files blocked by speaker verification
 - `file_drop.backend`, `file_drop.model`, `file_drop.device`, `file_drop.compute`, and `file_drop.language` for the transcription engine itself
 
 The transcript `.txt` output includes:
@@ -371,6 +392,8 @@ The transcript `.txt` output includes:
 - inference time
 - total job time
 - realtime factor / throughput
+
+If speaker verification blocks a file, it is moved to `file_drop.rejected_dir` and the sidecar metadata records the speaker score, threshold, and rejection reason instead of producing a transcript.
 
 Useful commands:
 

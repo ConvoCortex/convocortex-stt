@@ -101,17 +101,23 @@ max_chunks       = 100
 queue_size       = 1
 
 [speaker]
+# me-only speaker verification:
+# - accepted speaker passes through
+# - non-matching speech is blocked
+# this is not diarization and not anti-spoof security
 enabled = false
 mode = "me-only"
 apply_to_microphone = true
 apply_to_files = true
 gate_wake = true
+# prefer cuda when available; falls back to cpu automatically
 device = "cuda"
 model = "ecapa_tdnn"
 profile_file = "speaker-profile.json"
 threshold = 0.72
 min_verify_speech_seconds = 1.2
 enrollment_required = false
+# fixed-count, fixed-duration explicit enrollment samples
 enrollment_samples = 3
 enrollment_sample_seconds = 6.0
 adapt_accepted_audio = false
