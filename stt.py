@@ -1002,7 +1002,7 @@ def _maybe_run_device_setup() -> dict:
             pass
 
 
-DEVICE_PROFILES = _maybe_run_device_setup()
+DEVICE_PROFILES = load_profiles(DEVICE_PROFILES_PATH)
 APPROVED_INPUT_PROFILES = DEVICE_PROFILES.get("inputs", [])
 APPROVED_OUTPUT_PROFILES = DEVICE_PROFILES.get("outputs", [])
 
@@ -1056,11 +1056,12 @@ def _run_recognition_setup(force: bool = False) -> bool:
     p = pyaudio.PyAudio()
     session = None
     try:
-        session, device_name = _open_startup_input_capture(
+        device_info, session = _open_startup_input_capture(
             p,
             log_prefix="[recognition-setup]",
             emit_logs=True,
         )
+        device_name = str(device_info.get("name", "")).strip()
         logger.info("[recognition-setup] Using input device: %s", device_name)
         RECOGNITION_SAMPLES_DIR.mkdir(parents=True, exist_ok=True)
         for existing in RECOGNITION_SAMPLES_DIR.glob("*"):
@@ -1268,10 +1269,6 @@ def _open_startup_input_capture(p: pyaudio.PyAudio, *, log_prefix: str = "[input
         "No usable input device found at startup. "
         + ("; ".join(summary_parts) if summary_parts else "No startup candidates were available.")
     )
-
-
-RECOGNITION_SETUP_RAN = _run_recognition_setup()
-
 
 def _recognition_sample_paths(samples_dir: Path) -> list[Path]:
     supported = {".wav", ".mp3", ".m4a", ".flac", ".ogg", ".opus", ".aac", ".wma"}
@@ -1748,11 +1745,15 @@ class FeedbackAudio:
 
 def main(args=None):
     import signal
+    global DEVICE_PROFILES, APPROVED_INPUT_PROFILES, APPROVED_OUTPUT_PROFILES
     argv = list(sys.argv[1:] if args is None else args)
     cli = argparse.ArgumentParser(add_help=False)
     cli.add_argument("--file-drop-worker", action="store_true")
     cli.add_argument("--recognition-setup", action="store_true")
     parsed, remaining = cli.parse_known_args(argv)
+    DEVICE_PROFILES = _maybe_run_device_setup()
+    APPROVED_INPUT_PROFILES = DEVICE_PROFILES.get("inputs", [])
+    APPROVED_OUTPUT_PROFILES = DEVICE_PROFILES.get("outputs", [])
     if parsed.recognition_setup:
         _run_recognition_setup(force=True)
         return 0
@@ -1815,6 +1816,8 @@ def main(args=None):
         return 1
 
     if RECOGNITION_ENABLED:
+        if not RECOGNITION_SETUP_INITIALIZED:
+            _run_recognition_setup()
         _ensure_recognition_profile()
 
     file_drop_thread = None
