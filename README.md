@@ -50,6 +50,7 @@ If the console window is minimized, it is hidden to the tray instead of staying 
 If interactive startup setup is pending, the app stays in the foreground
 instead of hiding to tray first. Today that means:
 - `startup.device_setup_initialized = false`
+- `startup.recognition_setup_initialized = false`
 - missing device profiles file
 
 If `startup.device_setup_initialized = false` or the device profiles file is
@@ -57,6 +58,11 @@ missing, the app runs interactive device setup so you can pick the input and
 output devices in the order they should be used for startup and runtime cycling.
 To rerun it manually, set `startup.device_setup_initialized = false` in
 `config.toml` and start the app again.
+
+If `startup.recognition_setup_initialized = false`, the app runs guided
+recognition setup before normal STT startup. It records short curated clips
+into `recognition/samples/`, rebuilds `recognition/profile.json`, and then
+flips the flag back to `true`.
 
 `device-profiles.toml` is local machine-specific config, not runtime state.
 Order matters there:
@@ -311,8 +317,11 @@ This is not diarization and not spoof-resistant identity security. It is a pract
 
 The recognition profile is local-only and stored in `recognition.profile_file`, while the source-of-truth voice corpus lives in `recognition.samples_dir`.
 
-There is no interactive enrollment wizard anymore. The workflow is:
-- put curated `me` voice clips into `recognition/samples/`
+There are now two ways to build the recognition corpus:
+- guided setup: set `startup.recognition_setup_initialized = false` and restart, or run `uv run python stt.py --recognition-setup`
+- manual curation: put curated `me` voice clips into `recognition/samples/`
+
+In both cases:
 - set `recognition.enabled = true`
 - startup rebuilds `recognition/profile.json` once if those sample files changed
 - live microphone STT and file-drop use that built profile when enabled

@@ -567,6 +567,7 @@ PREFERRED_INPUT_DEVICE = str(cfg["audio"].get("input_device", "")).strip()
 DEVICE_PROFILES_PATH = Path(str(cfg["audio"].get("device_profiles_file", "device-profiles.json")).strip() or "device-profiles.json")
 _startup_cfg = cfg.get("startup", {})
 DEVICE_SETUP_INITIALIZED = bool(_startup_cfg.get("device_setup_initialized", False))
+RECOGNITION_SETUP_INITIALIZED = bool(_startup_cfg.get("recognition_setup_initialized", True))
 
 
 def _normalize_console_startup_mode(value, default: str = "foreground") -> str:
@@ -593,6 +594,8 @@ START_FILES_MODE = bool(_startup_cfg.get("start_files", False))
 
 def _interactive_startup_pending(force_recognition: bool = False) -> bool:
     if not DEVICE_SETUP_INITIALIZED or not DEVICE_PROFILES_PATH.exists():
+        return True
+    if force_recognition or not RECOGNITION_SETUP_INITIALIZED:
         return True
     return False
 
@@ -988,6 +991,153 @@ APPROVED_INPUT_PROFILES = DEVICE_PROFILES.get("inputs", [])
 APPROVED_OUTPUT_PROFILES = DEVICE_PROFILES.get("outputs", [])
 
 
+def _write_pcm16_wav(path: Path, pcm: np.ndarray, *, sample_rate: int) -> None:
+    pcm16 = np.asarray(pcm, dtype=np.int16).reshape(-1)
+    with wave.open(str(path), "wb") as handle:
+        handle.setnchannels(1)
+        handle.setsampwidth(2)
+        handle.setframerate(int(sample_rate))
+        handle.writeframes(pcm16.tobytes())
+
+
+def _recognition_take_metrics(pcm: np.ndarray) -> tuple[float, float, float]:
+    arr = np.asarray(pcm, dtype=np.float32).reshape(-1)
+    if arr.size == 0:
+        return 0.0, 0.0, 0.0
+    normalized = np.clip(arr / 32768.0, -1.0, 1.0)
+    rms = float(np.sqrt(np.mean(np.square(normalized))))
+    peak = float(np.max(np.abs(normalized)))
+    active_ratio = float(np.mean(np.abs(normalized) >= 0.01))
+    return rms, peak, active_ratio
+
+
+def _set_recognition_setup_initialized(value: bool):
+    _set_config_bool_flag("startup", "recognition_setup_initialized", value, log_label="recognition-setup")
+
+
+def _run_recognition_setup(force: bool = False) -> bool:
+    needs_setup = force or (not RECOGNITION_SETUP_INITIALIZED)
+    if not needs_setup:
+        return False
+
+    logger.info("[recognition-setup] Starting guided recognition setup.")
+    logger.info("[recognition-setup] This will replace the current clips in recognition/samples.")
+    logger.info("[recognition-setup] Use your normal microphone path and speak naturally.")
+
+    prompts = [
+        ("calm", "Speak one calm normal sentence in your everyday voice."),
+        ("short", "Speak one short casual phrase, like a quick reaction."),
+        ("fast", "Speak one sentence a bit faster than normal."),
+        ("quiet", "Speak one sentence slightly quieter but still clear."),
+        ("strong", "Speak one sentence with more emphasis or energy."),
+        ("long", "Speak one longer natural thought for the full take."),
+    ]
+    countdown_seconds = 3
+    record_seconds = 5
+    minimum_seconds = 3.0
+    accepted_paths: list[Path] = []
+
+    p = pyaudio.PyAudio()
+    session = None
+    try:
+        session, device_name, _, _, _ = _open_startup_input_capture(
+            p,
+            log_prefix="[recognition-setup]",
+            emit_logs=True,
+        )
+        logger.info("[recognition-setup] Using input device: %s", device_name)
+        RECOGNITION_SAMPLES_DIR.mkdir(parents=True, exist_ok=True)
+        for existing in RECOGNITION_SAMPLES_DIR.glob("*"):
+            if existing.is_file():
+                existing.unlink()
+
+        for index, (label, prompt) in enumerate(prompts, start=1):
+            accepted = False
+            attempt = 0
+            while not accepted:
+                attempt += 1
+                logger.info("[recognition-setup] Take %s/%s (%s): %s", index, len(prompts), label, prompt)
+                logger.info("[recognition-setup] Press Enter when ready.")
+                try:
+                    input()
+                except EOFError:
+                    pass
+                for remaining in range(countdown_seconds, 0, -1):
+                    logger.info("[recognition-setup] %s...", remaining)
+                    time.sleep(1.0)
+                logger.info("[recognition-setup] START")
+                chunks: list[np.ndarray] = []
+                total_chunks = max(1, int(round((record_seconds * RATE) / CHUNK)))
+                for step in range(total_chunks):
+                    raw, _ = session.read_chunk()
+                    chunks.append(np.frombuffer(raw, dtype=np.int16).copy())
+                    seconds_left = record_seconds - int((step * CHUNK) / RATE)
+                    if ((step + 1) * CHUNK) % RATE == 0:
+                        logger.info("[recognition-setup] %ss until stop", max(0, seconds_left - 1))
+                logger.info("[recognition-setup] STOP")
+                pcm = np.concatenate(chunks).astype(np.int16, copy=False) if chunks else np.zeros(0, dtype=np.int16)
+                duration_s = float(pcm.size) / float(RATE) if RATE else 0.0
+                rms, peak, active_ratio = _recognition_take_metrics(pcm)
+                if duration_s < minimum_seconds or rms < 0.01 or peak < 0.08 or active_ratio < 0.18:
+                    logger.warning(
+                        "[recognition-setup] Rejected take %s/%s attempt=%s duration=%.2fs rms=%.4f peak=%.4f active_ratio=%.3f. Speak more clearly and fill the take.",
+                        index,
+                        len(prompts),
+                        attempt,
+                        duration_s,
+                        rms,
+                        peak,
+                        active_ratio,
+                    )
+                    continue
+                out_path = RECOGNITION_SAMPLES_DIR / f"setup-{index:02d}-{label}.wav"
+                _write_pcm16_wav(out_path, pcm, sample_rate=RATE)
+                accepted_paths.append(out_path)
+                logger.info(
+                    "[recognition-setup] Accepted take %s/%s duration=%.2fs rms=%.4f peak=%.4f active_ratio=%.3f path=%s",
+                    index,
+                    len(prompts),
+                    duration_s,
+                    rms,
+                    peak,
+                    active_ratio,
+                    out_path,
+                )
+                accepted = True
+
+        engine = RecognitionEngine(
+            profile_path=RECOGNITION_PROFILE_FILE,
+            model_name=RECOGNITION_MODEL,
+            requested_device=RECOGNITION_DEVICE,
+            sample_rate=RATE,
+            threshold_override=RECOGNITION_THRESHOLD_OVERRIDE,
+            mode=RECOGNITION_MODE,
+        )
+        profile = engine.build_profile_from_paths(accepted_paths)
+        RECOGNITION_PROFILE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        engine.save_profile(profile)
+        for line in engine.startup_logs():
+            logger.info("[recognition-setup] %s", line)
+        logger.info(
+            "[recognition-setup] Complete. Saved %s curated clips to %s and rebuilt %s.",
+            len(accepted_paths),
+            RECOGNITION_SAMPLES_DIR,
+            RECOGNITION_PROFILE_FILE,
+        )
+        _set_recognition_setup_initialized(True)
+        return True
+    finally:
+        try:
+            if session is not None:
+                session.close()
+        except Exception:
+            pass
+        try:
+            p.terminate()
+        except Exception:
+            pass
+
+
 def _set_config_bool_flag(section: str, key: str, value: bool, *, log_label: str):
     try:
         config_path = config.CONFIG_PATH
@@ -1102,6 +1252,9 @@ def _open_startup_input_capture(p: pyaudio.PyAudio, *, log_prefix: str = "[input
         "No usable input device found at startup. "
         + ("; ".join(summary_parts) if summary_parts else "No startup candidates were available.")
     )
+
+
+RECOGNITION_SETUP_RAN = _run_recognition_setup()
 
 
 def _recognition_sample_paths(samples_dir: Path) -> list[Path]:
@@ -1582,7 +1735,11 @@ def main(args=None):
     argv = list(sys.argv[1:] if args is None else args)
     cli = argparse.ArgumentParser(add_help=False)
     cli.add_argument("--file-drop-worker", action="store_true")
+    cli.add_argument("--recognition-setup", action="store_true")
     parsed, remaining = cli.parse_known_args(argv)
+    if parsed.recognition_setup:
+        _run_recognition_setup(force=True)
+        return 0
     if parsed.file_drop_worker:
         from file_drop_worker import run_from_args as run_file_drop_worker
         console_controller = WindowsConsoleController()
@@ -1615,7 +1772,7 @@ def main(args=None):
     console_controller = WindowsConsoleController()
     tray_icon = WindowsTrayIcon(console_controller)
     background_mode = CONSOLE_STARTUP_MODE == "background"
-    interactive_startup_pending = _interactive_startup_pending(force_recognition=False)
+    interactive_startup_pending = _interactive_startup_pending(force_recognition=parsed.recognition_setup)
     if background_mode and not interactive_startup_pending:
         if console_controller.available:
             console_controller.hide(reason="startup-init")
