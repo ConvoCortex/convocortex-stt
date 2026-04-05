@@ -4,47 +4,51 @@ Ambient speech-to-text for desktop use: leave it running, wake it when needed, s
 
 It is built for daily hands-free use rather than one-shot dictation: wake/sleep modes, VAD-gated utterances, pluggable realtime/final backends, device cycling, audio feedback, hotkeys, and a simple integration boundary over NATS.
 
-## Why this repo is useful
-
-- It is hands-free. VAD starts and ends utterances from speech and silence, not button presses.
-- It supports separate realtime and final backends, but the intended path here is NVIDIA Parakeet for both.
-- Its buffer-first workflow is practical for real desktop work instead of forcing immediate text emission all the time.
-- It can turn a phone into a location-independent microphone-input/audio-feedback-output path for the desktop by combining Voicemeeter Banana, Mumble, and a networking solution; see [docs/remote-audio-bridge.md](docs/remote-audio-bridge.md).
-- wake/sleep state, audio feedback, hotkeys, device switching, reconnect behavior, and persisted runtime state.
-- It works as a standalone local tool and also as a component inside a larger voice system through NATS.
-
 ## Features
 
-- No GUI
-- Hands-free transcription on pause
-- Sleep/working mode with wake word + stop words
-- Wake-word transition audio dropping to keep the wake phrase out of transcripts
-- Realtime partial transcriptions during speech
-- High-accuracy final transcriptions after pauses
-- Independent realtime/final backend selection with  `parakeet` (recommended), `faster-whisper`, and experimental: `parakeet-cuda`, and `parakeet-tensorrt`
+- Hands-free utterance capture from VAD-detected speech and pauses
+- Sleep/working mode with wake word + stop words instead of push-to-talk
+- Wake-word transition audio dropping so the wake phrase does not leak into transcripts
+- Realtime partials for responsiveness and fast voice-command triggering
+- Higher-confidence final transcripts after pause detection
+- Phone-as-microphone workflow through the remote-audio bridge path instead of degrading to Bluetooth headset mic quality
+- Roaming and leave-home use by reconnecting the phone-side Mumble client while the PC runtime stays alive
+- Recommended Parakeet pipeline with optional `faster-whisper`, `parakeet-cuda`, and `parakeet-tensorrt` backends
 - Shared realtime/final backend reuse when both sides use the same model/backend
-- Separate file-drop transcription worker with `files/speech/ -> files/text/ + files/done/`
-- File-drop rejection path with sidecar metadata for blocked or failed files
-- Per-file timing output for fixed-input comparison runs
-- Voice-match recognition from curated sample files for microphone STT and file-drop
+- Draft-buffer workflow for reviewable text before release
+- Direct-cursor workflow for immediate local output
+- Local output handlers for append file, overwrite file, buffer accumulate/release, and type-at-cursor
+- Exact voice commands for mode switching, buffer release/clear, enter, rewind/repeat, device cycling, sleep, and console control
+- Hotkeys for the same dominant runtime controls when speech is not the right control surface
+- Voice-match recognition from curated local samples for microphone STT and optional file-drop filtering
 - Recognition-gated wake transitions when enabled
-- Optional saved microphone utterance clips for later review and corpus curation
-- Built-in audio feedback sounds (on/off/final + silence loop for bluetooth audio issues)
-- Simple built-in voice command actions
-- Draft-buffer workflow for reviewing/editing before release
-- Local output handlers: append file, overwrite file, file buffer accumulate/release, type at cursor
-- Runtime output mode switching between draft-buffer and direct-cursor workflows
-- Hotkeys for sleep toggle, typing toggle, input device cycle, output device cycle, output mode cycle, and console toggle
-- Exact voice commands for buffer release, mode switching, device cycling, sleep/wake control, and console show/hide
-- NATS integration with event stream (`partial`, `final`, `status`, `system`) and control surface (`sleep`, `wake`, `typing_*`, device cycle, etc.)
-- Config-driven startup with runtime state cleared on launch
-- Interactive device setup with persisted device order in `device-profiles.toml`
-- Input/output device switching and reconnect behavior
-- Windows console hide/show control with tray icon support
-- Launcher EXE for Windows startup/integration
+- Optional saved utterance clips for collecting and curating recognition samples
+- Separate file-drop transcription worker with rejection/failure sidecars and independent backend loading
+- Per-file timing output and benchmark script for fixed-input backend comparison
+- Built-in audio feedback cues including continuous silence keepalive for flaky Bluetooth audio paths
+- Interactive device setup with persisted input/output cycling order in `device-profiles.toml`
+- Input/output device cycling and reconnect-aware runtime behavior
+- NATS event stream and control surface for using STT as the front-end of a larger system
+- Local cursor/buffer workflows as convenience layers on top of the broader NATS-driven architecture
+- Windows tray/console control and launcher EXE for background desktop use
 - Debug logging and crash logging to file
-- Benchmark script for fixed-input backend comparisons
-- Friendly to virtual-audio and remote-audio bridge setups
+- Friendly to remote-audio bridge setups where the phone stays the microphone
+
+## Intended Experience
+
+You wake up, turn on the PC, and the STT runtime is already there. In the intended daily setup, starting the whole thing is as simple as unlocking the PC, opening Mumble on the phone, and connecting to the server. From that point on, you just talk. If you go to the kitchen, you take the phone with you. If you leave the room, the microphone leaves with you. If you leave the house, you leave the PC running and reconnect Mumble from the phone once you are off the home Wi‑Fi. After that, the phone can still feed the PC from anywhere with internet. The PC remains the voice runtime. The phone remains the microphone.
+
+That phone-first microphone path matters because it avoids the normal Bluetooth headset microphone tradeoff. With a typical Bluetooth headset, audio quality degrades as soon as the headset becomes the capture device. Here the microphone stays on the phone on purpose, while audio output can stay on the phone, on the PC, on speakers, or on headphones. The point is not just convenience. The point is preserving a sane audio setup while still having a roaming microphone. For the setup path behind that, see [docs/remote-audio-bridge.md](docs/remote-audio-bridge.md).
+
+From the interaction side, this is not meant to be push-to-talk dictation. VAD opens and closes utterances automatically, so you do not press anything just to speak. If you do not want the system listening, you say `sleep`. If you want it back, you say the wake word. Wake is mode control, not a prefix ritual before every sentence. Partials exist for responsiveness and for fast voice-command triggering. Finals are the more reliable text after pause detection.
+
+In the simplest local workflow, the system behaves like a much better hands-free typing tool. It can type at the cursor immediately, or it can keep a live draft buffer that you release with `buffer` or `enter`. Those local behaviors are useful and practical, but they are still only the convenience layer.
+
+The larger point of the repo is that the transcript does not have to stop at local typing. In the intended broader workflow, the real destination is NATS. The transcript goes to the rest of your system, and that system decides what should happen next. That can mean LLMs, agents, automations, desktop actions, chat systems, calls, or anything else you wire behind it. Local cursor output and local buffer release are there because they are convenient defaults. NATS is there because this is supposed to be a speech front-end for a larger stack.
+
+Recognition makes that practical in shared spaces. You do not train a custom speaker model. You keep the clips the system already records, move the good ones into `recognition/samples/`, and let the runtime rebuild the local profile. That profile then acts as a voice-match filter, so nearby people do not casually drive your system. That is not spoof-resistant biometric security, and it is not trying to be. It is a practical answer to the daily problem that actually matters.
+
+The result is a system that can work as plain local STT, as a draft buffer, as a direct cursor tool, as a file-drop transcription worker, or as a voice interface for a much larger automation stack. The point is not just "speech to text." The point is software that can stay there, listen when allowed, ignore what should be ignored, and let speech drive things without constant manual handling.
 
 ## Quick start
 

@@ -255,7 +255,7 @@ enabled = true
 words   = ["enter"] # Exact match or detected at the end of utterance, not detected in the middle.
 
 [voice_commands.type_at_cursor_toggle]
-enabled = false
+enabled = true
 words   = ["typing"] # Detected at the start of utterance
 
 [voice_commands.rewind]
@@ -318,7 +318,7 @@ wake_word = "bumblebee"            # must be a supported built-in Porcupine keyw
 sensitivity = 0.5                  # 0..1, higher = more sensitive
 drop_audio_after_wake_seconds = 0.4  # helps avoid wake word leaking into first transcription
 start_sleeping = true
-stop_words = ["sleep", "mufasa"]
+stop_words = ["sleep"]
 
 # ── Hotkeys ──────────────────────────────────────────────────────────────────
 # Empty string = disabled.
