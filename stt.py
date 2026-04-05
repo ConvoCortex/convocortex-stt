@@ -40,6 +40,7 @@ from audio_devices import (
 )
 import config
 from model_backends import load_backend
+from speaker_verifier import SpeakerVerifier
 
 
 def _bootstrap_owned_console():
@@ -520,6 +521,23 @@ MIN_CHUNKS        = cfg["realtime"]["min_chunks"]
 MAX_CHUNKS        = cfg["realtime"]["max_chunks"]
 RT_QUEUE_SIZE     = cfg["realtime"]["queue_size"]
 
+# ── Speaker verification ──────────────────────────────────────────────────────
+_speaker_cfg = cfg.get("speaker", {}) or {}
+SPEAKER_ENABLED = bool(_speaker_cfg.get("enabled", False))
+SPEAKER_MODE = str(_speaker_cfg.get("mode", "me-only")).strip() or "me-only"
+SPEAKER_APPLY_TO_MICROPHONE = bool(_speaker_cfg.get("apply_to_microphone", True))
+SPEAKER_APPLY_TO_FILES = bool(_speaker_cfg.get("apply_to_files", True))
+SPEAKER_GATE_WAKE = bool(_speaker_cfg.get("gate_wake", True))
+SPEAKER_DEVICE = str(_speaker_cfg.get("device", "cuda")).strip().lower() or "cuda"
+SPEAKER_MODEL = str(_speaker_cfg.get("model", "ecapa_tdnn")).strip() or "ecapa_tdnn"
+SPEAKER_PROFILE_FILE = _resolve_repo_path(_speaker_cfg.get("profile_file", "speaker-profile.json"))
+SPEAKER_THRESHOLD = float(_speaker_cfg.get("threshold", 0.72))
+SPEAKER_MIN_VERIFY_SPEECH_SECONDS = float(_speaker_cfg.get("min_verify_speech_seconds", 1.2))
+SPEAKER_ENROLLMENT_REQUIRED = bool(_speaker_cfg.get("enrollment_required", False))
+SPEAKER_ENROLLMENT_SAMPLES = max(1, int(_speaker_cfg.get("enrollment_samples", 3)))
+SPEAKER_ENROLLMENT_SAMPLE_SECONDS = max(1.0, float(_speaker_cfg.get("enrollment_sample_seconds", 6.0)))
+SPEAKER_ADAPT_ACCEPTED_AUDIO = bool(_speaker_cfg.get("adapt_accepted_audio", False))
+
 # ── Sleep / Wake ───────────────────────────────────────────────────────────────
 _sw_cfg = cfg.get("sleep_wake", {})
 SLEEP_START_SLEEPING = bool(_sw_cfg.get("start_sleeping", True))
@@ -873,6 +891,219 @@ def _maybe_run_device_setup() -> dict:
 DEVICE_PROFILES = _maybe_run_device_setup()
 APPROVED_INPUT_PROFILES = DEVICE_PROFILES.get("inputs", [])
 APPROVED_OUTPUT_PROFILES = DEVICE_PROFILES.get("outputs", [])
+
+
+def _set_config_bool_flag(section: str, key: str, value: bool, *, log_label: str):
+    try:
+        config_path = config.CONFIG_PATH
+    except Exception:
+        return
+    try:
+        text = Path(config_path).read_text(encoding="utf-8")
+    except Exception as e:
+        logger.warning(f"[{log_label}] Could not read config for flag update: {e}")
+        return
+
+    lines = text.splitlines()
+    active_section = ""
+    updated = False
+    for idx, line in enumerate(lines):
+        stripped = line.strip()
+        if stripped.startswith("[") and stripped.endswith("]"):
+            active_section = stripped.strip("[]")
+            continue
+        if active_section == section and stripped.startswith(f"{key}"):
+            lines[idx] = f"{key} = {'true' if value else 'false'}"
+            updated = True
+            break
+    if not updated:
+        logger.warning(f"[{log_label}] Could not find {section}.{key} in config.toml")
+        return
+    try:
+        Path(config_path).write_text("\n".join(lines) + "\n", encoding="utf-8")
+    except Exception as e:
+        logger.warning(f"[{log_label}] Could not update {section}.{key}: {e}")
+
+
+def _open_startup_input_capture(p: pyaudio.PyAudio, *, log_prefix: str = "[input]", emit_logs: bool = True):
+    api_names = host_api_names(p)
+    available_inputs = list(available_input_devices(p, include_alias=True))
+    if emit_logs:
+        logger.debug("[device] Available input devices:")
+        for available_info in available_inputs:
+            logger.debug(f"[device]   {describe_device(available_info, api_names)}")
+
+    def _find_device_by_name(name: str, host_api: int | None = None):
+        target = str(name or "").strip().lower()
+        if not target:
+            return None
+        for candidate_info in available_inputs:
+            if host_api is not None and candidate_info.get("hostApi") != host_api:
+                continue
+            if str(candidate_info.get("name", "")).strip().lower() == target:
+                return candidate_info
+        return None
+
+    try:
+        default_info = p.get_default_input_device_info()
+    except Exception:
+        default_info = None
+
+    startup_candidates = []
+    startup_failures = []
+    seen_candidate_indices = set()
+
+    def _push_candidate(source: str, candidate: dict | None, missing_name: str = ""):
+        if candidate is None:
+            if emit_logs and missing_name:
+                logger.warning(f"[device] {source} startup device unavailable: {missing_name}")
+            return
+        idx = int(candidate["index"])
+        if idx in seen_candidate_indices:
+            return
+        seen_candidate_indices.add(idx)
+        startup_candidates.append((source, candidate))
+
+    if APPROVED_INPUT_PROFILES:
+        approved_infos = order_devices_by_profiles(available_inputs, APPROVED_INPUT_PROFILES)
+        for approved_info in approved_infos:
+            _push_candidate("Profile", approved_info)
+    if PREFERRED_INPUT_DEVICE:
+        _push_candidate("Configured", _find_device_by_name(PREFERRED_INPUT_DEVICE), PREFERRED_INPUT_DEVICE)
+    _push_candidate("Default", default_info)
+    for extra_info in available_inputs:
+        _push_candidate("Fallback", extra_info)
+
+    for source, candidate in startup_candidates:
+        try:
+            candidate_session, probe_read_ms, probe_rms = open_input_session(
+                p,
+                candidate,
+                stt_rate=RATE,
+                chunk_frames=CHUNK,
+                probe_reads=INPUT_PROBE_READS,
+                probe_limit_ms=INPUT_PROBE_READ_LIMIT_MS,
+            )
+            if emit_logs:
+                capture_note = ""
+                if int(candidate_session.capture_rate) != int(RATE):
+                    capture_note = f" capture_rate={candidate_session.capture_rate}"
+                logger.info(
+                    f"{log_prefix} Active device: {candidate['name']} "
+                    f"(source={source.lower()}, probe_read_ms={probe_read_ms:.0f}, rms={probe_rms}{capture_note})"
+                )
+            return candidate, candidate_session
+        except Exception as probe_error:
+            if emit_logs:
+                logger.warning(f"[device] {source} startup device rejected ({candidate['name']}): {probe_error}")
+            startup_failures.append((source, candidate, str(probe_error)))
+
+    summary_parts = []
+    for source, candidate, reason in startup_failures[:8]:
+        summary_parts.append(f"{source.lower()} {describe_device(candidate, api_names)} -> {reason}")
+    if len(startup_failures) > 8:
+        summary_parts.append(f"... {len(startup_failures) - 8} more")
+    raise RuntimeError(
+        "No usable input device found at startup. "
+        + ("; ".join(summary_parts) if summary_parts else "No startup candidates were available.")
+    )
+
+
+def _run_speaker_enrollment() -> bool:
+    logger.info(
+        "[speaker] Starting enrollment samples=%s seconds=%s model=%s device_preference=%s",
+        SPEAKER_ENROLLMENT_SAMPLES,
+        SPEAKER_ENROLLMENT_SAMPLE_SECONDS,
+        SPEAKER_MODEL,
+        SPEAKER_DEVICE,
+    )
+    verifier = SpeakerVerifier(
+        profile_path=SPEAKER_PROFILE_FILE,
+        model_name=SPEAKER_MODEL,
+        requested_device=SPEAKER_DEVICE,
+        sample_rate=RATE,
+        threshold=SPEAKER_THRESHOLD,
+        mode=SPEAKER_MODE,
+    )
+
+    p = pyaudio.PyAudio()
+    input_session = None
+    try:
+        device_info, input_session = _open_startup_input_capture(p, log_prefix="[speaker]", emit_logs=True)
+        logger.info(
+            "[speaker] Enrollment input: %s (capture_rate=%sHz -> verify_rate=%sHz)",
+            device_info["name"],
+            int(input_session.capture_rate),
+            RATE,
+        )
+        sample_count = int(math.ceil(SPEAKER_ENROLLMENT_SAMPLE_SECONDS * RATE / CHUNK))
+        accepted_samples: list[np.ndarray] = []
+        sample_metadata: list[dict] = []
+        sample_index = 0
+        while sample_index < SPEAKER_ENROLLMENT_SAMPLES:
+            logger.info("[speaker] Enrollment sample %s/%s", sample_index + 1, SPEAKER_ENROLLMENT_SAMPLES)
+            for count in (3, 2, 1):
+                logger.info("[speaker] %s...", count)
+                time.sleep(1.0)
+            logger.info("[speaker] Start speaking now.")
+            chunks: list[np.ndarray] = []
+            for _ in range(sample_count):
+                data, _ = input_session.read_chunk()
+                chunks.append(np.frombuffer(data, dtype=np.int16))
+            logger.info("[speaker] Stop.")
+            audio = np.concatenate(chunks).astype(np.float32) / 32768.0 if chunks else np.zeros(0, dtype=np.float32)
+            duration_s = float(audio.size) / float(RATE) if audio.size else 0.0
+            rms = float(np.sqrt(np.mean(audio ** 2))) if audio.size else 0.0
+            speech_ratio = float(np.mean(np.abs(audio) > 0.01)) if audio.size else 0.0
+            if duration_s < 1.0 or rms < 0.005 or speech_ratio < 0.02:
+                logger.warning(
+                    "[speaker] Sample rejected duration=%ss rms=%.4f speech_ratio=%.4f; try again.",
+                    round(duration_s, 3),
+                    rms,
+                    speech_ratio,
+                )
+                continue
+            accepted_samples.append(audio)
+            sample_metadata.append(
+                {
+                    "sample_index": sample_index + 1,
+                    "duration_s": round(duration_s, 3),
+                    "rms": round(rms, 6),
+                    "speech_ratio": round(speech_ratio, 6),
+                }
+            )
+            sample_index += 1
+
+        profile = verifier.create_profile(
+            accepted_samples,
+            sample_rate=RATE,
+            sample_metadata=sample_metadata,
+        )
+        verifier.save_profile(profile)
+        for line in verifier.startup_logs():
+            logger.info(f"[speaker] {line}")
+        _set_config_bool_flag("speaker", "enrollment_required", False, log_label="speaker")
+        logger.info("[speaker] Enrollment complete profile=%s", SPEAKER_PROFILE_FILE)
+        return True
+    finally:
+        try:
+            if input_session is not None:
+                input_session.close()
+        except Exception:
+            pass
+        try:
+            p.terminate()
+        except Exception:
+            pass
+
+
+def _maybe_run_speaker_enrollment(*, force: bool = False) -> bool:
+    if not force and not SPEAKER_ENABLED:
+        return False
+    profile_exists = Path(SPEAKER_PROFILE_FILE).exists()
+    if not force and profile_exists and not SPEAKER_ENROLLMENT_REQUIRED:
+        return False
+    return _run_speaker_enrollment()
 
 # ── Event dispatch ────────────────────────────────────────────────────────────
 # Handlers are registered at startup. Each receives every event dict.
@@ -1247,6 +1478,7 @@ def main(args=None):
     argv = list(sys.argv[1:] if args is None else args)
     cli = argparse.ArgumentParser(add_help=False)
     cli.add_argument("--file-drop-worker", action="store_true")
+    cli.add_argument("--speaker-enroll", action="store_true")
     parsed, remaining = cli.parse_known_args(argv)
     if parsed.file_drop_worker:
         from file_drop_worker import run_from_args as run_file_drop_worker
@@ -1268,6 +1500,24 @@ def main(args=None):
                 pass
             try:
                 tray_icon.stop()
+            except Exception:
+                pass
+
+    if parsed.speaker_enroll:
+        console_controller = WindowsConsoleController()
+        tray_icon = WindowsTrayIcon(console_controller)
+        if tray_icon.available and not tray_icon.start():
+            logger.warning("[tray] Failed to start tray icon thread.")
+        console_controller.start_minimize_to_tray()
+        try:
+            return 0 if _maybe_run_speaker_enrollment(force=True) else 1
+        finally:
+            try:
+                tray_icon.stop()
+            except Exception:
+                pass
+            try:
+                console_controller.stop_minimize_to_tray()
             except Exception:
                 pass
 
@@ -1300,6 +1550,9 @@ def main(args=None):
         except Exception:
             pass
         return 1
+
+    if SPEAKER_ENABLED:
+        _maybe_run_speaker_enrollment(force=False)
 
     file_drop_thread = None
     file_drop_stop_event = None
@@ -1569,100 +1822,7 @@ def main(args=None):
             logger.info("Initializing PyAudio...")
             p = pyaudio.PyAudio()
             resources['p_instance'] = p
-            api_names = host_api_names(p)
-
-            def _find_device_by_name(name: str, host_api: int | None = None):
-                target = str(name or "").strip().lower()
-                if not target:
-                    return None
-                for candidate_info in available_inputs:
-                    if host_api is not None and candidate_info.get("hostApi") != host_api:
-                        continue
-                    if str(candidate_info.get("name", "")).strip().lower() == target:
-                        return candidate_info
-                return None
-
-            available_inputs = list(available_input_devices(p, include_alias=True))
-            logger.debug("[device] Available input devices:")
-            for available_info in available_inputs:
-                logger.debug(f"[device]   {describe_device(available_info, api_names)}")
-
-            try:
-                default_info = p.get_default_input_device_info()
-            except Exception:
-                default_info = None
-            info = None
-            input_session = None
-            startup_candidates = []
-            startup_failures = []
-            seen_candidate_indices = set()
-
-            def _push_candidate(source: str, candidate: dict | None, missing_name: str = ""):
-                if candidate is None:
-                    if missing_name:
-                        logger.warning(f"[device] {source} startup device unavailable: {missing_name}")
-                    return
-                idx = int(candidate["index"])
-                if idx in seen_candidate_indices:
-                    return
-                seen_candidate_indices.add(idx)
-                startup_candidates.append((source, candidate))
-
-            if APPROVED_INPUT_PROFILES:
-                approved_infos = order_devices_by_profiles(available_inputs, APPROVED_INPUT_PROFILES)
-                for approved_info in approved_infos:
-                    _push_candidate("Profile", approved_info)
-            if PREFERRED_INPUT_DEVICE:
-                _push_candidate("Configured", _find_device_by_name(PREFERRED_INPUT_DEVICE), PREFERRED_INPUT_DEVICE)
-            _push_candidate("Default", default_info)
-            for extra_info in available_inputs:
-                _push_candidate("Fallback", extra_info)
-
-            for source, candidate in startup_candidates:
-                try:
-                    candidate_session, probe_read_ms, probe_rms = open_input_session(
-                        p,
-                        candidate,
-                        stt_rate=RATE,
-                        chunk_frames=CHUNK,
-                        probe_reads=INPUT_PROBE_READS,
-                        probe_limit_ms=INPUT_PROBE_READ_LIMIT_MS,
-                    )
-                    input_session = candidate_session
-                    info = candidate
-                    capture_note = ""
-                    if int(candidate_session.capture_rate) != int(RATE):
-                        capture_note = f" capture_rate={candidate_session.capture_rate}"
-                    logger.info(
-                        f"[input] Active device: {candidate['name']} "
-                        f"(source={source.lower()}, probe_read_ms={probe_read_ms:.0f}, rms={probe_rms}{capture_note})"
-                    )
-                    break
-                except Exception as probe_error:
-                    logger.warning(f"[device] {source} startup device rejected ({candidate['name']}): {probe_error}")
-                    startup_failures.append((source, candidate, str(probe_error)))
-
-            if info is None or input_session is None:
-                summary_parts = []
-                for source, candidate, reason in startup_failures[:8]:
-                    summary_parts.append(
-                        f"{source.lower()} {describe_device(candidate, api_names)} -> {reason}"
-                    )
-                if len(startup_failures) > 8:
-                    summary_parts.append(f"... {len(startup_failures) - 8} more")
-                if startup_failures and all(
-                    ("Unanticipated host error" in reason) or ("Invalid device" in reason)
-                    for _, _, reason in startup_failures
-                ):
-                    summary_parts.append(
-                        "Windows is exposing input devices but PortAudio cannot open any of them; "
-                        "check microphone privacy permissions, device busy/exclusive-mode conflicts, "
-                        "Bluetooth hands-free routing, or reconnect the device."
-                    )
-                raise RuntimeError(
-                    "No usable input device found at startup. "
-                    + ("; ".join(summary_parts) if summary_parts else "No startup candidates were available.")
-                )
+            info, input_session = _open_startup_input_capture(p, log_prefix="[input]", emit_logs=True)
 
             resources['input_session'] = input_session
             resources['stream'] = input_session.stream
