@@ -1492,6 +1492,8 @@ def main(args=None):
             logger.warning("[tray] Failed to start tray icon thread.")
         console_controller.start_minimize_to_tray()
         try:
+            if SPEAKER_ENABLED and SPEAKER_APPLY_TO_FILES:
+                _maybe_run_speaker_enrollment(force=False)
             return run_file_drop_worker(remaining)
         finally:
             try:
@@ -1837,6 +1839,26 @@ def main(args=None):
         except Exception as e:
             record_load_error(f"Audio stack error: {e}")
 
+    def load_speaker_verifier():
+        if not (SPEAKER_ENABLED and SPEAKER_APPLY_TO_MICROPHONE and start_microphone_mode):
+            resources["speaker_verifier"] = None
+            return
+        try:
+            verifier = SpeakerVerifier(
+                profile_path=SPEAKER_PROFILE_FILE,
+                model_name=SPEAKER_MODEL,
+                requested_device=SPEAKER_DEVICE,
+                sample_rate=RATE,
+                threshold=SPEAKER_THRESHOLD,
+                mode=SPEAKER_MODE,
+            )
+            verifier.ensure_ready(load_profile=True)
+            resources["speaker_verifier"] = verifier
+            for line in verifier.startup_logs():
+                logger.info(f"[speaker] {line}")
+        except Exception as e:
+            record_load_error(f"Speaker verifier load error: {e}")
+
     if not start_microphone_mode and start_files_mode:
         start_file_drop_thread()
         logger.info("Files STT Ready!")
@@ -1869,6 +1891,8 @@ def main(args=None):
         threading.Thread(target=load_realtime),
         threading.Thread(target=load_audio_stack),
     ]
+    if SPEAKER_ENABLED and SPEAKER_APPLY_TO_MICROPHONE and start_microphone_mode:
+        threads.append(threading.Thread(target=load_speaker_verifier))
     for t in threads: t.start()
     for t in threads: t.join()
 
@@ -1889,6 +1913,7 @@ def main(args=None):
     stream      = resources['stream']
     p_instance  = resources['p_instance']
     dev_name    = resources['dev_name']
+    speaker_verifier = resources.get('speaker_verifier')
     if start_files_mode:
         start_file_drop_thread()
 
@@ -2349,6 +2374,49 @@ def main(args=None):
 
         return _cleanup_transcript_text(cleaned)
 
+    speaker_epoch_state: dict[int, dict] = {}
+    speaker_epoch_lock = threading.Lock()
+
+    def check_speaker_epoch(epoch: int, audio: np.ndarray):
+        if not (speaker_verifier and SPEAKER_ENABLED and SPEAKER_APPLY_TO_MICROPHONE):
+            return True, None
+        if epoch >= 0:
+            with speaker_epoch_lock:
+                cached = speaker_epoch_state.get(epoch)
+            if cached is not None:
+                return bool(cached["accepted"]), cached
+
+        result = speaker_verifier.verify_audio(
+            audio,
+            RATE,
+            threshold=SPEAKER_THRESHOLD,
+            min_duration_s=SPEAKER_MIN_VERIFY_SPEECH_SECONDS,
+        )
+        cached = {
+            "accepted": bool(result.accepted),
+            "score": result.score,
+            "threshold": result.threshold,
+            "reason": result.reason,
+            "duration_s": result.duration_s,
+        }
+        should_cache = epoch >= 0 and result.reason != "insufficient_audio"
+        if should_cache:
+            with speaker_epoch_lock:
+                speaker_epoch_state[epoch] = cached
+        score_text = f"{result.score:.3f}" if result.score is not None else "n/a"
+        if result.reason != "insufficient_audio":
+            if result.accepted:
+                logger.info("[speaker] epoch accepted epoch=%s score=%s threshold=%.3f", epoch, score_text, result.threshold)
+            else:
+                logger.info(
+                    "[speaker] epoch blocked epoch=%s score=%s threshold=%.3f reason=%s",
+                    epoch,
+                    score_text,
+                    result.threshold,
+                    result.reason,
+                )
+        return bool(result.accepted), cached
+
     def final_worker():
         while True:
             try:
@@ -2375,6 +2443,14 @@ def main(args=None):
                 ).text
                 inf_ms = int((time.time() - t_start) * 1000)
                 t = time.time() - t0
+
+                speaker_ok, speaker_meta = check_speaker_epoch(epoch, audio)
+                if not speaker_ok:
+                    debug_log(
+                        f"[final_worker] blocked_by_speaker epoch={epoch} "
+                        f"score={speaker_meta.get('score')} reason={speaker_meta.get('reason')}"
+                    )
+                    continue
 
                 if apply_exact_voice_command(raw_text, epoch, t, inf_ms, source="final"):
                     continue
@@ -2473,6 +2549,14 @@ def main(args=None):
                 ).text
                 inf_ms = int((time.time() - t_start) * 1000)
                 t = time.time() - t0
+
+                speaker_ok, speaker_meta = check_speaker_epoch(epoch, audio)
+                if not speaker_ok:
+                    debug_log(
+                        f"[realtime_worker] blocked_by_speaker epoch={epoch} "
+                        f"score={speaker_meta.get('score')} reason={speaker_meta.get('reason')}"
+                    )
+                    continue
 
                 with state_lock:
                     if (epoch != state['speech_epoch']
@@ -2801,6 +2885,9 @@ def main(args=None):
     drop_chunks_after_wake = 0
     vad_prev_active = False
     wakeword_prev_detected = False
+    wake_verify_pending = False
+    wake_verify_buffer: list[np.ndarray] = []
+    wake_verify_started_at = 0.0
 
     dispatch({"type": "system", "event": "startup",
               "device": dev_name,
@@ -2831,6 +2918,10 @@ def main(args=None):
             state["speech_epoch"] += 1
             state["finalized_epoch"] = state["speech_epoch"]
             epoch = state["speech_epoch"]
+        with speaker_epoch_lock:
+            stale_epochs = [key for key in speaker_epoch_state.keys() if key < epoch - 8]
+            for key in stale_epochs:
+                speaker_epoch_state.pop(key, None)
         if had_audio:
             logger.info(f"[speech] reset active utterance epoch={epoch} reason={reason}")
             dispatch({"type": "status", "value": "idle"})
@@ -2970,7 +3061,10 @@ def main(args=None):
             wake_detected = detect_wakeword(chunk)
             if wake_detected and not wakeword_prev_detected:
                 debug_log(f"[wake] detected word={WAKEWORD} rms={chunk_rms:.1f}")
-                trigger_wake_feedback(reason=f"wake:{WAKEWORD}")
+                with mode_lock:
+                    sleeping_for_feedback = mode_state["sleeping"]
+                if not (sleeping_for_feedback and speaker_verifier and SPEAKER_ENABLED and SPEAKER_GATE_WAKE):
+                    trigger_wake_feedback(reason=f"wake:{WAKEWORD}")
             wakeword_prev_detected = wake_detected
 
             with mode_lock:
@@ -2979,11 +3073,43 @@ def main(args=None):
                 if is_recording or recording_buffer:
                     debug_log("[audio] clearing active buffers while sleeping")
                     reset_active_utterance(reason="sleeping")
-                if wake_detected:
-                    set_sleeping(False, reason=f"wake:{WAKEWORD}", play_feedback=False)
-                    drop_chunks_after_wake = int(max(0.0, WAKEWORD_DROP_SECONDS) * RATE / CHUNK)
-                    reset_active_utterance(reason="wake_transition")
-                    debug_log(f"[wake] dropping_chunks_after_wake={drop_chunks_after_wake}")
+                if wake_verify_pending:
+                    prob = vad.is_speech(chunk.astype(np.float32) / 32768.0)
+                    if prob >= VAD_THRESHOLD:
+                        wake_verify_buffer.append(chunk)
+                    verify_audio = np.concatenate(wake_verify_buffer).astype(np.float32) / 32768.0 if wake_verify_buffer else np.zeros(0, dtype=np.float32)
+                    verify_duration = float(verify_audio.size) / float(RATE) if verify_audio.size else 0.0
+                    timed_out = (time.time() - wake_verify_started_at) > max(4.0, SPEAKER_MIN_VERIFY_SPEECH_SECONDS + 2.0)
+                    if verify_duration >= SPEAKER_MIN_VERIFY_SPEECH_SECONDS:
+                        wake_ok, wake_meta = check_speaker_epoch(-1, verify_audio)
+                        wake_verify_pending = False
+                        wake_verify_buffer = []
+                        if wake_ok:
+                            trigger_wake_feedback(reason=f"wake:{WAKEWORD}:speaker")
+                            set_sleeping(False, reason=f"wake:{WAKEWORD}", play_feedback=False)
+                            drop_chunks_after_wake = int(max(0.0, WAKEWORD_DROP_SECONDS) * RATE / CHUNK)
+                            reset_active_utterance(reason="wake_transition")
+                            debug_log(f"[wake] dropping_chunks_after_wake={drop_chunks_after_wake}")
+                        else:
+                            debug_log(
+                                f"[wake] blocked_by_speaker score={wake_meta.get('score')} "
+                                f"reason={wake_meta.get('reason')}"
+                            )
+                    elif timed_out:
+                        wake_verify_pending = False
+                        wake_verify_buffer = []
+                        debug_log("[wake] speaker verification timed out")
+                elif wake_detected:
+                    if speaker_verifier and SPEAKER_ENABLED and SPEAKER_GATE_WAKE:
+                        wake_verify_pending = True
+                        wake_verify_buffer = []
+                        wake_verify_started_at = time.time()
+                        debug_log("[wake] pending speaker verification")
+                    else:
+                        set_sleeping(False, reason=f"wake:{WAKEWORD}", play_feedback=False)
+                        drop_chunks_after_wake = int(max(0.0, WAKEWORD_DROP_SECONDS) * RATE / CHUNK)
+                        reset_active_utterance(reason="wake_transition")
+                        debug_log(f"[wake] dropping_chunks_after_wake={drop_chunks_after_wake}")
                 else:
                     debug_log_every(
                         "sleeping_heartbeat",
