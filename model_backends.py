@@ -27,6 +27,16 @@ _MANUAL_TEMP_COUNTER = itertools.count()
 
 
 @contextmanager
+def _suppress_info_logging():
+    previous_disable = pylogging.root.manager.disable
+    pylogging.disable(pylogging.INFO)
+    try:
+        yield
+    finally:
+        pylogging.disable(previous_disable)
+
+
+@contextmanager
 def _silence_process_stdio():
     # Some NeMo/Lhotse paths write directly to process stdout/stderr, bypassing
     # Python logging and high-level redirect helpers.
@@ -247,6 +257,7 @@ class ParakeetBackend(TranscriptionBackend):
 
     def __init__(self, model_name: str, device: str) -> None:
         self._transcribe_lock = threading.Lock()
+        self._prefer_tensor_transcribe = True
         _ensure_runtime_tempdir()
         try:
             import nemo.collections.asr as nemo_asr
@@ -283,68 +294,88 @@ class ParakeetBackend(TranscriptionBackend):
         # NeMo/Lhotse can print directly to stdout/stderr during model load and
         # device moves as well, so suppress that startup chatter too.
         with _PARAKEET_STDIO_LOCK:
-            with _silence_process_stdio():
-                with _temporary_directory_ignore_cleanup_errors(nemo_save_restore_module):
-                    with redirect_stdout(StringIO()), redirect_stderr(StringIO()):
-                        if path.exists() and path.is_dir():
-                            save_restore_connector.model_extracted_dir = str(path)
-                            self.model = nemo_asr.models.ASRModel.restore_from(
-                                restore_path=str(path),
-                                save_restore_connector=save_restore_connector,
-                            )
-                        elif path.exists() and path.is_file():
-                            extracted_dir = _prepare_persistent_nemo_extract(
-                                path,
-                                SaveRestoreConnector._unpack_nemo_file,
-                            )
-                            save_restore_connector.model_extracted_dir = str(extracted_dir)
-                            self.model = nemo_asr.models.ASRModel.restore_from(
-                                restore_path=str(path),
-                                save_restore_connector=save_restore_connector,
-                            )
-                        else:
-                            cached_model = nemo_asr.models.ASRModel.from_pretrained(
-                                model_ref,
-                                return_model_file=True,
-                            )
-                            cached_path = Path(str(cached_model))
-                            if cached_path.is_file():
+            with _suppress_info_logging():
+                with _silence_process_stdio():
+                    with _temporary_directory_ignore_cleanup_errors(nemo_save_restore_module):
+                        with redirect_stdout(StringIO()), redirect_stderr(StringIO()):
+                            if path.exists() and path.is_dir():
+                                save_restore_connector.model_extracted_dir = str(path)
+                                self.model = nemo_asr.models.ASRModel.restore_from(
+                                    restore_path=str(path),
+                                    save_restore_connector=save_restore_connector,
+                                )
+                            elif path.exists() and path.is_file():
                                 extracted_dir = _prepare_persistent_nemo_extract(
-                                    cached_path,
+                                    path,
                                     SaveRestoreConnector._unpack_nemo_file,
                                 )
                                 save_restore_connector.model_extracted_dir = str(extracted_dir)
                                 self.model = nemo_asr.models.ASRModel.restore_from(
-                                    restore_path=str(cached_path),
-                                    save_restore_connector=save_restore_connector,
-                                )
-                            elif cached_path.is_dir():
-                                save_restore_connector.model_extracted_dir = str(cached_path)
-                                self.model = nemo_asr.models.ASRModel.restore_from(
-                                    restore_path=str(cached_path),
+                                    restore_path=str(path),
                                     save_restore_connector=save_restore_connector,
                                 )
                             else:
-                                self.model = nemo_asr.models.ASRModel.from_pretrained(
+                                cached_model = nemo_asr.models.ASRModel.from_pretrained(
                                     model_ref,
-                                    save_restore_connector=save_restore_connector,
+                                    return_model_file=True,
                                 )
+                                cached_path = Path(str(cached_model))
+                                if cached_path.is_file():
+                                    extracted_dir = _prepare_persistent_nemo_extract(
+                                        cached_path,
+                                        SaveRestoreConnector._unpack_nemo_file,
+                                    )
+                                    save_restore_connector.model_extracted_dir = str(extracted_dir)
+                                    self.model = nemo_asr.models.ASRModel.restore_from(
+                                        restore_path=str(cached_path),
+                                        save_restore_connector=save_restore_connector,
+                                    )
+                                elif cached_path.is_dir():
+                                    save_restore_connector.model_extracted_dir = str(cached_path)
+                                    self.model = nemo_asr.models.ASRModel.restore_from(
+                                        restore_path=str(cached_path),
+                                        save_restore_connector=save_restore_connector,
+                                    )
+                                else:
+                                    self.model = nemo_asr.models.ASRModel.from_pretrained(
+                                        model_ref,
+                                        save_restore_connector=save_restore_connector,
+                                    )
 
-                    self.model.eval()
-                    if self.device == "cuda":
-                        if not torch.cuda.is_available():
-                            raise RuntimeError("Parakeet backend requested CUDA but no CUDA device is available.")
-                        self.model = self.model.to("cuda")
-                    else:
-                        self.model = self.model.to("cpu")
+                        self.model.eval()
+                        if self.device == "cuda":
+                            if not torch.cuda.is_available():
+                                raise RuntimeError("Parakeet backend requested CUDA but no CUDA device is available.")
+                            self.model = self.model.to("cuda")
+                        else:
+                            self.model = self.model.to("cpu")
 
     def warmup(self, audio: np.ndarray) -> None:
-        del audio
-        # NeMo's transcribe() creates temporary manifests internally.
-        # On Windows, doing that during startup warmup is prone to file-lock
-        # races, so we skip synthetic warmup and let the first real utterance
-        # pay the one-time setup cost.
+        try:
+            with _GPU_BACKEND_LOCK:
+                self._transcribe(np.asarray(audio, dtype=np.float32))
+        except Exception:
+            # Warmup is optional; leave startup intact if a particular model
+            # rejects the in-memory path and recover on the first real utterance.
+            return None
         return None
+
+    def _transcribe_via_tensor(self, audio: np.ndarray) -> str:
+        with _PARAKEET_STDIO_LOCK:
+            with _suppress_info_logging():
+                with _temporary_directory_ignore_cleanup_errors():
+                    with _silence_process_stdio():
+                        with redirect_stdout(StringIO()), redirect_stderr(StringIO()):
+                            result = self.model.transcribe(
+                                [np.asarray(audio, dtype=np.float32)],
+                                batch_size=1,
+                                num_workers=0,
+                                verbose=False,
+                            )
+        if isinstance(result, tuple):
+            result = result[0]
+        item = result[0] if isinstance(result, list) and result else result
+        return _extract_text(item)
 
     def _transcribe_via_temp_wav(self, audio: np.ndarray) -> str:
         pcm16 = _audio_to_pcm16(audio)
@@ -360,15 +391,16 @@ class ParakeetBackend(TranscriptionBackend):
             # stdout/stderr during transcribe(). Keep the app console focused on
             # STT runtime output instead of internal dataloader chatter.
             with _PARAKEET_STDIO_LOCK:
-                with _temporary_directory_ignore_cleanup_errors():
-                    with _silence_process_stdio():
-                        with redirect_stdout(StringIO()), redirect_stderr(StringIO()):
-                            result = self.model.transcribe(
-                                [temp_path],
-                                batch_size=1,
-                                num_workers=0,
-                                verbose=False,
-                            )
+                with _suppress_info_logging():
+                    with _temporary_directory_ignore_cleanup_errors():
+                        with _silence_process_stdio():
+                            with redirect_stdout(StringIO()), redirect_stderr(StringIO()):
+                                result = self.model.transcribe(
+                                    [temp_path],
+                                    batch_size=1,
+                                    num_workers=0,
+                                    verbose=False,
+                                )
             if isinstance(result, tuple):
                 result = result[0]
             item = result[0] if isinstance(result, list) and result else result
@@ -377,11 +409,20 @@ class ParakeetBackend(TranscriptionBackend):
             if temp_path:
                 Path(temp_path).unlink(missing_ok=True)
 
+    def _transcribe(self, audio: np.ndarray) -> str:
+        normalized = np.asarray(audio, dtype=np.float32)
+        if self._prefer_tensor_transcribe:
+            try:
+                return self._transcribe_via_tensor(normalized)
+            except Exception:
+                self._prefer_tensor_transcribe = False
+        return self._transcribe_via_temp_wav(normalized)
+
     def transcribe(self, audio: np.ndarray, language: str, beam_size: int) -> TranscriptResult:
         del language, beam_size
         with self._transcribe_lock:
             with _GPU_BACKEND_LOCK:
-                text = self._transcribe_via_temp_wav(np.asarray(audio, dtype=np.float32))
+                text = self._transcribe(np.asarray(audio, dtype=np.float32))
             return TranscriptResult(text)
 
 
