@@ -11,10 +11,11 @@ from typing import Any
 import numpy as np
 
 logger = logging.getLogger("STT")
-PROFILE_FORMAT_VERSION = 4
+PROFILE_FORMAT_VERSION = 5
 DEFAULT_THRESHOLD_MARGIN = 0.03
 DEFAULT_THRESHOLD_FLOOR = 0.65
 DEFAULT_THRESHOLD_CEILING = 0.92
+DEFAULT_TOP_K_MATCHES = 3
 
 
 @dataclass(frozen=True)
@@ -25,7 +26,7 @@ class RecognitionResult:
     delta: float | None
     reason: str
     duration_s: float
-    window_scores: tuple[float, ...] = ()
+    match_scores: tuple[float, ...] = ()
 
 
 def _normalize_audio(audio: np.ndarray) -> np.ndarray:
@@ -82,18 +83,23 @@ class RecognitionEngine:
         self._device = None
         self._profile = None
         self._startup_logs: list[str] = []
-        self.window_seconds = 3.0
-        self.window_hop_seconds = 1.5
-        self.minimum_window_seconds = 1.5
+        self.top_k_matches = DEFAULT_TOP_K_MATCHES
 
-    def _embedding_to_score(self, embedding: np.ndarray, references: np.ndarray) -> float:
+    def _embedding_to_similarity_scores(self, embedding: np.ndarray, references: np.ndarray) -> np.ndarray:
         if references.size == 0:
-            return 0.0
+            return np.asarray([], dtype=np.float32)
         similarities = np.dot(references, embedding) / (
             np.linalg.norm(references, axis=1) * np.linalg.norm(embedding) + 1e-12
         )
-        cosine = float(np.max(similarities))
-        return (cosine + 1.0) / 2.0
+        return ((similarities + 1.0) / 2.0).astype(np.float32)
+
+    def _aggregate_similarity_scores(self, similarities: np.ndarray) -> tuple[float, list[float]]:
+        if similarities.size == 0:
+            return 0.0, []
+        ordered = np.sort(similarities.astype(np.float32))[::-1]
+        top_k = ordered[: max(1, int(self.top_k_matches))]
+        rounded = [round(float(item), 6) for item in top_k.tolist()]
+        return float(np.mean(top_k)), rounded
 
     @property
     def resolved_device(self) -> str:
@@ -242,36 +248,6 @@ class RecognitionEngine:
             raise ValueError("recognition embedding vector is empty")
         return vector
 
-    def _iter_prepared_windows(self, normalized: np.ndarray) -> list[np.ndarray]:
-        total = int(normalized.size)
-        if total == 0:
-            return []
-        window = max(1, int(self.window_seconds * self.sample_rate))
-        hop = max(1, int(self.window_hop_seconds * self.sample_rate))
-        minimum_window = max(1, int(self.minimum_window_seconds * self.sample_rate))
-        slices: list[tuple[int, int]] = []
-        if total <= window:
-            slices.append((0, total))
-        else:
-            start = 0
-            while start + window <= total:
-                slices.append((start, start + window))
-                start += hop
-            tail_start = max(0, total - window)
-            if not slices or tail_start > slices[-1][0]:
-                slices.append((tail_start, total))
-
-        windows: list[np.ndarray] = []
-        seen: set[tuple[int, int]] = set()
-        for start, end in slices:
-            if (start, end) in seen:
-                continue
-            seen.add((start, end))
-            if end - start < minimum_window:
-                continue
-            windows.append(normalized[start:end])
-        return windows
-
     def active_threshold(self, override: float | None = None) -> float:
         self.ensure_ready(load_profile=True)
         if override is not None:
@@ -290,7 +266,7 @@ class RecognitionEngine:
         self.ensure_ready(load_profile=True)
         return str(self._profile.get("threshold_source") or "derived")
 
-    def _windowed_scores(self, audio: np.ndarray) -> list[float]:
+    def _reference_match_scores(self, audio: np.ndarray) -> list[float]:
         self.ensure_ready(load_profile=True)
         normalized = self._prepare_audio(audio, self.sample_rate)
         raw_reference_embeddings = self._profile.get("reference_embeddings")
@@ -302,11 +278,10 @@ class RecognitionEngine:
         if reference_embeddings.size == 0:
             centroid = np.asarray(self._profile["centroid"], dtype=np.float32).reshape(-1)
             reference_embeddings = centroid.reshape(1, -1)
-        scores: list[float] = []
-        for segment in self._iter_prepared_windows(normalized):
-            vector = self._embed_prepared_audio(segment)
-            scores.append(self._embedding_to_score(vector, reference_embeddings))
-        return scores
+        vector = self._embed_prepared_audio(normalized)
+        similarities = self._embedding_to_similarity_scores(vector, reference_embeddings)
+        _, top_matches = self._aggregate_similarity_scores(similarities)
+        return top_matches
 
     def build_profile_from_paths(self, sample_paths: list[Path]) -> dict[str, Any]:
         self.ensure_ready(load_profile=False)
@@ -319,22 +294,18 @@ class RecognitionEngine:
         for path in sorted(normalized_paths, key=lambda item: str(item).lower()):
             audio, source_rate = self.load_audio_file(path)
             prepared = self._prepare_audio(audio, source_rate)
-            windows = self._iter_prepared_windows(prepared)
-            window_embeddings = [self._embed_prepared_audio(window) for window in windows]
-            if not window_embeddings:
-                continue
-            sample_embeddings.append(window_embeddings)
-            all_embeddings.extend(window_embeddings)
+            embedding = self._embed_prepared_audio(prepared)
+            sample_embeddings.append([embedding])
+            all_embeddings.append(embedding)
             metadata.append(
                 {
                     "path": str(path),
                     "source_sample_rate": int(source_rate),
                     "duration_s": round(float(audio.size) / float(source_rate), 6) if source_rate else 0.0,
-                    "window_count": len(window_embeddings),
                 }
             )
         if not all_embeddings:
-            raise ValueError("recognition sample directory did not yield any usable windows")
+            raise ValueError("recognition sample directory did not yield any usable samples")
         reference_embeddings = np.stack(all_embeddings, axis=0).astype(np.float32)
         centroid = np.mean(reference_embeddings, axis=0).astype(np.float32)
         self_scores: list[float] = []
@@ -349,11 +320,11 @@ class RecognitionEngine:
                 references = np.stack(other_embeddings, axis=0).astype(np.float32)
             else:
                 references = reference_embeddings
-            window_scores = [self._embedding_to_score(embedding, references) for embedding in embeddings]
-            score = float(max(window_scores))
+            similarities = self._embedding_to_similarity_scores(embeddings[0], references)
+            score, top_matches = self._aggregate_similarity_scores(similarities)
             self_scores.append(score)
             metadata[idx]["self_score"] = round(score, 6)
-            metadata[idx]["window_scores"] = [round(float(item), 6) for item in window_scores]
+            metadata[idx]["match_scores"] = top_matches
         self_score_p10 = float(np.percentile(np.asarray(self_scores, dtype=np.float32), 10))
         active_threshold = derive_threshold_from_self_scores(self_scores)
         threshold_source = "derived"
@@ -397,10 +368,10 @@ class RecognitionEngine:
         if duration_s < float(min_duration_s):
             return RecognitionResult(False, None, target_threshold, None, "insufficient_audio", duration_s)
         prepared = self._prepare_audio(normalized, sample_rate)
-        window_scores = self._windowed_scores(prepared)
-        if not window_scores:
+        match_scores = self._reference_match_scores(prepared)
+        if not match_scores:
             return RecognitionResult(False, None, target_threshold, None, "insufficient_audio", duration_s)
-        score = float(max(window_scores))
+        score = float(sum(match_scores) / len(match_scores))
         accepted = bool(score >= target_threshold)
         delta = float(score - target_threshold)
         return RecognitionResult(
@@ -410,6 +381,6 @@ class RecognitionEngine:
             delta=round(delta, 6),
             reason="accepted" if accepted else "below_threshold",
             duration_s=duration_s,
-            window_scores=tuple(round(float(item), 6) for item in window_scores),
+            match_scores=tuple(round(float(item), 6) for item in match_scores),
         )
 

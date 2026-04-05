@@ -24,6 +24,14 @@ def make_test_dir() -> Path:
 
 
 class RecognitionProfileTests(unittest.TestCase):
+    def test_aggregate_similarity_scores_uses_top_k_average(self):
+        verifier = RecognitionEngine(profile_path=Path("dummy.json"))
+        score, top_matches = verifier._aggregate_similarity_scores(
+            np.asarray([0.91, 0.72, 0.87, 0.84], dtype=np.float32)
+        )
+        self.assertAlmostEqual(score, (0.91 + 0.87 + 0.84) / 3.0, places=6)
+        self.assertEqual(top_matches, [0.91, 0.87, 0.84])
+
     def test_profile_matches_corpus_requires_current_format(self):
         root = make_test_dir()
         try:

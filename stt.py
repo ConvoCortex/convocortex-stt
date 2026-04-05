@@ -2529,7 +2529,7 @@ def main(args=None):
             "delta": result.delta,
             "reason": result.reason,
             "duration_s": result.duration_s,
-            "window_scores": list(result.window_scores),
+            "match_scores": list(result.match_scores),
             "partial_block_logged": False,
             "audio_samples": audio_samples,
         }
