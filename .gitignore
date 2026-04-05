@@ -28,3 +28,5 @@ runtime-temp-check/
 bin/
 obj/
 launcher-publish/
+recordings/
+speaker-recognition/

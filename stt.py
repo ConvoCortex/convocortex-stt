@@ -611,10 +611,11 @@ SPEAKER_APPLY_TO_FILES = bool(_speaker_cfg.get("apply_to_files", False))
 SPEAKER_GATE_WAKE = bool(_speaker_cfg.get("gate_wake", True))
 SPEAKER_DEVICE = str(_speaker_cfg.get("device", "cuda")).strip().lower() or "cuda"
 SPEAKER_MODEL = str(_speaker_cfg.get("model", "ecapa_tdnn")).strip() or "ecapa_tdnn"
-SPEAKER_SAMPLES_DIR = _resolve_repo_path(_speaker_cfg.get("samples_dir", "speaker-recognition/samples"))
-SPEAKER_PROFILE_FILE = _resolve_repo_path(_speaker_cfg.get("profile_file", "speaker-recognition/profile.json"))
+SPEAKER_SAMPLES_DIR = Path(_resolve_repo_path(_speaker_cfg.get("samples_dir", "speaker-recognition/samples")))
+SPEAKER_PROFILE_FILE = Path(_resolve_repo_path(_speaker_cfg.get("profile_file", "speaker-recognition/profile.json")))
 SPEAKER_THRESHOLD = float(_speaker_cfg.get("threshold", 0.72))
 SPEAKER_MIN_VERIFY_SPEECH_SECONDS = float(_speaker_cfg.get("min_verify_speech_seconds", 1.2))
+SPEAKER_LOG_ALL_SCORES = bool(_speaker_cfg.get("log_all_scores", False))
 
 # ── Recording ─────────────────────────────────────────────────────────────────
 _recording_cfg = cfg.get("recording", {}) or {}
@@ -1141,6 +1142,27 @@ def _ensure_speaker_profile() -> bool:
     verifier.ensure_ready(load_profile=True)
     for line in verifier.startup_logs():
         logger.info(f"[speaker] {line}")
+    profile_payload = verifier.load_profile()
+    sample_entries = list(profile_payload.get("samples") or [])
+    if sample_entries:
+        min_score = profile_payload.get("profile_self_score_min")
+        avg_score = profile_payload.get("profile_self_score_avg")
+        max_score = profile_payload.get("profile_self_score_max")
+        logger.info(
+            "[speaker] corpus self-scores min=%s avg=%s max=%s threshold=%.3f",
+            min_score,
+            avg_score,
+            max_score,
+            SPEAKER_THRESHOLD,
+        )
+        if SPEAKER_LOG_ALL_SCORES:
+            for entry in sample_entries:
+                logger.info(
+                    "[speaker] corpus sample score=%s duration=%ss path=%s",
+                    entry.get("self_score"),
+                    entry.get("duration_s"),
+                    entry.get("path"),
+                )
     return rebuild_required
 
 
@@ -2448,6 +2470,7 @@ def main(args=None):
             "threshold": result.threshold,
             "reason": result.reason,
             "duration_s": result.duration_s,
+            "window_scores": list(result.window_scores),
         }
         should_cache = epoch >= 0 and result.reason != "insufficient_audio"
         if should_cache:
@@ -2455,16 +2478,34 @@ def main(args=None):
                 speaker_epoch_state[epoch] = cached
         score_text = f"{result.score:.3f}" if result.score is not None else "n/a"
         if result.reason != "insufficient_audio":
+            window_scores_text = ",".join(f"{value:.3f}" for value in result.window_scores)
             if result.accepted:
-                logger.info("[speaker] epoch accepted epoch=%s score=%s threshold=%.3f", epoch, score_text, result.threshold)
+                if SPEAKER_LOG_ALL_SCORES:
+                    logger.info(
+                        "[speaker] epoch accepted epoch=%s score=%s threshold=%.3f windows=[%s]",
+                        epoch,
+                        score_text,
+                        result.threshold,
+                        window_scores_text,
+                    )
             else:
-                logger.info(
-                    "[speaker] epoch blocked epoch=%s score=%s threshold=%.3f reason=%s",
-                    epoch,
-                    score_text,
-                    result.threshold,
-                    result.reason,
-                )
+                if SPEAKER_LOG_ALL_SCORES:
+                    logger.info(
+                        "[speaker] epoch blocked epoch=%s score=%s threshold=%.3f reason=%s windows=[%s]",
+                        epoch,
+                        score_text,
+                        result.threshold,
+                        result.reason,
+                        window_scores_text,
+                    )
+                else:
+                    logger.info(
+                        "[speaker] epoch blocked epoch=%s score=%s threshold=%.3f reason=%s",
+                        epoch,
+                        score_text,
+                        result.threshold,
+                        result.reason,
+                    )
         return bool(result.accepted), cached
 
     def final_worker():

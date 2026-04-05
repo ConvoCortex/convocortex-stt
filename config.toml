@@ -109,7 +109,7 @@ utterance_clips_dir = "recordings/utterance-clips"
 # use curated voice sample files in samples_dir as the enrolled "me" corpus
 # accepted speaker passes through; non-matching speech is blocked
 # this is not diarization and not anti-spoof security
-enabled = false
+enabled = true
 mode = "me-only"
 apply_to_microphone = true
 apply_to_files = false
@@ -121,6 +121,7 @@ samples_dir = "speaker-recognition/samples"
 profile_file = "speaker-recognition/profile.json"
 threshold = 0.72
 min_verify_speech_seconds = 1.2
+log_all_scores = true
 
 [file_drop]
 # files-mode backends: "faster-whisper", "parakeet", "parakeet-cuda", or "parakeet-tensorrt"
