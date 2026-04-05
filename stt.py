@@ -9,6 +9,7 @@ Output via configurable local handlers. NATS optional.
 import argparse
 import copy
 import _thread
+import faulthandler
 import math
 import sys
 import time
@@ -17,6 +18,7 @@ import re
 import threading
 import logging
 import os
+import traceback
 import wave
 from collections import deque
 from pathlib import Path
@@ -146,6 +148,77 @@ DEBUG_LOGGING_ENABLED = bool(_log_cfg.get("debug", False))
 DEBUG_LOG_FILE = str(_log_cfg.get("file", "stt-debug.log")).strip()
 THIRD_PARTY_DEBUG_LOGGING = bool(_log_cfg.get("third_party_debug", False))
 DEBUG_HEARTBEAT_SECONDS = max(1.0, float(_log_cfg.get("heartbeat_seconds", 5.0)))
+CRASH_LOG_FILE = DEBUG_LOG_FILE or "stt-debug.log"
+
+
+_fatal_crash_log_handle = None
+
+
+def _append_fatal_crash_record(prefix: str, exc_type, exc_value, exc_tb) -> None:
+    crash_path = Path(_resolve_repo_path(CRASH_LOG_FILE))
+    crash_path.parent.mkdir(parents=True, exist_ok=True)
+    with crash_path.open("a", encoding="utf-8", errors="replace") as handle:
+        handle.write(
+            f"\n{'=' * 80}\n"
+            f"{time.strftime('%Y-%m-%d %H:%M:%S')} {prefix}\n"
+        )
+        traceback.print_exception(exc_type, exc_value, exc_tb, file=handle)
+        handle.flush()
+
+
+def _install_crash_logging_hooks() -> None:
+    global _fatal_crash_log_handle
+
+    crash_path = Path(_resolve_repo_path(CRASH_LOG_FILE))
+    crash_path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        _fatal_crash_log_handle = open(crash_path, "a", encoding="utf-8", errors="replace")
+        faulthandler.enable(file=_fatal_crash_log_handle, all_threads=True)
+    except Exception:
+        _fatal_crash_log_handle = None
+
+    def _log_unhandled_exception(exc_type, exc_value, exc_tb):
+        try:
+            logger.critical(
+                "[fatal] Unhandled exception",
+                exc_info=(exc_type, exc_value, exc_tb),
+            )
+        except Exception:
+            pass
+        try:
+            _append_fatal_crash_record("[fatal] Unhandled exception", exc_type, exc_value, exc_tb)
+        except Exception:
+            pass
+
+    def _threading_hook(args):
+        _log_unhandled_exception(args.exc_type, args.exc_value, args.exc_traceback)
+
+    def _unraisable_hook(unraisable):
+        try:
+            logger.critical(
+                "[fatal] Unraisable exception object=%r",
+                getattr(unraisable, "object", None),
+                exc_info=(
+                    unraisable.exc_type,
+                    unraisable.exc_value,
+                    unraisable.exc_traceback,
+                ),
+            )
+        except Exception:
+            pass
+        try:
+            _append_fatal_crash_record(
+                f"[fatal] Unraisable exception object={getattr(unraisable, 'object', None)!r}",
+                unraisable.exc_type,
+                unraisable.exc_value,
+                unraisable.exc_traceback,
+            )
+        except Exception:
+            pass
+
+    sys.excepthook = _log_unhandled_exception
+    threading.excepthook = _threading_hook
+    sys.unraisablehook = _unraisable_hook
 
 
 def _setup_logging():
@@ -178,6 +251,7 @@ def _setup_logging():
 
 
 logger = _setup_logging()
+_install_crash_logging_hooks()
 
 
 class WindowsConsoleController:
@@ -3258,4 +3332,12 @@ def main(args=None):
 
 
 if __name__ == '__main__':
-    main()
+    try:
+        raise SystemExit(main())
+    except KeyboardInterrupt:
+        raise
+    except SystemExit:
+        raise
+    except Exception:
+        logger.exception("[fatal] Top-level crash")
+        sys.exit(1)
