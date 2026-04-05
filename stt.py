@@ -1187,7 +1187,11 @@ def _ensure_recognition_profile() -> bool:
             threshold_source,
         )
         if RECOGNITION_LOG_SCORES:
-            for entry in sample_entries:
+            ranked_entries = sorted(
+                sample_entries,
+                key=lambda entry: float(entry.get("self_score")) if entry.get("self_score") is not None else float("inf"),
+            )
+            for entry in ranked_entries:
                 logger.info(
                     "[recognition] corpus sample score=%s duration=%ss path=%s",
                     entry.get("self_score"),
