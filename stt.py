@@ -2490,10 +2490,11 @@ def main(args=None):
     def check_recognition_epoch(epoch: int, audio: np.ndarray):
         if not (recognition_engine and RECOGNITION_ENABLED and RECOGNITION_APPLY_TO_MICROPHONE):
             return True, None
+        audio_samples = int(np.asarray(audio).size)
         if epoch >= 0:
             with recognition_epoch_lock:
                 cached = recognition_epoch_state.get(epoch)
-            if cached is not None:
+            if cached is not None and int(cached.get("audio_samples") or 0) >= audio_samples:
                 return bool(cached["accepted"]), cached
 
         result = recognition_engine.verify_audio(
@@ -2511,19 +2512,16 @@ def main(args=None):
             "duration_s": result.duration_s,
             "window_scores": list(result.window_scores),
             "partial_block_logged": False,
+            "audio_samples": audio_samples,
         }
         should_cache = epoch >= 0 and result.reason != "insufficient_audio"
         if should_cache:
             with recognition_epoch_lock:
-                recognition_epoch_state[epoch] = cached
-        if RECOGNITION_LOG_SCORES:
-            logger.info(
-                "[recognition] epoch=%s %s reason=%s windows=[%s]",
-                epoch,
-                _recognition_annotation(cached),
-                result.reason,
-                ",".join(f"{value:.3f}" for value in result.window_scores),
-            )
+                previous = recognition_epoch_state.get(epoch)
+                if previous is None or int(previous.get("audio_samples") or 0) <= audio_samples:
+                    if previous is not None and previous.get("partial_block_logged"):
+                        cached["partial_block_logged"] = True
+                    recognition_epoch_state[epoch] = cached
         return bool(result.accepted), cached
 
     def final_worker():
