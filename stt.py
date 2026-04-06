@@ -18,6 +18,7 @@ import re
 import threading
 import logging
 import os
+import shutil
 import traceback
 import wave
 from collections import deque
@@ -656,6 +657,7 @@ SLEEP_HOTKEY_SUPPRESS = bool(cfg["hotkeys"].get("sleep_toggle_suppress", False))
 TYPE_TOGGLE_HOTKEY = str(cfg["hotkeys"].get("typing_toggle", "")).strip()
 OUTPUT_MODE_CYCLE_HOTKEY = str(cfg["hotkeys"].get("output_mode_cycle", "")).strip()
 CONSOLE_TOGGLE_HOTKEY = str(cfg["hotkeys"].get("console_toggle", "")).strip()
+CLIPBOARD_TO_BUFFER_HOTKEY = str(cfg["hotkeys"].get("clipboard_to_buffer", "ctrl+b")).strip()
 SLEEP_STOP_WORDS = [
     _normalize_command_phrase(w)
     for w in _sw_cfg.get("stop_words", ["stop", "pause"])
@@ -758,6 +760,16 @@ REVERT_COMMAND_WORDS = _voice_command_words("rewind")
 REVERT_COMMAND_ENABLED = _voice_command_enabled("rewind")
 REPEAT_COMMAND_WORDS = _voice_command_words("repeat")
 REPEAT_COMMAND_ENABLED = _voice_command_enabled("repeat")
+RECOGNIZE_COMMAND_WORDS = _voice_command_words("recognize")
+RECOGNIZE_COMMAND_ENABLED = _voice_command_enabled(
+    "recognize",
+    extra=SAVE_UTTERANCE_CLIPS,
+)
+CLIPBOARD_COMMAND_WORDS = _voice_command_words("clipboard")
+CLIPBOARD_COMMAND_ENABLED = _voice_command_enabled(
+    "clipboard",
+    extra=bool(cfg.get("output", {}).get("file_buffer", {}).get("enabled", False)),
+)
 INPUT_DEVICE_CYCLE_COMMAND_WORDS = _voice_command_words("input_device_cycle")
 INPUT_DEVICE_CYCLE_COMMAND_ENABLED = _voice_command_enabled("input_device_cycle")
 OUTPUT_DEVICE_CYCLE_COMMAND_WORDS = _voice_command_words("output_device_cycle")
@@ -784,6 +796,8 @@ BUFFER_CLEAR_COMMAND_ENABLED = _voice_command_enabled(
 )
 REVERT_COMMAND_WORDS_EXACT = REVERT_COMMAND_WORDS
 REPEAT_COMMAND_WORDS_EXACT = REPEAT_COMMAND_WORDS
+RECOGNIZE_COMMAND_WORDS_EXACT = RECOGNIZE_COMMAND_WORDS
+CLIPBOARD_COMMAND_WORDS_EXACT = CLIPBOARD_COMMAND_WORDS
 INPUT_DEVICE_CYCLE_COMMAND_WORDS_EXACT = INPUT_DEVICE_CYCLE_COMMAND_WORDS
 OUTPUT_DEVICE_CYCLE_COMMAND_WORDS_EXACT = OUTPUT_DEVICE_CYCLE_COMMAND_WORDS
 OUTPUT_MODE_DEFAULT_COMMAND_WORDS_EXACT = OUTPUT_MODE_DEFAULT_COMMAND_WORDS
@@ -1770,6 +1784,10 @@ def main(args=None):
             kb.add_hotkey(OUTPUT_MODE_CYCLE_HOTKEY, lambda: invoke_hotkey_target("output_mode_cycle"))
             logger.info(f"[hotkey] output_mode_cycle = {OUTPUT_MODE_CYCLE_HOTKEY}")
 
+        if CLIPBOARD_TO_BUFFER_HOTKEY:
+            kb.add_hotkey(CLIPBOARD_TO_BUFFER_HOTKEY, lambda: invoke_hotkey_target("clipboard_to_buffer"))
+            logger.info(f"[hotkey] clipboard_to_buffer = {CLIPBOARD_TO_BUFFER_HOTKEY}")
+
         if CONSOLE_TOGGLE_HOTKEY:
             if console_controller.available:
                 kb.add_hotkey(CONSOLE_TOGGLE_HOTKEY, lambda: invoke_hotkey_target("console_toggle"))
@@ -1778,6 +1796,7 @@ def main(args=None):
                 logger.warning("[hotkey] console_toggle requested but no Windows console is available.")
 
     set_hotkey_target("console_toggle", lambda: console_controller.toggle(reason="hotkey"))
+    set_hotkey_target("clipboard_to_buffer", lambda: append_clipboard_to_buffer(reason="hotkey"))
     if start_microphone_mode:
         register_hotkeys()
 
@@ -2094,6 +2113,8 @@ def main(args=None):
     voice_command_seen_by_epoch: dict[int, set[str]] = {}
     command_consumed_epochs: set[int] = set()
     last_replayable_final_event = [None]
+    last_blocked_final_event = [None]
+    saved_utterance_history = deque(maxlen=64)
 
     type_set_enabled = handler_extras.get("type_at_cursor_set_enabled")
     type_is_enabled = handler_extras.get("type_at_cursor_is_enabled")
@@ -2104,6 +2125,8 @@ def main(args=None):
 
     file_buffer_set_enabled = handler_extras.get("file_buffer_set_enabled")
     file_buffer_is_enabled = handler_extras.get("file_buffer_is_enabled")
+    file_buffer_get_content = handler_extras.get("file_buffer_get_content")
+    file_buffer_append_text = handler_extras.get("file_buffer_append_text")
     output_mode_profiles = {
         "direct-cursor": {
             "type_at_cursor": True,
@@ -2130,6 +2153,72 @@ def main(args=None):
 
     def persist():
         return
+
+    def append_clipboard_to_buffer(reason: str = "hotkey") -> bool:
+        if not (file_buffer_is_enabled and file_buffer_is_enabled()):
+            logger.info(f"[file_buffer] Clipboard append ignored ({reason}): draft buffer is not active.")
+            return False
+        try:
+            import win32clipboard
+            import win32con
+        except ImportError:
+            logger.warning("[file_buffer] Clipboard append unavailable: pywin32 not installed.")
+            return False
+        try:
+            win32clipboard.OpenClipboard()
+            try:
+                if not win32clipboard.IsClipboardFormatAvailable(win32con.CF_UNICODETEXT):
+                    logger.info(f"[file_buffer] Clipboard append ignored ({reason}): clipboard has no text.")
+                    return False
+                text = win32clipboard.GetClipboardData(win32con.CF_UNICODETEXT)
+            finally:
+                win32clipboard.CloseClipboard()
+        except Exception as exc:
+            logger.warning(f"[file_buffer] Clipboard append failed ({reason}): {exc}")
+            return False
+        if not str(text or "").strip():
+            logger.info(f"[file_buffer] Clipboard append ignored ({reason}): clipboard text is empty.")
+            return False
+        if not file_buffer_append_text:
+            logger.info(f"[file_buffer] Clipboard append ignored ({reason}): buffer handler not available.")
+            return False
+        content = str(text)
+        if not content.endswith((" ", "\t", "\r", "\n")):
+            content += " "
+        file_buffer_append_text(content)
+        logger.info(f"[hotkey] clipboard_to_buffer ({reason})")
+        feedback.play_on()
+        return True
+
+    def _remember_saved_utterance_clip(epoch: int, path: Path | None):
+        if path is None:
+            return
+        saved_utterance_history.append((int(epoch), Path(path)))
+
+    def _latest_saved_clip_before_epoch(epoch: int) -> Path | None:
+        for clip_epoch, clip_path in reversed(saved_utterance_history):
+            if int(clip_epoch) >= int(epoch):
+                continue
+            if clip_path.exists():
+                return clip_path
+        return None
+
+    def _promote_last_saved_clip_to_recognition(epoch: int) -> Path | None:
+        source = _latest_saved_clip_before_epoch(epoch)
+        if source is None:
+            return None
+        RECOGNITION_SAMPLES_DIR.mkdir(parents=True, exist_ok=True)
+        destination = RECOGNITION_SAMPLES_DIR / source.name
+        if destination.exists():
+            stamp = time.strftime("%Y%m%d-%H%M%S")
+            destination = RECOGNITION_SAMPLES_DIR / f"{source.stem}-recognized-{stamp}{source.suffix}"
+        shutil.move(str(source), str(destination))
+        for index in range(len(saved_utterance_history) - 1, -1, -1):
+            clip_epoch, clip_path = saved_utterance_history[index]
+            if clip_path == source:
+                del saved_utterance_history[index]
+                break
+        return destination
 
     def apply_output_mode(mode_name: str, *, reason: str = "", announce: bool = True) -> str:
         normalized = str(mode_name or "").strip().lower()
@@ -2178,6 +2267,40 @@ def main(args=None):
         logger.info(f"[{source.upper()} +{t:.2f}s] → CMD repeat ({inf_ms}ms)")
         dispatch(replay)
         return True
+
+    def _build_dispatchable_final_event(raw_text: str, epoch: int, t: float, inf_ms: int) -> dict | None:
+        if should_ignore_transcript(raw_text):
+            return None
+        cleaned_text = strip_disfluencies(raw_text)
+        text, actions = apply_voice_commands(cleaned_text)
+        if not text and not actions:
+            return None
+        ev = {
+            "type": "final",
+            "text": text,
+            "epoch": epoch,
+            "t": round(t, 3),
+            "inference_ms": inf_ms,
+        }
+        if actions:
+            ev["actions"] = actions
+        return ev
+
+    def _release_last_blocked_final_event(epoch: int, t: float, inf_ms: int) -> dict | None:
+        event = last_blocked_final_event[0]
+        if not event:
+            return None
+        if int(event.get("blocked_epoch") or -1) >= int(epoch):
+            return None
+        replay = copy.deepcopy(event["payload"])
+        replay["epoch"] = epoch
+        replay["t"] = round(t, 3)
+        replay["inference_ms"] = inf_ms
+        replay["released_by_recognize"] = True
+        last_blocked_final_event[0] = None
+        last_replayable_final_event[0] = copy.deepcopy(replay)
+        dispatch(replay)
+        return replay
 
     def set_sleeping(sleeping: bool, reason: str = "", *, play_feedback: bool = True):
         with mode_lock:
@@ -2326,8 +2449,11 @@ def main(args=None):
                 _mark_epoch_consumed_by_partial_command(epoch, source)
                 revert_actions = {}
                 if file_buffer_is_enabled and file_buffer_is_enabled():
-                    revert_actions["restore_last_released_buffer"] = True
-                    revert_actions["undo_type_at_cursor"] = True
+                    current_buffer = file_buffer_get_content() if file_buffer_get_content else ""
+                    if str(current_buffer).strip():
+                        revert_actions["undo_file_buffer"] = True
+                    else:
+                        revert_actions["restore_last_released_buffer"] = True
                 else:
                     revert_actions["undo_type_at_cursor"] = True
                 logger.info(f"{_command_log_prefix(source, t, recognition_meta)} → CMD rewind ({inf_ms}ms)")
@@ -2340,6 +2466,36 @@ def main(args=None):
                     "inference_ms": inf_ms,
                 })
                 feedback.play_on()
+            return True
+
+        if RECOGNIZE_COMMAND_ENABLED and normalized in RECOGNIZE_COMMAND_WORDS_EXACT:
+            if _mark_voice_command_seen(epoch, f"recognize:{normalized}"):
+                _mark_epoch_consumed_by_partial_command(epoch, source)
+                promoted = _promote_last_saved_clip_to_recognition(epoch)
+                released = _release_last_blocked_final_event(epoch, t, inf_ms)
+                if promoted is None and released is None:
+                    logger.info(f"{_command_log_prefix(source, t, recognition_meta)} → CMD recognize ignored (no prior saved clip) ({inf_ms}ms)")
+                else:
+                    details = []
+                    if promoted is not None:
+                        details.append(f"sample={promoted.name}")
+                    if released is not None:
+                        released_text = str(released.get('text') or '').strip()
+                        if released_text:
+                            details.append(f"released='{released_text}'")
+                        else:
+                            details.append("released")
+                    logger.info(f"{_command_log_prefix(source, t, recognition_meta)} → CMD recognize {'; '.join(details)} ({inf_ms}ms)")
+                    feedback.play_on()
+            return True
+
+        if CLIPBOARD_COMMAND_ENABLED and normalized in CLIPBOARD_COMMAND_WORDS_EXACT:
+            if _mark_voice_command_seen(epoch, f"clipboard:{normalized}"):
+                _mark_epoch_consumed_by_partial_command(epoch, source)
+                if append_clipboard_to_buffer(reason=f"voice:{normalized}"):
+                    logger.info(f"{_command_log_prefix(source, t, recognition_meta)} → CMD clipboard ({inf_ms}ms)")
+                else:
+                    logger.info(f"{_command_log_prefix(source, t, recognition_meta)} → CMD clipboard ignored ({inf_ms}ms)")
             return True
 
         if REPEAT_COMMAND_ENABLED and normalized in REPEAT_COMMAND_WORDS_EXACT:
@@ -2580,9 +2736,15 @@ def main(args=None):
                 ).text
                 inf_ms = int((time.time() - t_start) * 1000)
                 t = time.time() - t0
+                blocked_event = _build_dispatchable_final_event(raw_text, epoch, t, inf_ms)
 
                 recognition_ok, recognition_meta = check_recognition_epoch(epoch, audio)
                 if not recognition_ok:
+                    if blocked_event is not None:
+                        last_blocked_final_event[0] = {
+                            "blocked_epoch": int(epoch),
+                            "payload": copy.deepcopy(blocked_event),
+                        }
                     _log_recognition_outcome("FINAL", t, inf_ms, recognition_meta, blocked=True)
                     continue
 
@@ -3310,7 +3472,8 @@ def main(args=None):
                         with state_lock: epoch = state['speech_epoch']
                         is_recording = False
                         finalized_chunks = list(recording_buffer)
-                        _save_utterance_clip(epoch, finalized_chunks, started_at=current_t0)
+                        saved_clip_path = _save_utterance_clip(epoch, finalized_chunks, started_at=current_t0)
+                        _remember_saved_utterance_clip(epoch, saved_clip_path)
                         final_queue.put((epoch, current_t0, finalized_chunks))
                         debug_log(
                             f"[speech] finalize epoch={epoch} chunks={len(recording_buffer)} "

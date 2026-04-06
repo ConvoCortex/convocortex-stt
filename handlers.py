@@ -272,6 +272,14 @@ def make_file_buffer(cfg: dict):
             _remember_undo(existing, combined)
             _write_buffer(combined)
 
+    def _append_external_text(text: str):
+        content = str(text or "")
+        if not content:
+            logger.info("[file_buffer] External append ignored: empty text.")
+            return
+        _append_buffer(content)
+        logger.info(f"[file_buffer] appended external text ({len(content)} chars)")
+
     def set_enabled(enabled: bool):
         with enabled_lock:
             enabled_state[0] = bool(enabled)
@@ -406,8 +414,12 @@ def make_file_buffer(cfg: dict):
             return
         _append_buffer(text)
 
+    def _get_buffer_content() -> str:
+        with lock:
+            return _read_buffer()
+
     file_buffer.__name__ = "file_buffer"
-    return file_buffer, _clear_buffer, set_enabled, is_enabled
+    return file_buffer, _clear_buffer, set_enabled, is_enabled, _get_buffer_content, _append_external_text
 
 
 # ── Type at cursor ────────────────────────────────────────────────────────────
@@ -561,11 +573,13 @@ def register_all(cfg: dict, register) -> dict:
 
     result = make_file_buffer(cfg)
     if result:
-        fn, reset, set_enabled, is_enabled = result
+        fn, reset, set_enabled, is_enabled, get_content, append_external_text = result
         register(fn)
         extras["file_buffer_clear"] = reset
         extras["file_buffer_set_enabled"] = set_enabled
         extras["file_buffer_is_enabled"] = is_enabled
+        extras["file_buffer_get_content"] = get_content
+        extras["file_buffer_append_text"] = append_external_text
         logger.info(f"[handler] file_buffer -> {out['file_buffer']['path']}")
 
     result = make_type_at_cursor(cfg)

@@ -102,7 +102,7 @@ queue_size       = 1
 
 [recording]
 # save microphone utterance clips chunked on pauses to disk
-save_utterance_clips = false
+save_utterance_clips = true
 utterance_clips_dir = "recordings/utterance-clips"
 
 [recognition]
@@ -266,6 +266,14 @@ words   = ["rewind"] # Exact match only; restores last released buffer in draft-
 enabled = true
 words   = ["repeat"] # Exact match only; repeats last released buffer in draft-buffer mode, otherwise replays the last final cursor output
 
+[voice_commands.recognize]
+enabled = true
+words   = ["recognize"] # Exact match only; moves the most recent prior saved utterance clip into recognition/samples
+
+[voice_commands.clipboard]
+enabled = true
+words   = ["clipboard"] # Exact match only; appends current clipboard text into buffer.txt when draft-buffer mode is active
+
 [voice_commands.input_device_cycle]
 enabled = false
 words   = ["input"] # Exact match only; same behavior as the input-device cycle hotkey
@@ -331,6 +339,7 @@ input_device_cycle   = "shift+f6"  # cycles input device
 output_device_cycle  = "shift+f7"  # cycles audio feedback output device
 console_toggle       = "shift+f8"  # hides/shows the STT console so you can bring it back and Ctrl+C it
 output_mode_cycle    = "shift+f9"  # cycles runtime output mode presets without editing config.toml
+clipboard_to_buffer  = "ctrl+shift+b" # appends current clipboard text into buffer.txt when draft-buffer mode is active
 
 # ── NATS ─────────────────────────────────────────────────────────────────────
 # Requires nats-py installed. STT works fully without NATS.
