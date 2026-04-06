@@ -380,7 +380,7 @@ internal static class Program
         private void StartRuntime()
         {
             Directory.CreateDirectory(_repoRoot);
-            using (File.Open(_runtimeConsoleLogPath, FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.ReadWrite | FileShare.Delete))
+            using (File.Open(_runtimeConsoleLogPath, FileMode.Create, FileAccess.ReadWrite, FileShare.ReadWrite | FileShare.Delete))
             {
             }
             var psi = new ProcessStartInfo
