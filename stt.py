@@ -3568,6 +3568,7 @@ def main(args=None):
     wake_verify_started_at = 0.0
 
     logger.info("STT Ready!")
+    feedback.play_startup()
     dispatch({"type": "system", "event": "startup",
               "device": dev_name,
               "models": {
@@ -3578,7 +3579,6 @@ def main(args=None):
               },
               "output_mode": output_mode_state["name"]})
     dispatch({"type": "status", "value": "sleeping" if mode_state["sleeping"] else "working"})
-    feedback.play_startup()
 
     def reset_active_utterance(reason: str):
         nonlocal recording_buffer, is_recording, speech_counter, silence_counter, current_t0, last_rt_update
