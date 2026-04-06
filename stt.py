@@ -44,7 +44,7 @@ from audio_devices import (
 )
 import config
 from model_backends import load_backend
-from recognition import RecognitionEngine, format_recognition_annotation
+from recognition import RecognitionEngine, discover_speaker_samples, format_recognition_annotation
 
 
 def _bootstrap_owned_console():
@@ -451,7 +451,10 @@ class WindowsTrayIcon:
         return "Hide Console" if self._console_controller.is_visible() else "Show Console"
 
     def _toggle_console(self):
-        self._console_controller.toggle(reason="tray")
+        try:
+            self._console_controller.toggle(reason="tray")
+        except Exception as exc:
+            logger.warning(f"[tray] Toggle console failed: {exc}")
 
     def _request_exit(self):
         logger.info("[tray] Exit requested.")
@@ -477,22 +480,33 @@ class WindowsTrayIcon:
                 None,
             )
             self._win32gui.PostMessage(self._hwnd, self._win32con.WM_NULL, 0, 0)
+        except Exception as exc:
+            logger.warning(f"[tray] Show menu failed: {exc}")
         finally:
-            self._win32gui.DestroyMenu(menu)
+            try:
+                self._win32gui.DestroyMenu(menu)
+            except Exception:
+                pass
 
     def _on_command(self, hwnd, msg, wparam, lparam):
-        cmd = self._win32api.LOWORD(wparam)
-        if cmd == self.CMD_TOGGLE_CONSOLE:
-            self._toggle_console()
-        elif cmd == self.CMD_EXIT:
-            self._request_exit()
+        try:
+            cmd = self._win32api.LOWORD(wparam)
+            if cmd == self.CMD_TOGGLE_CONSOLE:
+                self._toggle_console()
+            elif cmd == self.CMD_EXIT:
+                self._request_exit()
+        except Exception as exc:
+            logger.warning(f"[tray] Command handler failed: {exc}")
         return 0
 
     def _on_notify(self, hwnd, msg, wparam, lparam):
-        if lparam == self._win32con.WM_LBUTTONUP:
-            self._toggle_console()
-        elif lparam in {self._win32con.WM_RBUTTONUP, self._win32con.WM_CONTEXTMENU}:
-            self._show_menu()
+        try:
+            if lparam == self._win32con.WM_LBUTTONUP:
+                self._toggle_console()
+            elif lparam in {self._win32con.WM_RBUTTONUP, self._win32con.WM_CONTEXTMENU}:
+                self._show_menu()
+        except Exception as exc:
+            logger.warning(f"[tray] Notify handler failed: {exc}")
         return 0
 
     def _remove_icon(self):
@@ -554,6 +568,7 @@ class WindowsTrayIcon:
 
         try:
             self._win32gui.PumpMessages()
+            logger.warning("[tray] Message pump exited unexpectedly.")
         finally:
             self._remove_icon()
 
@@ -632,14 +647,13 @@ def _optional_float(value):
 # ── Recognition ───────────────────────────────────────────────────────────────
 _recognition_cfg = cfg.get("recognition", {}) or {}
 RECOGNITION_ENABLED = bool(_recognition_cfg.get("enabled", False))
-RECOGNITION_MODE = str(_recognition_cfg.get("mode", "me-only")).strip() or "me-only"
 RECOGNITION_APPLY_TO_MICROPHONE = bool(_recognition_cfg.get("apply_to_microphone", True))
 RECOGNITION_APPLY_TO_FILES = bool(_recognition_cfg.get("apply_to_files", False))
 RECOGNITION_GATE_WAKE = bool(_recognition_cfg.get("gate_wake", True))
 RECOGNITION_DEVICE = str(_recognition_cfg.get("device", "cuda")).strip().lower() or "cuda"
 RECOGNITION_MODEL = str(_recognition_cfg.get("model", "ecapa_tdnn")).strip() or "ecapa_tdnn"
-RECOGNITION_SAMPLES_DIR = Path(_resolve_repo_path(_recognition_cfg.get("samples_dir", "recognition/samples")))
-RECOGNITION_PROFILE_FILE = Path(_resolve_repo_path(_recognition_cfg.get("profile_file", "recognition/profile.json")))
+RECOGNITION_ROOT_DIR = Path(_resolve_repo_path(_recognition_cfg.get("root_dir", "recognition")))
+RECOGNITION_CACHE_FILE = RECOGNITION_ROOT_DIR / "cache.json"
 RECOGNITION_THRESHOLD_OVERRIDE = _optional_float(_recognition_cfg.get("threshold_override"))
 RECOGNITION_MIN_VERIFY_SPEECH_SECONDS = float(_recognition_cfg.get("min_verify_speech_seconds", 1.2))
 RECOGNITION_LOG_SCORES = bool(_recognition_cfg.get("log_scores", False))
@@ -754,8 +768,8 @@ ENTER_COMMAND_ENABLED = (
     and bool(ENTER_COMMAND_WORDS)
     and bool(ENTER_COMMAND_WORDS_EXACT)
 )
-TYPE_TOGGLE_COMMAND_WORDS = _voice_command_words("type_at_cursor_toggle")
-TYPE_TOGGLE_COMMAND_ENABLED = _voice_command_enabled("type_at_cursor_toggle")
+TYPE_TOGGLE_COMMAND_WORDS = _voice_command_words("typing")
+TYPE_TOGGLE_COMMAND_ENABLED = _voice_command_enabled("typing")
 REVERT_COMMAND_WORDS = _voice_command_words("rewind")
 REVERT_COMMAND_ENABLED = _voice_command_enabled("rewind")
 REPEAT_COMMAND_WORDS = _voice_command_words("repeat")
@@ -766,10 +780,7 @@ RECOGNIZE_COMMAND_ENABLED = _voice_command_enabled(
     extra=SAVE_UTTERANCE_CLIPS,
 )
 CLIPBOARD_COMMAND_WORDS = _voice_command_words("clipboard")
-CLIPBOARD_COMMAND_ENABLED = _voice_command_enabled(
-    "clipboard",
-    extra=bool(cfg.get("output", {}).get("file_buffer", {}).get("enabled", False)),
-)
+CLIPBOARD_COMMAND_ENABLED = _voice_command_enabled("clipboard")
 INPUT_DEVICE_CYCLE_COMMAND_WORDS = _voice_command_words("input_device_cycle")
 INPUT_DEVICE_CYCLE_COMMAND_ENABLED = _voice_command_enabled("input_device_cycle")
 OUTPUT_DEVICE_CYCLE_COMMAND_WORDS = _voice_command_words("output_device_cycle")
@@ -785,15 +796,9 @@ CONSOLE_SHOW_COMMAND_ENABLED = _voice_command_enabled("console_show")
 CONSOLE_HIDE_COMMAND_WORDS = _voice_command_words("console_hide")
 CONSOLE_HIDE_COMMAND_ENABLED = _voice_command_enabled("console_hide")
 BUFFER_RELEASE_COMMAND_WORDS = _voice_command_words("buffer_release")
-BUFFER_RELEASE_COMMAND_ENABLED = _voice_command_enabled(
-    "buffer_release",
-    extra=bool(cfg.get("output", {}).get("file_buffer", {}).get("enabled", False)),
-)
+BUFFER_RELEASE_COMMAND_ENABLED = _voice_command_enabled("buffer_release")
 BUFFER_CLEAR_COMMAND_WORDS = _voice_command_words("buffer_clear")
-BUFFER_CLEAR_COMMAND_ENABLED = _voice_command_enabled(
-    "buffer_clear",
-    extra=bool(cfg.get("output", {}).get("file_buffer", {}).get("enabled", False)),
-)
+BUFFER_CLEAR_COMMAND_ENABLED = _voice_command_enabled("buffer_clear")
 REVERT_COMMAND_WORDS_EXACT = REVERT_COMMAND_WORDS
 REPEAT_COMMAND_WORDS_EXACT = REPEAT_COMMAND_WORDS
 RECOGNIZE_COMMAND_WORDS_EXACT = RECOGNIZE_COMMAND_WORDS
@@ -808,9 +813,16 @@ CONSOLE_HIDE_COMMAND_WORDS_EXACT = CONSOLE_HIDE_COMMAND_WORDS
 BUFFER_RELEASE_COMMAND_WORDS_EXACT = BUFFER_RELEASE_COMMAND_WORDS
 BUFFER_CLEAR_COMMAND_WORDS_EXACT = BUFFER_CLEAR_COMMAND_WORDS
 
+OUTPUT_MODE_ALIASES = {
+    "cursor": "cursor",
+    "direct-cursor": "cursor",
+    "draft": "draft",
+    "draft-buffer": "draft",
+}
+
 OUTPUT_MODE_NAMES = [
-    "direct-cursor",
-    "draft-buffer",
+    "cursor",
+    "draft",
 ]
 
 def _clamp_volume(v: float) -> float:
@@ -1133,72 +1145,74 @@ def _open_startup_input_capture(p: pyaudio.PyAudio, *, log_prefix: str = "[input
         + ("; ".join(summary_parts) if summary_parts else "No startup candidates were available.")
     )
 
-def _recognition_sample_paths(samples_dir: Path) -> list[Path]:
-    supported = {".wav", ".mp3", ".m4a", ".flac", ".ogg", ".opus", ".aac", ".wma"}
-    if not samples_dir.exists():
-        return []
-    return sorted(
-        [
-            path
-            for path in samples_dir.iterdir()
-            if path.is_file() and path.suffix.lower() in supported
-        ],
-        key=lambda item: item.name.lower(),
-    )
+def _recognition_speaker_paths(root_dir: Path) -> dict[str, list[Path]]:
+    return discover_speaker_samples(root_dir)
+
+
+def _recognition_default_speaker_dir(root_dir: Path) -> Path:
+    speaker_paths = _recognition_speaker_paths(root_dir)
+    if speaker_paths:
+        first = sorted(speaker_paths.keys(), key=str.lower)[0]
+        return root_dir / first
+    return root_dir / "speaker-1"
 
 
 def _ensure_recognition_profile() -> bool:
     if not RECOGNITION_ENABLED:
         return False
-    sample_paths = _recognition_sample_paths(RECOGNITION_SAMPLES_DIR)
-    if not sample_paths:
-        raise RuntimeError(
-            f"Recognition is enabled but no sample files were found in {RECOGNITION_SAMPLES_DIR}"
+    speaker_paths = _recognition_speaker_paths(RECOGNITION_ROOT_DIR)
+    speaker_count = len(speaker_paths)
+    sample_count = sum(len(paths) for paths in speaker_paths.values())
+    if not speaker_paths:
+        logger.warning(
+            "[recognition] enabled but no speaker folders with sample files were found in %s; recognition will stay inactive",
+            RECOGNITION_ROOT_DIR,
         )
+        return False
     engine = RecognitionEngine(
-        profile_path=RECOGNITION_PROFILE_FILE,
+        profile_path=RECOGNITION_CACHE_FILE,
         model_name=RECOGNITION_MODEL,
         requested_device=RECOGNITION_DEVICE,
         sample_rate=RATE,
         threshold_override=RECOGNITION_THRESHOLD_OVERRIDE,
-        mode=RECOGNITION_MODE,
     )
-    rebuild_required = not engine.profile_matches_corpus(sample_paths)
+    rebuild_required = not engine.profile_matches_corpus(speaker_paths)
     if rebuild_required:
         logger.info(
-            "[recognition] rebuilding profile from %s sample file(s) in %s",
-            len(sample_paths),
-            RECOGNITION_SAMPLES_DIR,
+            "[recognition] rebuilding cache from %s speaker folder(s), %s sample file(s) in %s",
+            speaker_count,
+            sample_count,
+            RECOGNITION_ROOT_DIR,
         )
-        profile = engine.build_profile_from_paths(sample_paths)
-        RECOGNITION_PROFILE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        profile = engine.build_profile_from_speakers(speaker_paths)
+        RECOGNITION_CACHE_FILE.parent.mkdir(parents=True, exist_ok=True)
         engine.save_profile(profile)
     else:
         logger.info(
-            "[recognition] reusing existing profile from %s for %s sample file(s)",
-            RECOGNITION_PROFILE_FILE,
-            len(sample_paths),
+            "[recognition] reusing existing cache from %s for %s speaker folder(s), %s sample file(s)",
+            RECOGNITION_CACHE_FILE,
+            speaker_count,
+            sample_count,
         )
     engine.ensure_ready(load_profile=True)
     for line in engine.startup_logs():
         logger.info(f"[recognition] {line}")
     profile_payload = engine.load_profile()
-    sample_entries = list(profile_payload.get("samples") or [])
-    if sample_entries:
-        min_score = profile_payload.get("corpus_self_score_min")
-        p10_score = profile_payload.get("corpus_self_score_p10")
-        avg_score = profile_payload.get("corpus_self_score_avg")
-        max_score = profile_payload.get("corpus_self_score_max")
-        active_threshold = profile_payload.get("active_threshold")
-        threshold_source = profile_payload.get("threshold_source")
+    speakers = dict(profile_payload.get("speakers") or {})
+    for speaker_name in sorted(speakers.keys(), key=str.lower):
+        speaker_data = dict(speakers.get(speaker_name) or {})
+        sample_entries = list(speaker_data.get("samples") or [])
+        if not sample_entries:
+            continue
         logger.info(
-            "[recognition] corpus self-scores min=%s p10=%s avg=%s max=%s threshold=%s source=%s",
-            min_score,
-            p10_score,
-            avg_score,
-            max_score,
-            active_threshold,
-            threshold_source,
+            "[recognition] speaker=%s self-scores min=%s p10=%s avg=%s max=%s threshold=%s source=%s",
+            speaker_name,
+            speaker_data.get("corpus_self_score_min"),
+            speaker_data.get("corpus_self_score_p10"),
+            speaker_data.get("corpus_self_score_avg"),
+            speaker_data.get("corpus_self_score_max"),
+            speaker_data.get("active_threshold"),
+            speaker_data.get("threshold_source"),
         )
         if RECOGNITION_LOG_SCORES:
             ranked_entries = sorted(
@@ -1207,7 +1221,8 @@ def _ensure_recognition_profile() -> bool:
             )
             for entry in ranked_entries:
                 logger.info(
-                    "[recognition] corpus sample score=%s duration=%ss path=%s",
+                    "[recognition] speaker=%s sample score=%s duration=%ss path=%s",
+                    speaker_name,
                     entry.get("self_score"),
                     entry.get("duration_s"),
                     entry.get("path"),
@@ -1973,14 +1988,17 @@ def main(args=None):
         if not (RECOGNITION_ENABLED and RECOGNITION_APPLY_TO_MICROPHONE and start_microphone_mode):
             resources["recognition_engine"] = None
             return
+        if not RECOGNITION_CACHE_FILE.exists():
+            resources["recognition_engine"] = None
+            logger.info("[recognition] microphone recognition inactive (cache not available)")
+            return
         try:
             engine = RecognitionEngine(
-                profile_path=RECOGNITION_PROFILE_FILE,
+                profile_path=RECOGNITION_CACHE_FILE,
                 model_name=RECOGNITION_MODEL,
                 requested_device=RECOGNITION_DEVICE,
                 sample_rate=RATE,
                 threshold_override=RECOGNITION_THRESHOLD_OVERRIDE,
-                mode=RECOGNITION_MODE,
             )
             engine.ensure_ready(load_profile=True)
             resources["recognition_engine"] = engine
@@ -2098,16 +2116,19 @@ def main(args=None):
     mode_lock     = threading.Lock()
     mode_state    = {"sleeping": False}
     typing_lock   = threading.Lock()
-    default_typing_enabled = bool(cfg["output"]["type_at_cursor"]["enabled"])
-    typing_state = {
-        "enabled": default_typing_enabled
-    }
     output_mode_lock = threading.Lock()
-    configured_output_mode = (
-        "draft-buffer"
-        if bool(cfg["output"]["file_buffer"]["enabled"]) and not bool(cfg["output"]["type_at_cursor"]["enabled"])
-        else "direct-cursor"
-    )
+    configured_output_mode_raw = str(cfg.get("output", {}).get("mode", "")).strip().lower()
+    configured_output_mode = OUTPUT_MODE_ALIASES.get(configured_output_mode_raw)
+    if configured_output_mode is None:
+        configured_output_mode = (
+            "draft"
+            if bool(cfg.get("output", {}).get("file_buffer", {}).get("enabled", False))
+            and not bool(cfg.get("output", {}).get("type_at_cursor", {}).get("enabled", False))
+            else "cursor"
+        )
+    typing_state = {
+        "enabled": configured_output_mode == "cursor"
+    }
     output_mode_state = {"name": configured_output_mode}
     voice_command_lock = threading.Lock()
     voice_command_seen_by_epoch: dict[int, set[str]] = {}
@@ -2128,11 +2149,11 @@ def main(args=None):
     file_buffer_get_content = handler_extras.get("file_buffer_get_content")
     file_buffer_append_text = handler_extras.get("file_buffer_append_text")
     output_mode_profiles = {
-        "direct-cursor": {
+        "cursor": {
             "type_at_cursor": True,
             "file_buffer": False,
         },
-        "draft-buffer": {
+        "draft": {
             "type_at_cursor": False,
             "file_buffer": True,
         },
@@ -2207,11 +2228,12 @@ def main(args=None):
         source = _latest_saved_clip_before_epoch(epoch)
         if source is None:
             return None
-        RECOGNITION_SAMPLES_DIR.mkdir(parents=True, exist_ok=True)
-        destination = RECOGNITION_SAMPLES_DIR / source.name
+        destination_dir = _recognition_default_speaker_dir(RECOGNITION_ROOT_DIR)
+        destination_dir.mkdir(parents=True, exist_ok=True)
+        destination = destination_dir / source.name
         if destination.exists():
             stamp = time.strftime("%Y%m%d-%H%M%S")
-            destination = RECOGNITION_SAMPLES_DIR / f"{source.stem}-recognized-{stamp}{source.suffix}"
+            destination = destination_dir / f"{source.stem}-recognized-{stamp}{source.suffix}"
         shutil.move(str(source), str(destination))
         for index in range(len(saved_utterance_history) - 1, -1, -1):
             clip_epoch, clip_path = saved_utterance_history[index]
@@ -2221,9 +2243,9 @@ def main(args=None):
         return destination
 
     def apply_output_mode(mode_name: str, *, reason: str = "", announce: bool = True) -> str:
-        normalized = str(mode_name or "").strip().lower()
+        normalized = OUTPUT_MODE_ALIASES.get(str(mode_name or "").strip().lower(), "")
         if normalized not in output_mode_profiles:
-            normalized = "direct-cursor"
+            normalized = "cursor"
         profile = output_mode_profiles[normalized]
 
         if file_buffer_set_enabled:
@@ -2433,19 +2455,19 @@ def main(args=None):
             return False
 
         if normalized in SLEEP_STOP_WORDS:
-            if _mark_voice_command_seen(epoch, f"sleep:{normalized}"):
+            if _mark_voice_command_seen(epoch, "sleep"):
                 _mark_epoch_consumed_by_partial_command(epoch, source)
                 set_sleeping(True, reason=f"voice:{normalized}")
             return True
 
         if TYPE_TOGGLE_COMMAND_ENABLED and normalized in TYPE_TOGGLE_COMMAND_WORDS:
-            if _mark_voice_command_seen(epoch, f"typing_toggle:{normalized}"):
+            if _mark_voice_command_seen(epoch, "typing_toggle"):
                 _mark_epoch_consumed_by_partial_command(epoch, source)
                 toggle_typing_enabled(reason=f"voice:{normalized}")
             return True
 
         if REVERT_COMMAND_ENABLED and normalized in REVERT_COMMAND_WORDS_EXACT:
-            if _mark_voice_command_seen(epoch, f"rewind:{normalized}"):
+            if _mark_voice_command_seen(epoch, "rewind"):
                 _mark_epoch_consumed_by_partial_command(epoch, source)
                 revert_actions = {}
                 if file_buffer_is_enabled and file_buffer_is_enabled():
@@ -2469,7 +2491,7 @@ def main(args=None):
             return True
 
         if RECOGNIZE_COMMAND_ENABLED and normalized in RECOGNIZE_COMMAND_WORDS_EXACT:
-            if _mark_voice_command_seen(epoch, f"recognize:{normalized}"):
+            if _mark_voice_command_seen(epoch, "recognize"):
                 _mark_epoch_consumed_by_partial_command(epoch, source)
                 promoted = _promote_last_saved_clip_to_recognition(epoch)
                 released = _release_last_blocked_final_event(epoch, t, inf_ms)
@@ -2490,7 +2512,7 @@ def main(args=None):
             return True
 
         if CLIPBOARD_COMMAND_ENABLED and normalized in CLIPBOARD_COMMAND_WORDS_EXACT:
-            if _mark_voice_command_seen(epoch, f"clipboard:{normalized}"):
+            if _mark_voice_command_seen(epoch, "clipboard"):
                 _mark_epoch_consumed_by_partial_command(epoch, source)
                 if append_clipboard_to_buffer(reason=f"voice:{normalized}"):
                     logger.info(f"{_command_log_prefix(source, t, recognition_meta)} → CMD clipboard ({inf_ms}ms)")
@@ -2499,7 +2521,7 @@ def main(args=None):
             return True
 
         if REPEAT_COMMAND_ENABLED and normalized in REPEAT_COMMAND_WORDS_EXACT:
-            if _mark_voice_command_seen(epoch, f"repeat:{normalized}"):
+            if _mark_voice_command_seen(epoch, "repeat"):
                 _mark_epoch_consumed_by_partial_command(epoch, source)
                 if file_buffer_is_enabled and file_buffer_is_enabled():
                     logger.info(f"{_command_log_prefix(source, t, recognition_meta)} → CMD repeat ({inf_ms}ms)")
@@ -2518,7 +2540,7 @@ def main(args=None):
             return True
 
         if INPUT_DEVICE_CYCLE_COMMAND_ENABLED and normalized in INPUT_DEVICE_CYCLE_COMMAND_WORDS_EXACT:
-            if _mark_voice_command_seen(epoch, f"input_device_cycle:{normalized}"):
+            if _mark_voice_command_seen(epoch, "input_device_cycle"):
                 _mark_epoch_consumed_by_partial_command(epoch, source)
                 logger.info(f"{_command_log_prefix(source, t, recognition_meta)} → CMD input_device_cycle ({inf_ms}ms)")
                 cycle_input_device()
@@ -2526,7 +2548,7 @@ def main(args=None):
             return True
 
         if OUTPUT_DEVICE_CYCLE_COMMAND_ENABLED and normalized in OUTPUT_DEVICE_CYCLE_COMMAND_WORDS_EXACT:
-            if _mark_voice_command_seen(epoch, f"output_device_cycle:{normalized}"):
+            if _mark_voice_command_seen(epoch, "output_device_cycle"):
                 _mark_epoch_consumed_by_partial_command(epoch, source)
                 logger.info(f"{_command_log_prefix(source, t, recognition_meta)} → CMD output_device_cycle ({inf_ms}ms)")
                 cycle_output_device()
@@ -2534,7 +2556,7 @@ def main(args=None):
             return True
 
         if OUTPUT_MODE_DEFAULT_COMMAND_ENABLED and normalized in OUTPUT_MODE_DEFAULT_COMMAND_WORDS_EXACT:
-            if _mark_voice_command_seen(epoch, f"output_mode_default:{normalized}"):
+            if _mark_voice_command_seen(epoch, "output_mode_default"):
                 _mark_epoch_consumed_by_partial_command(epoch, source)
                 logger.info(f"{_command_log_prefix(source, t, recognition_meta)} → CMD output_mode={configured_output_mode} ({inf_ms}ms)")
                 apply_output_mode(configured_output_mode, reason=f"voice:{normalized}")
@@ -2542,23 +2564,23 @@ def main(args=None):
             return True
 
         if OUTPUT_MODE_CURSOR_COMMAND_ENABLED and normalized in OUTPUT_MODE_CURSOR_COMMAND_WORDS_EXACT:
-            if _mark_voice_command_seen(epoch, f"output_mode_cursor:{normalized}"):
+            if _mark_voice_command_seen(epoch, "output_mode_cursor"):
                 _mark_epoch_consumed_by_partial_command(epoch, source)
-                logger.info(f"{_command_log_prefix(source, t, recognition_meta)} → CMD output_mode=direct-cursor ({inf_ms}ms)")
-                apply_output_mode("direct-cursor", reason=f"voice:{normalized}")
+                logger.info(f"{_command_log_prefix(source, t, recognition_meta)} → CMD output_mode=cursor ({inf_ms}ms)")
+                apply_output_mode("cursor", reason=f"voice:{normalized}")
                 feedback.play_on()
             return True
 
         if OUTPUT_MODE_DRAFT_COMMAND_ENABLED and normalized in OUTPUT_MODE_DRAFT_COMMAND_WORDS_EXACT:
-            if _mark_voice_command_seen(epoch, f"output_mode_draft:{normalized}"):
+            if _mark_voice_command_seen(epoch, "output_mode_draft"):
                 _mark_epoch_consumed_by_partial_command(epoch, source)
-                logger.info(f"{_command_log_prefix(source, t, recognition_meta)} → CMD output_mode=draft-buffer ({inf_ms}ms)")
-                apply_output_mode("draft-buffer", reason=f"voice:{normalized}")
+                logger.info(f"{_command_log_prefix(source, t, recognition_meta)} → CMD output_mode=draft ({inf_ms}ms)")
+                apply_output_mode("draft", reason=f"voice:{normalized}")
                 feedback.play_on()
             return True
 
         if CONSOLE_SHOW_COMMAND_ENABLED and normalized in CONSOLE_SHOW_COMMAND_WORDS_EXACT:
-            if _mark_voice_command_seen(epoch, f"console_show:{normalized}"):
+            if _mark_voice_command_seen(epoch, "console_show"):
                 _mark_epoch_consumed_by_partial_command(epoch, source)
                 logger.info(f"{_command_log_prefix(source, t, recognition_meta)} → CMD console_show ({inf_ms}ms)")
                 if console_controller.show(reason=f"voice:{normalized}"):
@@ -2566,7 +2588,7 @@ def main(args=None):
             return True
 
         if CONSOLE_HIDE_COMMAND_ENABLED and normalized in CONSOLE_HIDE_COMMAND_WORDS_EXACT:
-            if _mark_voice_command_seen(epoch, f"console_hide:{normalized}"):
+            if _mark_voice_command_seen(epoch, "console_hide"):
                 _mark_epoch_consumed_by_partial_command(epoch, source)
                 logger.info(f"{_command_log_prefix(source, t, recognition_meta)} → CMD console_hide ({inf_ms}ms)")
                 if console_controller.hide(reason=f"voice:{normalized}"):
@@ -2574,7 +2596,7 @@ def main(args=None):
             return True
 
         if ENTER_COMMAND_ENABLED and normalized in ENTER_COMMAND_WORDS_EXACT:
-            if _mark_voice_command_seen(epoch, f"press_enter:{normalized}"):
+            if _mark_voice_command_seen(epoch, "press_enter"):
                 _mark_epoch_consumed_by_partial_command(epoch, source)
                 logger.info(f"{_command_log_prefix(source, t, recognition_meta)} → CMD enter ({inf_ms}ms)")
                 actions = {"press_enter_after": True}
@@ -2592,7 +2614,7 @@ def main(args=None):
             return True
 
         if BUFFER_RELEASE_COMMAND_ENABLED and normalized in BUFFER_RELEASE_COMMAND_WORDS_EXACT:
-            if _mark_voice_command_seen(epoch, f"release_buffer:{normalized}"):
+            if _mark_voice_command_seen(epoch, "release_buffer"):
                 _mark_epoch_consumed_by_partial_command(epoch, source)
                 logger.info(f"{_command_log_prefix(source, t, recognition_meta)} → CMD buffer_release ({inf_ms}ms)")
                 dispatch({
@@ -2609,7 +2631,7 @@ def main(args=None):
             return True
 
         if BUFFER_CLEAR_COMMAND_ENABLED and normalized in BUFFER_CLEAR_COMMAND_WORDS_EXACT:
-            if _mark_voice_command_seen(epoch, f"clear_buffer:{normalized}"):
+            if _mark_voice_command_seen(epoch, "clear_buffer"):
                 _mark_epoch_consumed_by_partial_command(epoch, source)
                 logger.info(f"{_command_log_prefix(source, t, recognition_meta)} → CMD buffer_clear ({inf_ms}ms)")
                 dispatch({
@@ -2660,6 +2682,11 @@ def main(args=None):
             meta.get("delta"),
         )
 
+    def _recognized_speaker(meta: dict | None) -> str | None:
+        if not meta:
+            return None
+        return str(meta.get("speaker") or "").strip() or None
+
     def _log_recognition_outcome(label: str, t: float, inf_ms: int, meta: dict | None, *, text: str | None = None, blocked: bool = False) -> None:
         annotation = _recognition_annotation(meta)
         prefix = f"[{label} +{t:.2f}s]"
@@ -2691,6 +2718,7 @@ def main(args=None):
         )
         cached = {
             "accepted": bool(result.accepted),
+            "speaker": result.speaker,
             "score": result.score,
             "threshold": result.threshold,
             "delta": result.delta,
@@ -2768,6 +2796,9 @@ def main(args=None):
                     }
                     if actions:
                         ev["actions"] = actions
+                    speaker = _recognized_speaker(recognition_meta)
+                    if speaker:
+                        ev["speaker"] = speaker
                     if text:
                         last_replayable_final_event[0] = copy.deepcopy(ev)
                     with mode_lock:
@@ -2880,6 +2911,9 @@ def main(args=None):
                     ev = {"type": "partial", "text": text, "epoch": epoch,
                           "t": round(t, 3), "inference_ms": inf_ms}
                     ev["text"] = cleaned_text
+                    speaker = _recognized_speaker(recognition_meta)
+                    if speaker:
+                        ev["speaker"] = speaker
                     _log_recognition_outcome("PARTIAL", t, inf_ms, recognition_meta, text=cleaned_text, blocked=False)
                     dispatch(ev)
             except Exception as e:

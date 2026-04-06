@@ -341,13 +341,17 @@ class FileDropWorker:
             and bool(self._recognition_cfg.get("enabled", False))
             and bool(self._recognition_cfg.get("apply_to_files", False))
         ):
+            root_dir = _resolve_path(self._recognition_cfg.get("root_dir"), "recognition")
+            cache_path = root_dir / "cache.json"
+            if not cache_path.exists():
+                logger.info("[recognition] file-drop recognition inactive (cache not available)")
+                return
             self._recognition_engine = RecognitionEngine(
-                profile_path=_resolve_path(self._recognition_cfg.get("profile_file"), "recognition/profile.json"),
+                profile_path=cache_path,
                 model_name=str(self._recognition_cfg.get("model", "ecapa_tdnn")).strip() or "ecapa_tdnn",
                 requested_device=str(self._recognition_cfg.get("device", "cuda")).strip().lower() or "cuda",
                 sample_rate=self.rate,
                 threshold_override=float(self._recognition_cfg.get("threshold_override")) if str(self._recognition_cfg.get("threshold_override", "")).strip() else None,
-                mode=str(self._recognition_cfg.get("mode", "me-only")).strip() or "me-only",
             )
             self._recognition_engine.ensure_ready(load_profile=True)
             for line in self._recognition_engine.startup_logs():
@@ -430,6 +434,7 @@ class FileDropWorker:
                 [
                     f"# source_file: {metadata['source_file']}",
                     "# recognition_match: false",
+                    f"# recognized_speaker: {metadata.get('recognized_speaker')}",
                     f"# recognition_score: {metadata.get('recognition_score')}",
                     f"# recognition_threshold: {metadata.get('recognition_threshold')}",
                     f"# rejection_reason: {metadata.get('recognition_reason')}",
@@ -472,11 +477,11 @@ class FileDropWorker:
                 min_duration_s=float(self._recognition_cfg.get("min_verify_speech_seconds", 1.2)),
             )
             recognition_metadata = {
-                "recognition_mode": str(self._recognition_cfg.get("mode", "me-only")).strip() or "me-only",
                 "recognition_score": _format_seconds(recognition_result.score) if recognition_result.score is not None else None,
                 "recognition_threshold": _format_seconds(recognition_result.threshold),
                 "recognition_match": bool(recognition_result.accepted),
                 "recognition_reason": recognition_result.reason,
+                "recognized_speaker": recognition_result.speaker,
             }
             if not recognition_result.accepted:
                 rejected_path = self._move_claimed(claimed_path, self.settings.rejected_dir)

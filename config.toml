@@ -106,19 +106,17 @@ save_utterance_clips = true
 utterance_clips_dir = "recordings/utterance-clips"
 
 [recognition]
-# use curated voice sample files in samples_dir as the enrolled "me" corpus
+# use speaker folders inside root_dir as the recognition corpus
 # accepted recognition passes through; non-matching speech is blocked
 # this is not diarization and not anti-spoof security
 enabled = true
-mode = "me-only"
 apply_to_microphone = true
 apply_to_files = false
 gate_wake = true
 # prefer cuda when available; falls back to cpu automatically
 device = "cuda"
 model = "ecapa_tdnn"
-samples_dir = "recognition/samples"
-profile_file = "recognition/profile.json"
+root_dir = "recognition"
 threshold_override = 0.76
 min_verify_speech_seconds = 1.2
 log_scores = true
@@ -183,6 +181,11 @@ heartbeat_seconds = 5.0
 # ── Output handlers ─────────────────────────────────────────────────────────
 # Disable if not needed or when a NATS consumer replaces them.
 # TOML booleans must be lowercase
+[output]
+# startup output mode: "draft" keeps text in buffer.txt until explicit release,
+# "cursor" types finalized text directly into the active app.
+mode = "draft"
+
 [output.file_append]
 enabled = true
 path    = "output.txt"
@@ -192,7 +195,7 @@ enabled = false
 path    = "watched.txt"
 
 [output.file_buffer]
-enabled = true
+# low-level draft-mode handler config; output.mode chooses when it is active
 path    = "buffer.txt"
 separator = ""
 clear_after_release = true
@@ -208,7 +211,7 @@ clipboard_open_retry_delay_ms = 25
 post_paste_enter_delay_ms = 400
 
 [output.type_at_cursor]
-enabled = false
+# low-level cursor-mode handler config; output.mode chooses when it is active
 # release_method:
 #   "paste_preserve_clipboard" = fast Ctrl+V path with clipboard save/restore
 #   "type_keys"                = slower simulated typing, clipboard untouched
@@ -254,25 +257,25 @@ enabled = true
 enabled = true
 words   = ["enter"] # Exact match or detected at the end of utterance, not detected in the middle.
 
-[voice_commands.type_at_cursor_toggle]
+[voice_commands.typing]
 enabled = true
 words   = ["typing"] # Detected at the start of utterance
 
 [voice_commands.rewind]
 enabled = true
-words   = ["rewind"] # Exact match only; restores last released buffer in draft-buffer mode, otherwise uses cursor revert behavior
+words   = ["rewind"] # Exact match only; undoes inside draft mode, otherwise uses cursor revert behavior
 
 [voice_commands.repeat]
 enabled = true
-words   = ["repeat"] # Exact match only; repeats last released buffer in draft-buffer mode, otherwise replays the last final cursor output
+words   = ["repeat"] # Exact match only; repeats last released buffer in draft mode, otherwise replays the last final cursor output
 
 [voice_commands.recognize]
 enabled = true
-words   = ["recognize"] # Exact match only; moves the most recent prior saved utterance clip into recognition/samples
+words   = ["recognize", "I recognize", "recognized"] # Exact match only; moves the most recent prior saved utterance clip into the first speaker folder under recognition/
 
 [voice_commands.clipboard]
 enabled = true
-words   = ["clipboard"] # Exact match only; appends current clipboard text into buffer.txt when draft-buffer mode is active
+words   = ["clipboard"] # Exact match only; appends current clipboard text into buffer.txt when draft mode is active
 
 [voice_commands.input_device_cycle]
 enabled = false
@@ -284,15 +287,15 @@ words   = ["output"] # Exact match only; same behavior as the output-device cycl
 
 [voice_commands.output_mode_default]
 enabled = true
-words   = ["default mode"] # Exact match only; selects the configured startup output mode
+words   = ["default mode"] # Exact match only; selects the configured startup mode
 
 [voice_commands.output_mode_cursor]
 enabled = true
-words   = ["cursor mode", "Courser mode", "Corsair mode", "Coarser mode"] # Exact match only; selects direct-cursor output mode
+words   = ["cursor", "Courser", "Corsair", "Coarsere", "Cool, sir"] # Exact match only; selects cursor mode
 
 [voice_commands.output_mode_draft]
 enabled = true
-words   = ["draft mode"] # Exact match only; selects draft-buffer output mode
+words   = ["draft", "The draft"] # Exact match only; selects draft mode
 
 [voice_commands.console_show]
 enabled = false
@@ -334,12 +337,12 @@ stop_words = ["sleep"]
 [hotkeys]
 sleep_toggle         = "`"         # toggles sleeping <-> working
 sleep_toggle_suppress = true       # if true, swallows the sleep_toggle key so it does not reach other apps
-typing_toggle        = "shift+f5"  # toggles type_at_cursor output
+typing_toggle        = "shift+f5"  # toggles direct cursor typing output
 input_device_cycle   = "shift+f6"  # cycles input device
 output_device_cycle  = "shift+f7"  # cycles audio feedback output device
 console_toggle       = "shift+f8"  # hides/shows the STT console so you can bring it back and Ctrl+C it
-output_mode_cycle    = "shift+f9"  # cycles runtime output mode presets without editing config.toml
-clipboard_to_buffer  = "ctrl+shift+b" # appends current clipboard text into buffer.txt when draft-buffer mode is active
+output_mode_cycle    = "shift+f9"  # cycles runtime output mode between draft and cursor
+clipboard_to_buffer  = "ctrl+shift+b" # appends current clipboard text into buffer.txt when draft mode is active
 
 # ── NATS ─────────────────────────────────────────────────────────────────────
 # Requires nats-py installed. STT works fully without NATS.

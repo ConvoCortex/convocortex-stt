@@ -227,7 +227,7 @@ def make_file_buffer(cfg: dict):
     post_paste_enter_delay_ms = max(0, int(bcfg.get("post_paste_enter_delay_ms", 140)))
     lock = threading.Lock()
     enabled_lock = threading.Lock()
-    enabled_state = [bool(bcfg.get("enabled", False))]
+    enabled_state = [False]
     undo_history = deque(maxlen=undo_history_limit) if undo_history_limit > 0 else None
     release_lock = threading.Lock()
     last_released_content = [""]
@@ -432,7 +432,7 @@ def make_type_at_cursor(cfg: dict):
 
     tcfg = cfg["output"]["type_at_cursor"]
     enabled_lock = threading.Lock()
-    enabled_state = [bool(tcfg["enabled"])]
+    enabled_state = [False]
     release_method = str(tcfg.get("release_method", "paste_preserve_clipboard")).strip().lower()
     clipboard_restore_delay_ms = max(0, int(tcfg.get("clipboard_restore_delay_ms", 1000)))
     clipboard_open_retry_count = max(1, int(tcfg.get("clipboard_open_retry_count", 8)))
@@ -546,10 +546,46 @@ def make_nats_publisher(cfg: dict):
     t = threading.Thread(target=_run_loop, daemon=True, name="nats-loop")
     t.start()
 
+    def _normalize_event_for_nats(event: dict) -> tuple[str, dict] | None:
+        etype = str(event.get("type", "system") or "system").strip()
+        if etype in {"partial", "final"}:
+            text = str(event.get("text") or "")
+            if not text.strip():
+                return None
+            payload = {
+                "type": etype,
+                "text": text,
+            }
+            if event.get("epoch") is not None:
+                payload["utterance_id"] = int(event["epoch"])
+            if event.get("t") is not None:
+                payload["utterance_s"] = float(event["t"])
+            if event.get("inference_ms") is not None:
+                payload["inference_ms"] = int(event["inference_ms"])
+            speaker = str(event.get("speaker") or "").strip()
+            if speaker:
+                payload["speaker"] = speaker
+            return etype, payload
+        if etype == "status":
+            value = str(event.get("value") or "").strip()
+            if not value:
+                return None
+            return etype, {"type": "status", "value": value}
+        if etype == "system":
+            normalized = {"type": "system"}
+            for key in ("event", "device", "mode", "models", "output_mode"):
+                if key in event:
+                    normalized[key] = event[key]
+            return etype, normalized
+        return None
+
     def nats_publisher(event: dict):
-        etype = event.get("type", "system")
+        normalized = _normalize_event_for_nats(event)
+        if normalized is None:
+            return
+        etype, payload = normalized
         subj  = f"{subject}.{etype}"
-        data  = json.dumps(event).encode()
+        data  = json.dumps(payload).encode()
         asyncio.run_coroutine_threadsafe(_publish(subj, data), loop)
 
     nats_publisher.__name__ = "nats_publisher"

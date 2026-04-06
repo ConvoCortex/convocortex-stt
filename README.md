@@ -46,7 +46,7 @@ In the simplest local workflow, the system behaves like a much better hands-free
 
 The larger point of the repo is that the transcript does not have to stop at local typing. In the intended broader workflow, the real destination is NATS. The transcript goes to the rest of your system, and that system decides what should happen next. That can mean LLMs, agents, automations, desktop actions, chat systems, calls, or anything else you wire behind it. Local cursor output and local buffer release are there because they are convenient defaults. NATS is there because this is supposed to be a speech front-end for a larger stack.
 
-Recognition makes that practical in shared spaces. You do not train a custom speaker model. You keep the clips the system already records, move the good ones into `recognition/samples/`, and let the runtime rebuild the local profile. That profile then acts as a voice-match filter, so nearby people do not casually drive your system. That is not spoof-resistant biometric security, and it is not trying to be. It is a practical answer to the daily problem that actually matters.
+Recognition makes that practical in shared spaces. You do not train a custom speaker model. You keep the clips the system already records, move the good ones into a speaker folder under `recognition/`, and let the runtime rebuild the local cache. That cache then acts as a voice-match filter, so nearby people do not casually drive your system. That is not spoof-resistant biometric security, and it is not trying to be. It is a practical answer to the daily problem that actually matters.
 
 The result is a system that can work as plain local STT, as a draft buffer, as a direct cursor tool, as a file-drop transcription worker, or as a voice interface for a much larger automation stack. The point is not just "speech to text." The point is software that can stay there, listen when allowed, ignore what should be ignored, and let speech drive things without constant manual handling.
 
@@ -111,7 +111,7 @@ The default `hotkeys.console_toggle = "shift+f8"` hides/shows that same console 
 
 ## Recommended workflow
 
-The intended workflow is `draft-buffer`.
+The intended workflow is `draft`.
 
 Keep [`buffer.txt`](buffer.txt) open in an editor such as VS Code, speak naturally into the buffer, adjust the text if needed, and then say `buffer` or  `enter` when you want to release the buffer into the active app and submit it.
 
@@ -121,7 +121,7 @@ That gives you a practical loop:
 - say `buffer` to paste the buffer
 - or say `enter` to paste the buffer and press Enter
 
-If you want immediate direct typing instead, switch to `direct-cursor` mode at runtime with the output-mode hotkey or the exact voice command `cursor mode`.
+If you want immediate direct typing instead, switch to `cursor` mode at runtime with the output-mode hotkey or the exact voice command `cursor mode`.
 
 For offline or long-recording work, the repo now also supports a file-drop loop:
 - put audio files into `files/speech/`
@@ -312,18 +312,18 @@ The repo can optionally run a voice-match recognition filter:
 
 This is not diarization and not spoof-resistant identity security. It is a practical voice-match filter so the system does not respond to nearby voices that do not match the curated corpus.
 
-The recognition profile is local-only and stored in `recognition.profile_file`, while the source-of-truth voice corpus lives in `recognition.samples_dir`.
+Recognition is built from speaker folders under `recognition.root_dir`, and the derived local cache is stored in `recognition/cache.json`.
 
 The practical recognition workflow is now:
 - turn on `recording.save_utterance_clips = true`
 - let the app save normal pause-chunked microphone recordings into `recordings/utterance-clips/`
-- copy or move only the good short clips into `recognition/samples/`
-- startup rebuilds `recognition/profile.json` once if those recordings changed
+- copy or move only the good short clips into the right speaker folder under `recognition/`
+- startup rebuilds `recognition/cache.json` once if those recordings changed
 - live microphone STT and file-drop use that built profile when enabled
 
 The raw recordings folder and the recognition corpus should be treated as different things:
 - `recordings/utterance-clips/` = raw intake
-- `recognition/samples/` = curated recognition corpus
+- `recognition/<speaker>/` = curated recognition corpus for that speaker
 
 There is no guided recognition setup wizard in the active workflow anymore.
 
@@ -333,8 +333,8 @@ There is no guided recognition setup wizard in the active workflow anymore.
 
 The repo currently has two output workflows that make sense as first-class sets:
 
-- `draft-buffer`: the recommended mode. Keep a visible working buffer, then explicitly release it. Typical loop is `clear`, speak, edit if needed, `enter`.
-- `direct-cursor`: finalized text types into the active app immediately. Buffering and clipboard mirroring are off.
+- `draft`: the recommended mode. Keep a visible working buffer, then explicitly release it. Typical loop is `clear`, speak, edit if needed, `enter`.
+- `cursor`: finalized text types into the active app immediately. Buffering and clipboard mirroring are off.
 
 Those focused presets are provided as small snippets under `presets/output-modes/`. They describe the built-in runtime output modes.
 
@@ -343,14 +343,14 @@ At runtime, output mode is treated as runtime state, not as a config rewrite. St
 - exact voice commands `default mode`, `cursor mode`, and `draft mode` select output modes directly
 
 Startup behavior:
-- `output_mode` starts from the config-defined default (`direct-cursor` or `draft-buffer`)
+- `output.mode` selects the startup output mode (`cursor` or `draft`)
 - input startup comes from `audio.input_device` when set, otherwise OS/default-profile fallback
 - output startup comes from `feedback.output_device` when set, otherwise OS default output
 - runtime state is kept in memory only and does not control startup behavior
 
 The built-in runtime modes are:
-- `direct-cursor`
-- `draft-buffer`
+- `cursor`
+- `draft`
 
 ### Rewind And Repeat
 
@@ -362,11 +362,11 @@ Relevant settings:
 - `output.type_at_cursor.revert_mode`: `ctrl+z`, `backspace`, or `off`
 - `output.type_at_cursor.revert_backspace_count`: number of backspaces to send when using `backspace` mode
 
-This is intentionally app-dependent. `ctrl+z` works in many GUI text fields, while terminals and some apps may require `backspace` mode or `off`. In `draft-buffer` mode, `rewind` restores the last released buffer into the current buffer and also sends the configured cursor revert action. `repeat` re-sends the last released buffer without requiring it to still be present in `buffer.txt`.
+This is intentionally app-dependent. `ctrl+z` works in many GUI text fields, while terminals and some apps may require `backspace` mode or `off`. In `draft` mode, `rewind` stays inside the buffer workflow, while `repeat` re-sends the last released buffer without requiring it to still be present in `buffer.txt`.
 
 ### File buffer workflow
 
-If `output.file_buffer.enabled = true`, each final transcription is appended to `output.file_buffer.path`.
+In `draft` mode, each final transcription is appended to `output.file_buffer.path`.
 
 This gives you a plain text working buffer you can keep open in an editor, adjust manually, and then inject into the active cursor later with an exact voice command such as `buffer` or `enter`.
 
@@ -379,10 +379,10 @@ Relevant settings:
 - `output.file_buffer.clipboard_restore_delay_ms`: how long to wait after paste before restoring clipboard contents
 - `output.file_buffer.clipboard_open_retry_count` / `output.file_buffer.clipboard_open_retry_delay_ms`: retry behavior for busy clipboard cases
 - `output.file_buffer.post_paste_enter_delay_ms`: brief wait between paste and Enter when a buffer release also submits
-- `voice_commands.buffer_release.words`: exact phrases that trigger buffer release, and are also recognized at the end of an utterance while draft-buffer mode is active
+- `voice_commands.buffer_release.words`: exact phrases that trigger buffer release, and are also recognized at the end of an utterance while draft mode is active
 - `voice_commands.buffer_clear.words`: exact phrases that clear the buffer without typing it
 
-If the file buffer is active, the built-in exact voice command `enter` releases the current buffer and then presses Enter. This makes `draft-buffer` practical for chat boxes, terminals, and other submit-oriented text fields.
+If the file buffer is active, the built-in exact voice command `enter` releases the current buffer and then presses Enter. This makes `draft` practical for chat boxes, terminals, and other submit-oriented text fields.
 
 The default history cap is `10` buffer states and is not persisted across restarts.
 
@@ -432,7 +432,7 @@ That keeps the STT stack coherent while still exposing a real acceleration surfa
 
 ### Direct cursor output
 
-`direct-cursor` mode can also emit text in two ways:
+`cursor` mode can also emit text in two ways:
 - `output.type_at_cursor.release_method = "paste_preserve_clipboard"`: paste via clipboard and restore the previous clipboard contents afterward
 - `output.type_at_cursor.release_method = "type_keys"`: simulated typing without touching the clipboard
 
@@ -472,13 +472,13 @@ NATS is intended as the integration boundary to a larger app:
 ### Event schema
 
 ```json
-{"type": "partial", "text": "like I can just be", "epoch": 4, "t": 1.23, "inference_ms": 140}
-{"type": "final",   "text": "like I can just be ranting", "epoch": 4, "t": 2.81, "inference_ms": 340}
+{"type": "partial", "text": "like I can just be", "utterance_id": 4, "utterance_s": 1.23, "inference_ms": 140, "speaker": "speaker-1"}
+{"type": "final",   "text": "like I can just be ranting", "utterance_id": 4, "utterance_s": 2.81, "inference_ms": 340, "speaker": "speaker-1"}
 {"type": "status",  "value": "recording"}
 {"type": "status",  "value": "idle"}
 {"type": "status",  "value": "sleeping"}
 {"type": "status",  "value": "working"}
-{"type": "system",  "event": "startup", "device": "Microphone (USB)", "models": {"final": "large-v3-turbo", "final_backend": "faster-whisper", "realtime": "tiny.en", "realtime_backend": "faster-whisper"}}
+{"type": "system",  "event": "startup", "device": "Microphone (USB)", "models": {"final": "large-v3-turbo", "final_backend": "faster-whisper", "realtime": "tiny.en", "realtime_backend": "faster-whisper"}, "output_mode": "draft"}
 {"type": "system",  "event": "device_changed", "device": "Microphone (USB)"}
 {"type": "system",  "event": "output_device_changed", "device": "Speakers (USB)"}
 {"type": "system",  "event": "shutdown"}
