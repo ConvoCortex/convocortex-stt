@@ -3567,6 +3567,7 @@ def main(args=None):
     wake_verify_buffer: list[np.ndarray] = []
     wake_verify_started_at = 0.0
 
+    logger.info("STT Ready!")
     dispatch({"type": "system", "event": "startup",
               "device": dev_name,
               "models": {
@@ -3577,8 +3578,6 @@ def main(args=None):
               },
               "output_mode": output_mode_state["name"]})
     dispatch({"type": "status", "value": "sleeping" if mode_state["sleeping"] else "working"})
-    print("STT Ready!")
-    sys.stdout.flush()
     feedback.play_startup()
 
     def reset_active_utterance(reason: str):
