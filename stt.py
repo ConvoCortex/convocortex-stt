@@ -245,6 +245,12 @@ def _setup_logging():
     logging.getLogger("ctranslate2").setLevel(fw_level)
     logging.getLogger("nemo").setLevel(fw_level)
     logging.getLogger("lightning").setLevel(fw_level)
+    for noisy_name in ("nats", "nats.aio", "nats.aio.client", "nats.aio.transport"):
+        noisy_logger = logging.getLogger(noisy_name)
+        noisy_logger.handlers.clear()
+        noisy_logger.addHandler(logging.NullHandler())
+        noisy_logger.setLevel(logging.CRITICAL)
+        noisy_logger.propagate = False
 
     configured_logger = logging.getLogger("STT")
     if DEBUG_LOGGING_ENABLED:
@@ -3267,9 +3273,16 @@ def main(args=None):
 
         import asyncio
         import json
+        import logging
 
         url     = cfg["nats"]["url"]
         subject = cfg["nats"]["subject_control"]
+        for noisy_name in ("nats", "nats.aio", "nats.aio.client", "nats.aio.transport"):
+            noisy_logger = logging.getLogger(noisy_name)
+            noisy_logger.handlers.clear()
+            noisy_logger.addHandler(logging.NullHandler())
+            noisy_logger.setLevel(logging.CRITICAL)
+            noisy_logger.propagate = False
 
         async def _run():
             try:

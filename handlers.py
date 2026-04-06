@@ -574,6 +574,7 @@ def make_nats_publisher(cfg: dict):
 
     import asyncio
     import json
+    import logging
 
     ncfg    = cfg["nats"]
     url     = ncfg["url"]
@@ -581,17 +582,38 @@ def make_nats_publisher(cfg: dict):
 
     loop   = asyncio.new_event_loop()
     nc_ref = [None]
+    warned_unavailable = [False]
+    for noisy_name in ("nats", "nats.aio", "nats.aio.client", "nats.aio.transport"):
+        noisy_logger = logging.getLogger(noisy_name)
+        noisy_logger.handlers.clear()
+        noisy_logger.addHandler(logging.NullHandler())
+        noisy_logger.setLevel(logging.CRITICAL)
+        noisy_logger.propagate = False
 
     async def _connect():
         try:
             nc_ref[0] = await nats.connect(url)
+            warned_unavailable[0] = False
             logger.info(f"[nats] Connected to {url}")
         except Exception as e:
-            logger.warning(f"[nats] Could not connect to {url}: {e}")
+            nc_ref[0] = None
+            if not warned_unavailable[0]:
+                logger.warning(f"[nats] Could not connect to {url}: {e}")
+                warned_unavailable[0] = True
 
     async def _publish(subj: str, data: bytes):
-        if nc_ref[0] and nc_ref[0].is_connected:
-            await nc_ref[0].publish(subj, data)
+        try:
+            if nc_ref[0] and nc_ref[0].is_connected:
+                await nc_ref[0].publish(subj, data)
+                return
+            await _connect()
+            if nc_ref[0] and nc_ref[0].is_connected:
+                await nc_ref[0].publish(subj, data)
+        except Exception as e:
+            nc_ref[0] = None
+            if not warned_unavailable[0]:
+                logger.warning(f"[nats] Could not connect to {url}: {e}")
+                warned_unavailable[0] = True
 
     def _run_loop():
         asyncio.set_event_loop(loop)

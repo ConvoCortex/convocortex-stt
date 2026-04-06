@@ -487,10 +487,9 @@ internal static class Program
             {
                 var psi = new ProcessStartInfo
                 {
-                    FileName = "cmd.exe",
-                    Arguments = "/c start \"\" wt.exe " + arguments,
-                    UseShellExecute = false,
-                    CreateNoWindow = true,
+                    FileName = "wt.exe",
+                    Arguments = arguments,
+                    UseShellExecute = true,
                     WorkingDirectory = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
                 };
                 Process.Start(psi);
