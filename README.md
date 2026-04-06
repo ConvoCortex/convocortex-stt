@@ -15,10 +15,10 @@ It is built for daily hands-free use rather than one-shot dictation: wake/sleep 
 - Roaming and leave-home use by reconnecting the phone-side Mumble client while the PC runtime stays alive
 - Recommended Parakeet pipeline with optional `faster-whisper`, `parakeet-cuda`, and `parakeet-tensorrt` backends
 - Shared realtime/final backend reuse when both sides use the same model/backend
-- Draft-buffer workflow for reviewable text before release
-- Direct-cursor workflow for immediate local output
-- Local output handlers for append file, overwrite file, buffer accumulate/release, and type-at-cursor
-- Exact voice commands for mode switching, buffer release/clear, enter, rewind/repeat, device cycling, sleep, and console control
+- Draft workflow for reviewable text before release
+- Cursor workflow for immediate local output
+- Local output handlers for append file, overwrite file, buffer accumulate/release, type-at-cursor, and NATS-only full-buffer release
+- Exact voice commands for mode switching, buffer release/clear, NATS buffer release, enter, rewind/repeat, device cycling, sleep, and console control
 - Hotkeys for the same dominant runtime controls when speech is not the right control surface
 - Voice-match recognition from curated local samples for microphone STT and optional file-drop filtering
 - Recognition-gated wake transitions when enabled
@@ -178,7 +178,7 @@ Built-in voice commands are intentionally minimal and convenience-oriented.
 
 Built-in command types:
 - sleep/stop words
-- type-at-cursor toggle words
+- typing toggle words
 - rewind/repeat words
 - input device cycle words
 - output device cycle words
@@ -312,18 +312,20 @@ The repo can optionally run a voice-match recognition filter:
 
 This is not diarization and not spoof-resistant identity security. It is a practical voice-match filter so the system does not respond to nearby voices that do not match the curated corpus.
 
-Recognition is built from speaker folders under `recognition.root_dir`, and the derived local cache is stored in `recognition/cache.json`.
+Recognition is built from speaker folders under `recognition.root_dir`, and the derived local cache is stored in `cache.json` inside the active recognition corpus root.
 
 The practical recognition workflow is now:
 - turn on `recording.save_utterance_clips = true`
 - let the app save normal pause-chunked microphone recordings into `recordings/utterance-clips/`
 - copy or move only the good short clips into the right speaker folder under `recognition/`
-- startup rebuilds `recognition/cache.json` once if those recordings changed
+- startup rebuilds the active `cache.json` once if those recordings changed
 - live microphone STT and file-drop use that built profile when enabled
 
 The raw recordings folder and the recognition corpus should be treated as different things:
 - `recordings/utterance-clips/` = raw intake
 - `recognition/<speaker>/` = curated recognition corpus for that speaker
+
+If `recognition.scope_by_input_device = true`, microphone recognition first looks for a device-specific corpus under `recognition/by-input-device/<device-slug>/` and falls back to `recognition/` if that device-specific root has no speaker folders. That lets the same person keep separate corpora for materially different microphone paths such as phone mic vs headset hands-free mic.
 
 There is no guided recognition setup wizard in the active workflow anymore.
 
@@ -331,19 +333,24 @@ There is no guided recognition setup wizard in the active workflow anymore.
 
 ### Output workflow sets
 
-The repo currently has two output workflows that make sense as first-class sets:
+The repo currently has three output workflows that make sense as first-class sets:
 
 - `draft`: the recommended mode. Keep a visible working buffer, then explicitly release it. Typical loop is `clear`, speak, edit if needed, `enter`.
 - `cursor`: finalized text types into the active app immediately. Buffering and clipboard mirroring are off.
+- `nats`: keep the visible working buffer locally, but do not emit per-utterance finals to NATS. Only explicit buffer release emits the whole buffer over NATS.
 
-Those focused presets are provided as small snippets under `presets/output-modes/`. They describe the built-in runtime output modes.
+The focused presets under `presets/output-modes/` cover the built-in local workflows:
+- `presets/output-modes/draft.toml`
+- `presets/output-modes/cursor.toml`
+
+`nats` follows the same runtime-mode structure even if you configure it directly in `config.toml`.
 
 At runtime, output mode is treated as runtime state, not as a config rewrite. Startup always comes from `config.toml`:
 - hotkey `shift+f9` cycles output modes
-- exact voice commands `default mode`, `cursor mode`, and `draft mode` select output modes directly
+- exact voice commands `default mode`, `cursor mode`, `draft mode`, and `nats mode` select output modes directly
 
 Startup behavior:
-- `output.mode` selects the startup output mode (`cursor` or `draft`)
+- `output.mode` selects the startup output mode (`cursor`, `draft`, or `nats`)
 - input startup comes from `audio.input_device` when set, otherwise OS/default-profile fallback
 - output startup comes from `feedback.output_device` when set, otherwise OS default output
 - runtime state is kept in memory only and does not control startup behavior
@@ -351,6 +358,7 @@ Startup behavior:
 The built-in runtime modes are:
 - `cursor`
 - `draft`
+- `nats`
 
 ### Rewind And Repeat
 
@@ -374,15 +382,18 @@ Relevant settings:
 - `output.file_buffer.separator`: separator inserted between finalized utterances
 - `output.file_buffer.clear_after_release`: clear the file after the `buffer` command releases it
 - `output.file_buffer.reset_after_each_message`: clear the existing buffer before writing each new finalized utterance
-- `output.file_buffer.undo_history_limit`: in-memory cap for one-step-at-a-time internal buffer history entries
+- `output.file_buffer.rewind_history_limit`: in-memory cap for one-step-at-a-time rewind history entries
 - `output.file_buffer.release_method`: `paste_preserve_clipboard` for fast paste with clipboard restore, or `type_keys` for the older direct typing path
 - `output.file_buffer.clipboard_restore_delay_ms`: how long to wait after paste before restoring clipboard contents
 - `output.file_buffer.clipboard_open_retry_count` / `output.file_buffer.clipboard_open_retry_delay_ms`: retry behavior for busy clipboard cases
 - `output.file_buffer.post_paste_enter_delay_ms`: brief wait between paste and Enter when a buffer release also submits
 - `voice_commands.buffer_release.words`: exact phrases that trigger buffer release, and are also recognized at the end of an utterance while draft mode is active
+- `voice_commands.nats_release.words`: exact phrases that release the current full buffer over NATS without local paste, and are also recognized at the end of an utterance while the buffer is active
 - `voice_commands.buffer_clear.words`: exact phrases that clear the buffer without typing it
 
 If the file buffer is active, the built-in exact voice command `enter` releases the current buffer and then presses Enter. This makes `draft` practical for chat boxes, terminals, and other submit-oriented text fields.
+
+In `nats` mode, per-utterance finals still accumulate into the local buffer, but they are suppressed from NATS. Saying `buffer`, `enter`, or `nats` releases the full current buffer as a dedicated NATS event instead of pasting locally. `enter` marks that release with `submit = true` so downstream consumers can distinguish a plain release from a release-and-submit intent.
 
 The default history cap is `10` buffer states and is not persisted across restarts.
 
@@ -474,6 +485,7 @@ NATS is intended as the integration boundary to a larger app:
 ```json
 {"type": "partial", "text": "like I can just be", "utterance_id": 4, "utterance_s": 1.23, "inference_ms": 140, "speaker": "speaker-1"}
 {"type": "final",   "text": "like I can just be ranting", "utterance_id": 4, "utterance_s": 2.81, "inference_ms": 340, "speaker": "speaker-1"}
+{"type": "buffer_released", "text": "full buffered text", "utterance_id": 4, "utterance_s": 2.81, "inference_ms": 340, "speaker": "speaker-1", "output_mode": "nats", "submit": true}
 {"type": "status",  "value": "recording"}
 {"type": "status",  "value": "idle"}
 {"type": "status",  "value": "sleeping"}

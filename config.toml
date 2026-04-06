@@ -117,6 +117,9 @@ gate_wake = true
 device = "cuda"
 model = "ecapa_tdnn"
 root_dir = "recognition"
+# when true, microphone recognition uses recognition/by-input-device/<device-slug>/ as the first corpus root
+# and falls back to recognition/ if that device-specific root has no speaker folders
+scope_by_input_device = true
 threshold_override = 0.76
 min_verify_speech_seconds = 1.2
 log_scores = true
@@ -183,7 +186,8 @@ heartbeat_seconds = 5.0
 # TOML booleans must be lowercase
 [output]
 # startup output mode: "draft" keeps text in buffer.txt until explicit release,
-# "cursor" types finalized text directly into the active app.
+# "cursor" types finalized text directly into the active app,
+# "nats" buffers locally but only emits the full released buffer over NATS.
 mode = "draft"
 
 [output.file_append]
@@ -200,7 +204,7 @@ path    = "buffer.txt"
 separator = ""
 clear_after_release = true
 reset_after_each_message = false
-undo_history_limit = 10
+rewind_history_limit = 10
 # release_method:
 #   "paste_preserve_clipboard" = fast Ctrl+V path with clipboard save/restore
 #   "type_keys"                = slower simulated typing, clipboard untouched
@@ -275,10 +279,10 @@ words   = ["recognize", "I recognize", "recognized"] # Exact match only; moves t
 
 [voice_commands.clipboard]
 enabled = true
-words   = ["clipboard"] # Exact match only; appends current clipboard text into buffer.txt when draft mode is active
+words   = ["clipboard", "Clip barred", "Blipboard"] # Exact match only; appends current clipboard text into buffer.txt when draft mode is active
 
 [voice_commands.input_device_cycle]
-enabled = false
+enabled = true
 words   = ["input"] # Exact match only; same behavior as the input-device cycle hotkey
 
 [voice_commands.output_device_cycle]
@@ -297,6 +301,10 @@ words   = ["cursor", "Courser", "Corsair", "Coarsere", "Cool, sir"] # Exact matc
 enabled = true
 words   = ["draft", "The draft"] # Exact match only; selects draft mode
 
+[voice_commands.output_mode_nats]
+enabled = true
+words   = ["nats mode"] # Exact match only; selects nats mode
+
 [voice_commands.console_show]
 enabled = false
 words   = ["show"] # Exact match only; shows the STT console, same target as shift+f8
@@ -308,6 +316,10 @@ words   = ["hide"] # Exact match only; hides the STT console, same target as shi
 [voice_commands.buffer_release]
 enabled = true
 words   = ["buffer", "baser", "buzzer"]
+
+[voice_commands.nats_release]
+enabled = true
+words   = ["nats"] # Exact match or utterance-end command; releases the full current buffer as a NATS event without local paste
 
 [voice_commands.buffer_clear]
 enabled = true
@@ -341,15 +353,15 @@ typing_toggle        = "shift+f5"  # toggles direct cursor typing output
 input_device_cycle   = "shift+f6"  # cycles input device
 output_device_cycle  = "shift+f7"  # cycles audio feedback output device
 console_toggle       = "shift+f8"  # hides/shows the STT console so you can bring it back and Ctrl+C it
-output_mode_cycle    = "shift+f9"  # cycles runtime output mode between draft and cursor
+output_mode_cycle    = "shift+f9"  # cycles runtime output mode between draft, cursor, and nats
 clipboard_to_buffer  = "ctrl+shift+b" # appends current clipboard text into buffer.txt when draft mode is active
 
 # ── NATS ─────────────────────────────────────────────────────────────────────
 # Requires nats-py installed. STT works fully without NATS.
 
 [nats]
-enabled         = false
+enabled         = true
 url             = "nats://localhost:4222"
-subject_emit    = "stt"
-subject_control = "stt.control"
+subject_emit    = "convocortex.stt"
+subject_control = "convocortex.stt.control"
 

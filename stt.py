@@ -95,6 +95,8 @@ def _bootstrap_owned_console():
 
 _bootstrap_owned_console()
 
+LAUNCHER_OWNS_TRAY = os.environ.get("CONVOCORTEX_DISABLE_INTERNAL_TRAY", "").strip() == "1"
+
 
 def _normalize_command_phrase(value: str) -> str:
     return str(value).strip().lower().strip(".,!?;:")
@@ -653,7 +655,7 @@ RECOGNITION_GATE_WAKE = bool(_recognition_cfg.get("gate_wake", True))
 RECOGNITION_DEVICE = str(_recognition_cfg.get("device", "cuda")).strip().lower() or "cuda"
 RECOGNITION_MODEL = str(_recognition_cfg.get("model", "ecapa_tdnn")).strip() or "ecapa_tdnn"
 RECOGNITION_ROOT_DIR = Path(_resolve_repo_path(_recognition_cfg.get("root_dir", "recognition")))
-RECOGNITION_CACHE_FILE = RECOGNITION_ROOT_DIR / "cache.json"
+RECOGNITION_SCOPE_BY_INPUT_DEVICE = bool(_recognition_cfg.get("scope_by_input_device", False))
 RECOGNITION_THRESHOLD_OVERRIDE = _optional_float(_recognition_cfg.get("threshold_override"))
 RECOGNITION_MIN_VERIFY_SPEECH_SECONDS = float(_recognition_cfg.get("min_verify_speech_seconds", 1.2))
 RECOGNITION_LOG_SCORES = bool(_recognition_cfg.get("log_scores", False))
@@ -791,6 +793,8 @@ OUTPUT_MODE_CURSOR_COMMAND_WORDS = _voice_command_words("output_mode_cursor")
 OUTPUT_MODE_CURSOR_COMMAND_ENABLED = _voice_command_enabled("output_mode_cursor")
 OUTPUT_MODE_DRAFT_COMMAND_WORDS = _voice_command_words("output_mode_draft")
 OUTPUT_MODE_DRAFT_COMMAND_ENABLED = _voice_command_enabled("output_mode_draft")
+OUTPUT_MODE_NATS_COMMAND_WORDS = _voice_command_words("output_mode_nats")
+OUTPUT_MODE_NATS_COMMAND_ENABLED = _voice_command_enabled("output_mode_nats")
 CONSOLE_SHOW_COMMAND_WORDS = _voice_command_words("console_show")
 CONSOLE_SHOW_COMMAND_ENABLED = _voice_command_enabled("console_show")
 CONSOLE_HIDE_COMMAND_WORDS = _voice_command_words("console_hide")
@@ -799,6 +803,8 @@ BUFFER_RELEASE_COMMAND_WORDS = _voice_command_words("buffer_release")
 BUFFER_RELEASE_COMMAND_ENABLED = _voice_command_enabled("buffer_release")
 BUFFER_CLEAR_COMMAND_WORDS = _voice_command_words("buffer_clear")
 BUFFER_CLEAR_COMMAND_ENABLED = _voice_command_enabled("buffer_clear")
+NATS_RELEASE_COMMAND_WORDS = _voice_command_words("nats_release")
+NATS_RELEASE_COMMAND_ENABLED = _voice_command_enabled("nats_release")
 REVERT_COMMAND_WORDS_EXACT = REVERT_COMMAND_WORDS
 REPEAT_COMMAND_WORDS_EXACT = REPEAT_COMMAND_WORDS
 RECOGNIZE_COMMAND_WORDS_EXACT = RECOGNIZE_COMMAND_WORDS
@@ -808,21 +814,23 @@ OUTPUT_DEVICE_CYCLE_COMMAND_WORDS_EXACT = OUTPUT_DEVICE_CYCLE_COMMAND_WORDS
 OUTPUT_MODE_DEFAULT_COMMAND_WORDS_EXACT = OUTPUT_MODE_DEFAULT_COMMAND_WORDS
 OUTPUT_MODE_CURSOR_COMMAND_WORDS_EXACT = OUTPUT_MODE_CURSOR_COMMAND_WORDS
 OUTPUT_MODE_DRAFT_COMMAND_WORDS_EXACT = OUTPUT_MODE_DRAFT_COMMAND_WORDS
+OUTPUT_MODE_NATS_COMMAND_WORDS_EXACT = OUTPUT_MODE_NATS_COMMAND_WORDS
 CONSOLE_SHOW_COMMAND_WORDS_EXACT = CONSOLE_SHOW_COMMAND_WORDS
 CONSOLE_HIDE_COMMAND_WORDS_EXACT = CONSOLE_HIDE_COMMAND_WORDS
 BUFFER_RELEASE_COMMAND_WORDS_EXACT = BUFFER_RELEASE_COMMAND_WORDS
 BUFFER_CLEAR_COMMAND_WORDS_EXACT = BUFFER_CLEAR_COMMAND_WORDS
+NATS_RELEASE_COMMAND_WORDS_EXACT = NATS_RELEASE_COMMAND_WORDS
 
 OUTPUT_MODE_ALIASES = {
     "cursor": "cursor",
-    "direct-cursor": "cursor",
     "draft": "draft",
-    "draft-buffer": "draft",
+    "nats": "nats",
 }
 
 OUTPUT_MODE_NAMES = [
     "cursor",
     "draft",
+    "nats",
 ]
 
 def _clamp_volume(v: float) -> float:
@@ -1149,6 +1157,38 @@ def _recognition_speaker_paths(root_dir: Path) -> dict[str, list[Path]]:
     return discover_speaker_samples(root_dir)
 
 
+def _slugify_recognition_device(name: str, host_api) -> str:
+    label = str(name or "").strip().lower()
+    label = re.sub(r"[^a-z0-9]+", "-", label).strip("-")
+    if not label:
+        label = "device"
+    host_part = ""
+    if host_api is not None:
+        host_part = re.sub(r"[^a-z0-9]+", "-", str(host_api).strip().lower()).strip("-")
+    return f"{label}-{host_part}" if host_part else label
+
+
+def _recognition_root_candidates(device_name: str | None = None, host_api=None) -> list[Path]:
+    candidates: list[Path] = []
+    if RECOGNITION_SCOPE_BY_INPUT_DEVICE and device_name:
+        device_slug = _slugify_recognition_device(device_name, host_api)
+        candidates.append(RECOGNITION_ROOT_DIR / "by-input-device" / device_slug)
+    candidates.append(RECOGNITION_ROOT_DIR)
+    seen: set[str] = set()
+    unique: list[Path] = []
+    for candidate in candidates:
+        key = str(candidate.resolve()) if candidate.exists() else str(candidate)
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(candidate)
+    return unique
+
+
+def _recognition_cache_file(root_dir: Path) -> Path:
+    return root_dir / "cache.json"
+
+
 def _recognition_default_speaker_dir(root_dir: Path) -> Path:
     speaker_paths = _recognition_speaker_paths(root_dir)
     if speaker_paths:
@@ -1157,20 +1197,38 @@ def _recognition_default_speaker_dir(root_dir: Path) -> Path:
     return root_dir / "speaker-1"
 
 
-def _ensure_recognition_profile() -> bool:
+def _recognition_active_root(device_name: str | None = None, host_api=None) -> Path | None:
+    for root_dir in _recognition_root_candidates(device_name, host_api):
+        if _recognition_speaker_paths(root_dir):
+            return root_dir
+    return None
+
+
+_recognition_logged_profiles: set[tuple[str, int, int]] = set()
+
+
+def _ensure_recognition_profile(root_dir: Path | None = None, *, device_name: str | None = None, host_api=None) -> bool:
     if not RECOGNITION_ENABLED:
         return False
-    speaker_paths = _recognition_speaker_paths(RECOGNITION_ROOT_DIR)
+    active_root = root_dir or _recognition_active_root(device_name, host_api)
+    if active_root is None:
+        logger.warning(
+            "[recognition] enabled but no speaker folders with sample files were found under %s",
+            RECOGNITION_ROOT_DIR,
+        )
+        return False
+    cache_file = _recognition_cache_file(active_root)
+    speaker_paths = _recognition_speaker_paths(active_root)
     speaker_count = len(speaker_paths)
     sample_count = sum(len(paths) for paths in speaker_paths.values())
     if not speaker_paths:
         logger.warning(
             "[recognition] enabled but no speaker folders with sample files were found in %s; recognition will stay inactive",
-            RECOGNITION_ROOT_DIR,
+            active_root,
         )
         return False
     engine = RecognitionEngine(
-        profile_path=RECOGNITION_CACHE_FILE,
+        profile_path=cache_file,
         model_name=RECOGNITION_MODEL,
         requested_device=RECOGNITION_DEVICE,
         sample_rate=RATE,
@@ -1178,25 +1236,28 @@ def _ensure_recognition_profile() -> bool:
     )
     rebuild_required = not engine.profile_matches_corpus(speaker_paths)
     if rebuild_required:
-        logger.info(
-            "[recognition] rebuilding cache from %s speaker folder(s), %s sample file(s) in %s",
-            speaker_count,
-            sample_count,
-            RECOGNITION_ROOT_DIR,
-        )
         profile = engine.build_profile_from_speakers(speaker_paths)
-        RECOGNITION_CACHE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        cache_file.parent.mkdir(parents=True, exist_ok=True)
         engine.save_profile(profile)
-    else:
+    engine.ensure_ready(load_profile=True)
+    try:
+        cache_stamp = int(cache_file.stat().st_mtime_ns)
+    except Exception:
+        cache_stamp = 0
+    log_key = (str(cache_file), sample_count, cache_stamp)
+    should_log_profile = log_key not in _recognition_logged_profiles
+    if should_log_profile:
+        _recognition_logged_profiles.add(log_key)
         logger.info(
-            "[recognition] reusing existing cache from %s for %s speaker folder(s), %s sample file(s)",
-            RECOGNITION_CACHE_FILE,
+            "[recognition] ready cache=%s action=%s speakers=%s samples=%s root=%s",
+            cache_file,
+            "rebuilt" if rebuild_required else "reused",
             speaker_count,
             sample_count,
+            active_root,
         )
-    engine.ensure_ready(load_profile=True)
-    for line in engine.startup_logs():
-        logger.info(f"[recognition] {line}")
+        for line in engine.startup_logs():
+            logger.info(f"[recognition] {line}")
     profile_payload = engine.load_profile()
     speakers = dict(profile_payload.get("speakers") or {})
     for speaker_name in sorted(speakers.keys(), key=str.lower):
@@ -1204,29 +1265,30 @@ def _ensure_recognition_profile() -> bool:
         sample_entries = list(speaker_data.get("samples") or [])
         if not sample_entries:
             continue
-        logger.info(
-            "[recognition] speaker=%s self-scores min=%s p10=%s avg=%s max=%s threshold=%s source=%s",
-            speaker_name,
-            speaker_data.get("corpus_self_score_min"),
-            speaker_data.get("corpus_self_score_p10"),
-            speaker_data.get("corpus_self_score_avg"),
-            speaker_data.get("corpus_self_score_max"),
-            speaker_data.get("active_threshold"),
-            speaker_data.get("threshold_source"),
-        )
-        if RECOGNITION_LOG_SCORES:
-            ranked_entries = sorted(
-                sample_entries,
-                key=lambda entry: float(entry.get("self_score")) if entry.get("self_score") is not None else float("inf"),
+        if should_log_profile:
+            logger.info(
+                "[recognition] speaker=%s self-scores min=%s p10=%s avg=%s max=%s threshold=%s source=%s",
+                speaker_name,
+                speaker_data.get("corpus_self_score_min"),
+                speaker_data.get("corpus_self_score_p10"),
+                speaker_data.get("corpus_self_score_avg"),
+                speaker_data.get("corpus_self_score_max"),
+                speaker_data.get("active_threshold"),
+                speaker_data.get("threshold_source"),
             )
-            for entry in ranked_entries:
-                logger.info(
-                    "[recognition] speaker=%s sample score=%s duration=%ss path=%s",
-                    speaker_name,
-                    entry.get("self_score"),
-                    entry.get("duration_s"),
-                    entry.get("path"),
+            if RECOGNITION_LOG_SCORES:
+                ranked_entries = sorted(
+                    sample_entries,
+                    key=lambda entry: float(entry.get("self_score")) if entry.get("self_score") is not None else float("inf"),
                 )
+                for entry in ranked_entries:
+                    logger.info(
+                        "[recognition] speaker=%s sample score=%s duration=%ss path=%s",
+                        speaker_name,
+                        entry.get("self_score"),
+                        entry.get("duration_s"),
+                        entry.get("path"),
+                    )
     return rebuild_required
 
 
@@ -1260,8 +1322,10 @@ def _save_utterance_clip(epoch: int, audio_chunks: list[np.ndarray], *, started_
 # ── Event dispatch ────────────────────────────────────────────────────────────
 # Handlers are registered at startup. Each receives every event dict.
 # Schema:
+# Internal dispatch event shape:
 #   {"type": "partial", "text": str, "epoch": int, "t": float, "inference_ms": int}
-#   {"type": "final",   "text": str, "epoch": int, "t": float, "inference_ms": int}
+#   {"type": "final", "text": str, "epoch": int, "t": float, "inference_ms": int}
+#   {"type": "buffer_released", "text": str, "epoch": int, "t": float, "inference_ms": int, "submit": bool}
 #   {"type": "status",  "value": str}   # "recording" | "idle" | "sleeping" | "working"
 #   {"type": "system",  "event": str, ...extra}
 
@@ -1638,63 +1702,66 @@ def main(args=None):
     if parsed.file_drop_worker:
         from file_drop_worker import run_from_args as run_file_drop_worker
         console_controller = WindowsConsoleController()
-        tray_icon = WindowsTrayIcon(
-            console_controller,
-            tooltip="Convocortex Files STT",
-            exit_label="Exit Files STT",
-        )
-        if tray_icon.available and not tray_icon.start():
-            logger.warning("[tray] Failed to start tray icon thread.")
-        console_controller.start_minimize_to_tray()
+        tray_icon = None
+        if not LAUNCHER_OWNS_TRAY:
+            tray_icon = WindowsTrayIcon(
+                console_controller,
+                tooltip="Convocortex Files STT",
+                exit_label="Exit Files STT",
+            )
+            if tray_icon.available and not tray_icon.start():
+                logger.warning("[tray] Failed to start tray icon thread.")
+            console_controller.start_minimize_to_tray()
         try:
             if RECOGNITION_ENABLED and RECOGNITION_APPLY_TO_FILES:
                 _ensure_recognition_profile()
             return run_file_drop_worker(remaining)
         finally:
-            try:
-                console_controller.stop_minimize_to_tray()
-            except Exception:
-                pass
-            try:
-                tray_icon.stop()
-            except Exception:
-                pass
+            if not LAUNCHER_OWNS_TRAY:
+                try:
+                    console_controller.stop_minimize_to_tray()
+                except Exception:
+                    pass
+                try:
+                    tray_icon.stop()
+                except Exception:
+                    pass
 
     def _sigterm(_s, _f):
         raise KeyboardInterrupt
     signal.signal(signal.SIGTERM, _sigterm)
 
     console_controller = WindowsConsoleController()
-    tray_icon = WindowsTrayIcon(console_controller)
+    tray_icon = None if LAUNCHER_OWNS_TRAY else WindowsTrayIcon(console_controller)
     background_mode = CONSOLE_STARTUP_MODE == "background"
     interactive_startup_pending = _interactive_startup_pending()
-    if background_mode and not interactive_startup_pending:
+    if (not LAUNCHER_OWNS_TRAY) and background_mode and not interactive_startup_pending:
         if console_controller.available:
             console_controller.hide(reason="startup-init")
         else:
             logger.warning("[console] Background mode requested but no Windows console is available.")
-    elif background_mode and interactive_startup_pending:
+    elif (not LAUNCHER_OWNS_TRAY) and background_mode and interactive_startup_pending:
         logger.info("[console] Startup remains visible for interactive setup.")
-    if tray_icon.available and not tray_icon.start():
+    if tray_icon is not None and tray_icon.available and not tray_icon.start():
         logger.warning("[tray] Failed to start tray icon thread.")
-    console_controller.start_minimize_to_tray()
+    if not LAUNCHER_OWNS_TRAY:
+        console_controller.start_minimize_to_tray()
 
     start_microphone_mode = bool(START_MICROPHONE_MODE)
     start_files_mode = bool(START_FILES_MODE)
     if not start_microphone_mode and not start_files_mode:
         logger.error("[startup] Both startup.start_microphone and startup.start_files are disabled. Nothing to run.")
         try:
-            tray_icon.stop()
+            if tray_icon is not None:
+                tray_icon.stop()
         except Exception:
             pass
         try:
-            console_controller.stop_minimize_to_tray()
+            if not LAUNCHER_OWNS_TRAY:
+                console_controller.stop_minimize_to_tray()
         except Exception:
             pass
         return 1
-
-    if RECOGNITION_ENABLED:
-        _ensure_recognition_profile()
 
     file_drop_thread = None
     file_drop_stop_event = None
@@ -1749,6 +1816,17 @@ def main(args=None):
         hotkey_targets[name][0] = func
         hotkey_not_ready_logged.discard(name)
 
+    def _play_hotkey_feedback(result):
+        if result is None or result == "defer":
+            return
+        if result == "on" or result is True:
+            feedback.play_on()
+            return
+        if result == "off" or result is False:
+            feedback.play_off()
+            return
+        feedback.play_on()
+
     def invoke_hotkey_target(name: str):
         target_ref = hotkey_targets.get(name)
         target = target_ref[0] if target_ref else None
@@ -1757,7 +1835,8 @@ def main(args=None):
                 hotkey_not_ready_logged.add(name)
                 logger.info(f"[hotkey] {name} ignored during startup (not ready yet).")
             return
-        target()
+        result = target()
+        _play_hotkey_feedback(result)
 
     try:
         import keyboard as kb
@@ -1803,7 +1882,7 @@ def main(args=None):
             kb.add_hotkey(CLIPBOARD_TO_BUFFER_HOTKEY, lambda: invoke_hotkey_target("clipboard_to_buffer"))
             logger.info(f"[hotkey] clipboard_to_buffer = {CLIPBOARD_TO_BUFFER_HOTKEY}")
 
-        if CONSOLE_TOGGLE_HOTKEY:
+        if CONSOLE_TOGGLE_HOTKEY and not LAUNCHER_OWNS_TRAY:
             if console_controller.available:
                 kb.add_hotkey(CONSOLE_TOGGLE_HOTKEY, lambda: invoke_hotkey_target("console_toggle"))
                 logger.info(f"[hotkey] console_toggle = {CONSOLE_TOGGLE_HOTKEY}")
@@ -1811,7 +1890,7 @@ def main(args=None):
                 logger.warning("[hotkey] console_toggle requested but no Windows console is available.")
 
     set_hotkey_target("console_toggle", lambda: console_controller.toggle(reason="hotkey"))
-    set_hotkey_target("clipboard_to_buffer", lambda: append_clipboard_to_buffer(reason="hotkey"))
+    set_hotkey_target("clipboard_to_buffer", lambda: append_clipboard_to_buffer(reason="hotkey", play_feedback=False))
     if start_microphone_mode:
         register_hotkeys()
 
@@ -1984,29 +2063,6 @@ def main(args=None):
         except Exception as e:
             record_load_error(f"Audio stack error: {e}")
 
-    def load_recognition_engine():
-        if not (RECOGNITION_ENABLED and RECOGNITION_APPLY_TO_MICROPHONE and start_microphone_mode):
-            resources["recognition_engine"] = None
-            return
-        if not RECOGNITION_CACHE_FILE.exists():
-            resources["recognition_engine"] = None
-            logger.info("[recognition] microphone recognition inactive (cache not available)")
-            return
-        try:
-            engine = RecognitionEngine(
-                profile_path=RECOGNITION_CACHE_FILE,
-                model_name=RECOGNITION_MODEL,
-                requested_device=RECOGNITION_DEVICE,
-                sample_rate=RATE,
-                threshold_override=RECOGNITION_THRESHOLD_OVERRIDE,
-            )
-            engine.ensure_ready(load_profile=True)
-            resources["recognition_engine"] = engine
-            for line in engine.startup_logs():
-                logger.info(f"[recognition] {line}")
-        except Exception as e:
-            record_load_error(f"Recognition engine load error: {e}")
-
     if not start_microphone_mode and start_files_mode:
         start_file_drop_thread()
         logger.info("Files STT Ready!")
@@ -2039,8 +2095,6 @@ def main(args=None):
         threading.Thread(target=load_realtime),
         threading.Thread(target=load_audio_stack),
     ]
-    if RECOGNITION_ENABLED and RECOGNITION_APPLY_TO_MICROPHONE and start_microphone_mode:
-        threads.append(threading.Thread(target=load_recognition_engine))
     for t in threads: t.start()
     for t in threads: t.join()
 
@@ -2061,9 +2115,46 @@ def main(args=None):
     stream      = resources['stream']
     p_instance  = resources['p_instance']
     dev_name    = resources['dev_name']
-    recognition_engine = resources.get('recognition_engine')
+    current_input_host_api = resources.get('host_api')
+    recognition_engine = None
+    recognition_root_state = {"root": None}
     if start_files_mode:
         start_file_drop_thread()
+
+    def reload_microphone_recognition_engine(*, device_name: str | None, host_api=None, reason: str = "startup"):
+        nonlocal recognition_engine
+        if not (RECOGNITION_ENABLED and RECOGNITION_APPLY_TO_MICROPHONE and start_microphone_mode):
+            recognition_engine = None
+            recognition_root_state["root"] = None
+            return
+        active_root = _recognition_active_root(device_name, host_api)
+        if active_root is None:
+            recognition_engine = None
+            recognition_root_state["root"] = None
+            logger.info("[recognition] microphone recognition inactive (no matching corpus for current input device)")
+            return
+        if recognition_root_state["root"] == active_root and recognition_engine is not None:
+            return
+        _ensure_recognition_profile(active_root, device_name=device_name, host_api=host_api)
+        cache_file = _recognition_cache_file(active_root)
+        try:
+            engine = RecognitionEngine(
+                profile_path=cache_file,
+                model_name=RECOGNITION_MODEL,
+                requested_device=RECOGNITION_DEVICE,
+                sample_rate=RATE,
+                threshold_override=RECOGNITION_THRESHOLD_OVERRIDE,
+            )
+            engine.ensure_ready(load_profile=True)
+            recognition_engine = engine
+            recognition_root_state["root"] = active_root
+            logger.info("[recognition] microphone corpus root=%s reason=%s", active_root, reason)
+        except Exception as e:
+            recognition_engine = None
+            recognition_root_state["root"] = None
+            logger.error(f"Recognition engine load error: {e}")
+
+    reload_microphone_recognition_engine(device_name=dev_name, host_api=current_input_host_api, reason="startup")
 
     # ── Register handlers ─────────────────────────────────────────────────────
     import handlers as h
@@ -2118,14 +2209,7 @@ def main(args=None):
     typing_lock   = threading.Lock()
     output_mode_lock = threading.Lock()
     configured_output_mode_raw = str(cfg.get("output", {}).get("mode", "")).strip().lower()
-    configured_output_mode = OUTPUT_MODE_ALIASES.get(configured_output_mode_raw)
-    if configured_output_mode is None:
-        configured_output_mode = (
-            "draft"
-            if bool(cfg.get("output", {}).get("file_buffer", {}).get("enabled", False))
-            and not bool(cfg.get("output", {}).get("type_at_cursor", {}).get("enabled", False))
-            else "cursor"
-        )
+    configured_output_mode = OUTPUT_MODE_ALIASES.get(configured_output_mode_raw, "draft")
     typing_state = {
         "enabled": configured_output_mode == "cursor"
     }
@@ -2134,13 +2218,14 @@ def main(args=None):
     voice_command_seen_by_epoch: dict[int, set[str]] = {}
     command_consumed_epochs: set[int] = set()
     last_replayable_final_event = [None]
+    last_replayable_buffer_release_event = [None]
     last_blocked_final_event = [None]
     saved_utterance_history = deque(maxlen=64)
 
-    type_set_enabled = handler_extras.get("type_at_cursor_set_enabled")
-    type_is_enabled = handler_extras.get("type_at_cursor_is_enabled")
-    if type_set_enabled:
-        type_set_enabled(typing_state["enabled"])
+    cursor_output_set_enabled = handler_extras.get("cursor_output_set_enabled")
+    cursor_output_is_enabled = handler_extras.get("cursor_output_is_enabled")
+    if cursor_output_set_enabled:
+        cursor_output_set_enabled(typing_state["enabled"])
     else:
         typing_state["enabled"] = False
 
@@ -2148,13 +2233,19 @@ def main(args=None):
     file_buffer_is_enabled = handler_extras.get("file_buffer_is_enabled")
     file_buffer_get_content = handler_extras.get("file_buffer_get_content")
     file_buffer_append_text = handler_extras.get("file_buffer_append_text")
+    file_buffer_compose_release_content = handler_extras.get("file_buffer_compose_release_content")
+    file_buffer_commit_released_content = handler_extras.get("file_buffer_commit_released_content")
     output_mode_profiles = {
         "cursor": {
-            "type_at_cursor": True,
+            "cursor_output": True,
             "file_buffer": False,
         },
         "draft": {
-            "type_at_cursor": False,
+            "cursor_output": False,
+            "file_buffer": True,
+        },
+        "nats": {
+            "cursor_output": False,
             "file_buffer": True,
         },
     }
@@ -2175,9 +2266,8 @@ def main(args=None):
     def persist():
         return
 
-    def append_clipboard_to_buffer(reason: str = "hotkey") -> bool:
-        if not (file_buffer_is_enabled and file_buffer_is_enabled()):
-            logger.info(f"[file_buffer] Clipboard append ignored ({reason}): draft buffer is not active.")
+    def append_clipboard_to_buffer(reason: str = "hotkey", *, play_feedback: bool = True) -> bool:
+        if not file_buffer_append_text:
             return False
         try:
             import win32clipboard
@@ -2189,7 +2279,6 @@ def main(args=None):
             win32clipboard.OpenClipboard()
             try:
                 if not win32clipboard.IsClipboardFormatAvailable(win32con.CF_UNICODETEXT):
-                    logger.info(f"[file_buffer] Clipboard append ignored ({reason}): clipboard has no text.")
                     return False
                 text = win32clipboard.GetClipboardData(win32con.CF_UNICODETEXT)
             finally:
@@ -2198,17 +2287,14 @@ def main(args=None):
             logger.warning(f"[file_buffer] Clipboard append failed ({reason}): {exc}")
             return False
         if not str(text or "").strip():
-            logger.info(f"[file_buffer] Clipboard append ignored ({reason}): clipboard text is empty.")
-            return False
-        if not file_buffer_append_text:
-            logger.info(f"[file_buffer] Clipboard append ignored ({reason}): buffer handler not available.")
             return False
         content = str(text)
         if not content.endswith((" ", "\t", "\r", "\n")):
             content += " "
         file_buffer_append_text(content)
         logger.info(f"[hotkey] clipboard_to_buffer ({reason})")
-        feedback.play_on()
+        if play_feedback:
+            feedback.play_on()
         return True
 
     def _remember_saved_utterance_clip(epoch: int, path: Path | None):
@@ -2228,7 +2314,14 @@ def main(args=None):
         source = _latest_saved_clip_before_epoch(epoch)
         if source is None:
             return None
-        destination_dir = _recognition_default_speaker_dir(RECOGNITION_ROOT_DIR)
+        active_root = recognition_root_state.get("root") or _recognition_active_root(
+            current_device_state[0].get("name"),
+            current_device_state[0].get("host_api"),
+        ) or _recognition_root_candidates(
+            current_device_state[0].get("name"),
+            current_device_state[0].get("host_api"),
+        )[0]
+        destination_dir = _recognition_default_speaker_dir(active_root)
         destination_dir.mkdir(parents=True, exist_ok=True)
         destination = destination_dir / source.name
         if destination.exists():
@@ -2242,6 +2335,18 @@ def main(args=None):
                 break
         return destination
 
+    def _current_output_mode_name() -> str:
+        with output_mode_lock:
+            return output_mode_state["name"]
+
+    def _file_buffer_capable() -> bool:
+        return bool(
+            file_buffer_get_content
+            and file_buffer_append_text
+            and file_buffer_compose_release_content
+            and file_buffer_commit_released_content
+        )
+
     def apply_output_mode(mode_name: str, *, reason: str = "", announce: bool = True) -> str:
         normalized = OUTPUT_MODE_ALIASES.get(str(mode_name or "").strip().lower(), "")
         if normalized not in output_mode_profiles:
@@ -2250,10 +2355,10 @@ def main(args=None):
 
         if file_buffer_set_enabled:
             file_buffer_set_enabled(profile["file_buffer"])
-        if type_set_enabled:
-            type_set_enabled(profile["type_at_cursor"])
+        if cursor_output_set_enabled:
+            cursor_output_set_enabled(profile["cursor_output"])
             with typing_lock:
-                typing_state["enabled"] = bool(profile["type_at_cursor"])
+                typing_state["enabled"] = bool(profile["cursor_output"])
 
         with output_mode_lock:
             previous = output_mode_state["name"]
@@ -2279,7 +2384,6 @@ def main(args=None):
     def replay_last_final_event(epoch: int, t: float, inf_ms: int, source: str) -> bool:
         event = last_replayable_final_event[0]
         if not event:
-            logger.info(f"[{source.upper()} +{t:.2f}s] → CMD repeat ignored (no replayable final event)")
             return False
         replay = copy.deepcopy(event)
         replay["epoch"] = epoch
@@ -2289,6 +2393,129 @@ def main(args=None):
         logger.info(f"[{source.upper()} +{t:.2f}s] → CMD repeat ({inf_ms}ms)")
         dispatch(replay)
         return True
+
+    def _materialize_buffer_release_event(
+        *,
+        epoch: int,
+        t: float,
+        inf_ms: int,
+        source: str,
+        inline_text: str = "",
+        speaker: str = "",
+        press_enter_after: bool = False,
+        replayed: bool = False,
+        released_by_recognize: bool = False,
+    ) -> dict | None:
+        if not _file_buffer_capable():
+            return None
+        content = str(file_buffer_compose_release_content(inline_text) or "")
+        if not content.strip():
+            return None
+        ev = {
+            "type": "buffer_released",
+            "text": content,
+            "epoch": epoch,
+            "t": round(t, 3),
+            "inference_ms": inf_ms,
+            "submit": bool(press_enter_after),
+            "output_mode": _current_output_mode_name(),
+        }
+        if speaker:
+            ev["speaker"] = speaker
+        if replayed:
+            ev["replayed"] = True
+        if released_by_recognize:
+            ev["released_by_recognize"] = True
+        return ev
+
+    def _commit_buffer_release_event(ev: dict):
+        if not file_buffer_commit_released_content:
+            return
+        file_buffer_commit_released_content(str(ev.get("text") or ""))
+        last_replayable_buffer_release_event[0] = copy.deepcopy(ev)
+
+    def _release_buffer_to_nats(
+        *,
+        epoch: int,
+        t: float,
+        inf_ms: int,
+        source: str,
+        inline_text: str = "",
+        speaker: str = "",
+        press_enter_after: bool = False,
+        replayed: bool = False,
+        released_by_recognize: bool = False,
+    ) -> dict | None:
+        ev = _materialize_buffer_release_event(
+            epoch=epoch,
+            t=t,
+            inf_ms=inf_ms,
+            source=source,
+            inline_text=inline_text,
+            speaker=speaker,
+            press_enter_after=press_enter_after,
+            replayed=replayed,
+            released_by_recognize=released_by_recognize,
+        )
+        if ev is None:
+            return None
+        _commit_buffer_release_event(ev)
+        dispatch(ev)
+        return ev
+
+    def replay_last_buffer_release_event(epoch: int, t: float, inf_ms: int, source: str) -> bool:
+        event = last_replayable_buffer_release_event[0]
+        if not event:
+            return False
+        replay = copy.deepcopy(event)
+        replay["epoch"] = epoch
+        replay["t"] = round(t, 3)
+        replay["inference_ms"] = inf_ms
+        replay["replayed"] = True
+        last_replayable_buffer_release_event[0] = copy.deepcopy(replay)
+        logger.info(f"[{source.upper()} +{t:.2f}s] → CMD repeat ({inf_ms}ms)")
+        dispatch(replay)
+        return True
+
+    def _dispatch_final_or_buffer_release(
+        *,
+        text: str,
+        actions: dict,
+        epoch: int,
+        t: float,
+        inf_ms: int,
+        speaker: str = "",
+        released_by_recognize: bool = False,
+    ) -> dict | None:
+        if actions.get("release_file_buffer_to_nats"):
+            return _materialize_buffer_release_event(
+                epoch=epoch,
+                t=t,
+                inf_ms=inf_ms,
+                source="final",
+                inline_text=text,
+                speaker=speaker,
+                press_enter_after=bool(actions.get("press_enter_after")),
+                released_by_recognize=released_by_recognize,
+            )
+        if not text and not actions:
+            return None
+        ev = {
+            "type": "final",
+            "text": text,
+            "epoch": epoch,
+            "t": round(t, 3),
+            "inference_ms": inf_ms,
+        }
+        if actions:
+            ev["actions"] = actions
+        if speaker:
+            ev["speaker"] = speaker
+        if released_by_recognize:
+            ev["released_by_recognize"] = True
+        if _current_output_mode_name() == "nats":
+            ev["suppress_nats"] = True
+        return ev
 
     def _build_dispatchable_final_event(raw_text: str, epoch: int, t: float, inf_ms: int) -> dict | None:
         if should_ignore_transcript(raw_text):
@@ -2315,20 +2542,33 @@ def main(args=None):
         if int(event.get("blocked_epoch") or -1) >= int(epoch):
             return None
         replay = copy.deepcopy(event["payload"])
-        replay["epoch"] = epoch
-        replay["t"] = round(t, 3)
-        replay["inference_ms"] = inf_ms
-        replay["released_by_recognize"] = True
+        actions = dict(replay.get("actions") or {})
         last_blocked_final_event[0] = None
-        last_replayable_final_event[0] = copy.deepcopy(replay)
-        dispatch(replay)
-        return replay
+        materialized = _dispatch_final_or_buffer_release(
+            text=str(replay.get("text") or ""),
+            actions=actions,
+            epoch=epoch,
+            t=t,
+            inf_ms=inf_ms,
+            speaker=str(replay.get("speaker") or ""),
+            released_by_recognize=True,
+        )
+        if materialized is None:
+            return None
+        if materialized.get("type") == "final" and str(materialized.get("text") or "").strip():
+            last_replayable_final_event[0] = copy.deepcopy(materialized)
+        if materialized.get("type") == "buffer_released":
+            _commit_buffer_release_event(materialized)
+            dispatch(materialized)
+        elif materialized.get("type") == "final":
+            dispatch(materialized)
+        return materialized
 
     def set_sleeping(sleeping: bool, reason: str = "", *, play_feedback: bool = True):
         with mode_lock:
             was_sleeping = mode_state["sleeping"]
             if was_sleeping == sleeping:
-                return
+                return bool(mode_state["sleeping"])
             mode_state["sleeping"] = sleeping
         rt_cancel.set()
         if sleeping:
@@ -2343,34 +2583,37 @@ def main(args=None):
         logger.info(f"[mode] {'Sleeping' if sleeping else 'Working'}" + (f" ({reason})" if reason else ""))
         dispatch({"type": "status", "value": "sleeping" if sleeping else "working"})
         persist()
+        return bool(mode_state["sleeping"])
 
     def trigger_wake_feedback(reason: str = ""):
         feedback.play_startup()
         logger.info(f"[wake] feedback" + (f" ({reason})" if reason else ""))
 
-    def set_typing_enabled(enabled: bool, reason: str = ""):
-        if not type_set_enabled:
-            logger.info("[typing] type_at_cursor handler is not active.")
-            return
+    def set_typing_enabled(enabled: bool, reason: str = "", *, play_feedback: bool = True):
+        if not cursor_output_set_enabled:
+            logger.info("[typing] cursor output handler is not active.")
+            return None
         with typing_lock:
             if typing_state["enabled"] == bool(enabled):
-                return
+                return bool(typing_state["enabled"])
             typing_state["enabled"] = bool(enabled)
             current = typing_state["enabled"]
-        if type_set_enabled:
-            type_set_enabled(current)
-        if current:
-            feedback.play_on()
-        else:
-            feedback.play_off()
+        if cursor_output_set_enabled:
+            cursor_output_set_enabled(current)
+        if play_feedback:
+            if current:
+                feedback.play_on()
+            else:
+                feedback.play_off()
         logger.info(f"[typing] {'Enabled' if current else 'Disabled'}" + (f" ({reason})" if reason else ""))
         dispatch({"type": "status", "value": "typing_enabled" if current else "typing_disabled"})
         persist()
+        return bool(current)
 
-    def toggle_typing_enabled(reason: str = "") -> bool:
+    def toggle_typing_enabled(reason: str = "", *, play_feedback: bool = True) -> bool:
         with typing_lock:
             next_value = not typing_state["enabled"]
-        set_typing_enabled(next_value, reason=reason)
+        set_typing_enabled(next_value, reason=reason, play_feedback=play_feedback)
         with typing_lock:
             return typing_state["enabled"]
 
@@ -2401,20 +2644,33 @@ def main(args=None):
             return consumed_text, matched
 
         file_buffer_active = bool(file_buffer_is_enabled and file_buffer_is_enabled())
+        file_buffer_capable = _file_buffer_capable()
+        output_mode_name = _current_output_mode_name()
 
         if ENTER_COMMAND_ENABLED and ENTER_COMMAND_WORDS:
             text, enter_matched = consume_command(ENTER_COMMAND_WORDS)
             if enter_matched:
                 if file_buffer_active:
-                    actions["release_file_buffer"] = True
+                    if output_mode_name == "nats":
+                        actions["release_file_buffer_to_nats"] = True
+                    else:
+                        actions["release_file_buffer"] = True
                     actions["press_enter_after"] = True
                 else:
                     actions["press_enter_after"] = True
 
-        if file_buffer_active and BUFFER_RELEASE_COMMAND_ENABLED and BUFFER_RELEASE_COMMAND_WORDS:
+        if file_buffer_capable and BUFFER_RELEASE_COMMAND_ENABLED and BUFFER_RELEASE_COMMAND_WORDS:
             text, buffer_matched = consume_command(BUFFER_RELEASE_COMMAND_WORDS)
             if buffer_matched:
-                actions["release_file_buffer"] = True
+                if output_mode_name == "nats":
+                    actions["release_file_buffer_to_nats"] = True
+                else:
+                    actions["release_file_buffer"] = True
+
+        if file_buffer_capable and NATS_RELEASE_COMMAND_ENABLED and NATS_RELEASE_COMMAND_WORDS:
+            text, nats_matched = consume_command(NATS_RELEASE_COMMAND_WORDS)
+            if nats_matched:
+                actions["release_file_buffer_to_nats"] = True
 
         return text, actions
 
@@ -2453,6 +2709,8 @@ def main(args=None):
         normalized = _normalize_command_phrase(text)
         if not normalized:
             return False
+        file_buffer_capable = _file_buffer_capable()
+        output_mode_name = _current_output_mode_name()
 
         if normalized in SLEEP_STOP_WORDS:
             if _mark_voice_command_seen(epoch, "sleep"):
@@ -2470,14 +2728,14 @@ def main(args=None):
             if _mark_voice_command_seen(epoch, "rewind"):
                 _mark_epoch_consumed_by_partial_command(epoch, source)
                 revert_actions = {}
-                if file_buffer_is_enabled and file_buffer_is_enabled():
+                if file_buffer_capable and output_mode_name in {"draft", "nats"}:
                     current_buffer = file_buffer_get_content() if file_buffer_get_content else ""
                     if str(current_buffer).strip():
-                        revert_actions["undo_file_buffer"] = True
+                        revert_actions["rewind_file_buffer"] = True
                     else:
                         revert_actions["restore_last_released_buffer"] = True
                 else:
-                    revert_actions["undo_type_at_cursor"] = True
+                    revert_actions["rewind_type_at_cursor"] = True
                 logger.info(f"{_command_log_prefix(source, t, recognition_meta)} → CMD rewind ({inf_ms}ms)")
                 dispatch({
                     "type": "final",
@@ -2496,7 +2754,7 @@ def main(args=None):
                 promoted = _promote_last_saved_clip_to_recognition(epoch)
                 released = _release_last_blocked_final_event(epoch, t, inf_ms)
                 if promoted is None and released is None:
-                    logger.info(f"{_command_log_prefix(source, t, recognition_meta)} → CMD recognize ignored (no prior saved clip) ({inf_ms}ms)")
+                    return True
                 else:
                     details = []
                     if promoted is not None:
@@ -2516,14 +2774,16 @@ def main(args=None):
                 _mark_epoch_consumed_by_partial_command(epoch, source)
                 if append_clipboard_to_buffer(reason=f"voice:{normalized}"):
                     logger.info(f"{_command_log_prefix(source, t, recognition_meta)} → CMD clipboard ({inf_ms}ms)")
-                else:
-                    logger.info(f"{_command_log_prefix(source, t, recognition_meta)} → CMD clipboard ignored ({inf_ms}ms)")
             return True
 
         if REPEAT_COMMAND_ENABLED and normalized in REPEAT_COMMAND_WORDS_EXACT:
             if _mark_voice_command_seen(epoch, "repeat"):
                 _mark_epoch_consumed_by_partial_command(epoch, source)
-                if file_buffer_is_enabled and file_buffer_is_enabled():
+                if output_mode_name == "nats" and file_buffer_capable:
+                    if replay_last_buffer_release_event(epoch, t, inf_ms, source):
+                        feedback.play_on()
+                    return True
+                if file_buffer_capable and output_mode_name in {"draft", "nats"}:
                     logger.info(f"{_command_log_prefix(source, t, recognition_meta)} → CMD repeat ({inf_ms}ms)")
                     dispatch({
                         "type": "final",
@@ -2579,6 +2839,14 @@ def main(args=None):
                 feedback.play_on()
             return True
 
+        if OUTPUT_MODE_NATS_COMMAND_ENABLED and normalized in OUTPUT_MODE_NATS_COMMAND_WORDS_EXACT:
+            if _mark_voice_command_seen(epoch, "output_mode_nats"):
+                _mark_epoch_consumed_by_partial_command(epoch, source)
+                logger.info(f"{_command_log_prefix(source, t, recognition_meta)} → CMD output_mode=nats ({inf_ms}ms)")
+                apply_output_mode("nats", reason=f"voice:{normalized}")
+                feedback.play_on()
+            return True
+
         if CONSOLE_SHOW_COMMAND_ENABLED and normalized in CONSOLE_SHOW_COMMAND_WORDS_EXACT:
             if _mark_voice_command_seen(epoch, "console_show"):
                 _mark_epoch_consumed_by_partial_command(epoch, source)
@@ -2599,17 +2867,27 @@ def main(args=None):
             if _mark_voice_command_seen(epoch, "press_enter"):
                 _mark_epoch_consumed_by_partial_command(epoch, source)
                 logger.info(f"{_command_log_prefix(source, t, recognition_meta)} → CMD enter ({inf_ms}ms)")
-                actions = {"press_enter_after": True}
-                if file_buffer_is_enabled and file_buffer_is_enabled():
-                    actions["release_file_buffer"] = True
-                dispatch({
-                    "type": "final",
-                    "text": "",
-                    "actions": actions,
-                    "epoch": epoch,
-                    "t": round(t, 3),
-                    "inference_ms": inf_ms,
-                })
+                if file_buffer_capable and output_mode_name == "nats":
+                    _release_buffer_to_nats(
+                        epoch=epoch,
+                        t=t,
+                        inf_ms=inf_ms,
+                        source=source,
+                        press_enter_after=True,
+                        speaker=_recognized_speaker(recognition_meta),
+                    )
+                else:
+                    actions = {"press_enter_after": True}
+                    if file_buffer_capable and output_mode_name == "draft":
+                        actions["release_file_buffer"] = True
+                    dispatch({
+                        "type": "final",
+                        "text": "",
+                        "actions": actions,
+                        "epoch": epoch,
+                        "t": round(t, 3),
+                        "inference_ms": inf_ms,
+                    })
                 feedback.play_on()
             return True
 
@@ -2617,17 +2895,42 @@ def main(args=None):
             if _mark_voice_command_seen(epoch, "release_buffer"):
                 _mark_epoch_consumed_by_partial_command(epoch, source)
                 logger.info(f"{_command_log_prefix(source, t, recognition_meta)} → CMD buffer_release ({inf_ms}ms)")
-                dispatch({
-                    "type": "final",
-                    "text": "",
-                    "actions": {
-                        "release_file_buffer": True,
-                    },
-                    "epoch": epoch,
-                    "t": round(t, 3),
-                    "inference_ms": inf_ms,
-                })
+                if file_buffer_capable and output_mode_name == "nats":
+                    _release_buffer_to_nats(
+                        epoch=epoch,
+                        t=t,
+                        inf_ms=inf_ms,
+                        source=source,
+                        speaker=_recognized_speaker(recognition_meta),
+                    )
+                else:
+                    if file_buffer_capable:
+                        dispatch({
+                            "type": "final",
+                            "text": "",
+                            "actions": {
+                                "release_file_buffer": True,
+                            },
+                            "epoch": epoch,
+                            "t": round(t, 3),
+                            "inference_ms": inf_ms,
+                        })
                 feedback.play_on()
+            return True
+
+        if NATS_RELEASE_COMMAND_ENABLED and normalized in NATS_RELEASE_COMMAND_WORDS_EXACT:
+            if _mark_voice_command_seen(epoch, "release_buffer_to_nats"):
+                _mark_epoch_consumed_by_partial_command(epoch, source)
+                logger.info(f"{_command_log_prefix(source, t, recognition_meta)} → CMD nats_release ({inf_ms}ms)")
+                if file_buffer_capable:
+                    _release_buffer_to_nats(
+                        epoch=epoch,
+                        t=t,
+                        inf_ms=inf_ms,
+                        source=source,
+                        speaker=_recognized_speaker(recognition_meta),
+                    )
+                    feedback.play_on()
             return True
 
         if BUFFER_CLEAR_COMMAND_ENABLED and normalized in BUFFER_CLEAR_COMMAND_WORDS_EXACT:
@@ -2787,30 +3090,37 @@ def main(args=None):
 
                 text, actions = apply_voice_commands(cleaned_text)
                 if text or actions:
-                    ev = {
-                        "type": "final",
-                        "text": text,
-                        "epoch": epoch,
-                        "t": round(t, 3),
-                        "inference_ms": inf_ms,
-                    }
-                    if actions:
-                        ev["actions"] = actions
                     speaker = _recognized_speaker(recognition_meta)
-                    if speaker:
-                        ev["speaker"] = speaker
-                    if text:
+                    ev = _dispatch_final_or_buffer_release(
+                        text=text,
+                        actions=actions,
+                        epoch=epoch,
+                        t=t,
+                        inf_ms=inf_ms,
+                        speaker=speaker or "",
+                    )
+                    if ev is None:
+                        debug_log(f"[FINAL +{t:.2f}s] drop empty ({inf_ms}ms)")
+                        continue
+                    if ev.get("type") == "final" and text:
                         last_replayable_final_event[0] = copy.deepcopy(ev)
                     with mode_lock:
                         currently_sleeping = mode_state["sleeping"]
                     if currently_sleeping:
                         logger.info(f"[FINAL +{t:.2f}s] → SLEEPING (dropped) ({inf_ms}ms)")
                     else:
-                        _log_recognition_outcome("FINAL", t, inf_ms, recognition_meta, text=text if text else None, blocked=False)
-                        dispatch(ev)
-                        if text:
+                        log_text = str(ev.get("text") or "").strip()
+                        _log_recognition_outcome("FINAL", t, inf_ms, recognition_meta, text=log_text if log_text else None, blocked=False)
+                        if ev.get("type") == "buffer_released":
+                            _commit_buffer_release_event(ev)
+                            dispatch(ev)
+                        elif ev.get("type") == "final":
+                            dispatch(ev)
+                        if ev.get("type") == "final" and text:
                             feedback.play_final()
-                        if actions.get("press_enter_after"):
+                        if ev.get("type") == "buffer_released":
+                            feedback.play_on()
+                        elif actions.get("press_enter_after"):
                             feedback.play_on()
                 else:
                     debug_log(f"[FINAL +{t:.2f}s] drop empty ({inf_ms}ms)")
@@ -2931,12 +3241,18 @@ def main(args=None):
     def _sleep_toggle():
         with mode_lock:
             sleeping = mode_state["sleeping"]
-        set_sleeping(not sleeping, reason="hotkey")
+        next_sleeping = not sleeping
+        set_sleeping(next_sleeping, reason="hotkey", play_feedback=False)
+        return "off" if next_sleeping else "on"
+
+    def _hotkey_output_mode_cycle():
+        cycle_output_mode(reason="hotkey")
+        return "on"
 
     apply_output_mode(output_mode_state["name"], reason="startup", announce=False)
     set_hotkey_target("sleep_toggle", _sleep_toggle)
-    set_hotkey_target("typing_toggle", lambda: toggle_typing_enabled(reason="hotkey"))
-    set_hotkey_target("output_mode_cycle", lambda: cycle_output_mode(reason="hotkey"))
+    set_hotkey_target("typing_toggle", lambda: toggle_typing_enabled(reason="hotkey", play_feedback=False))
+    set_hotkey_target("output_mode_cycle", _hotkey_output_mode_cycle)
     persist()
 
     # ── NATS control surface ──────────────────────────────────────────────────
@@ -2964,9 +3280,16 @@ def main(args=None):
 
             async def _handler(msg):
                 try:
-                    payload = json.loads(msg.data.decode())
-                    cmd = payload.get("cmd", "").lower()
+                    raw = json.loads(msg.data.decode())
                 except Exception:
+                    return
+
+                payload = raw.get("payload") if isinstance(raw, dict) and isinstance(raw.get("payload"), dict) else raw
+                cmd = str(payload.get("command") or payload.get("cmd") or "").strip().lower()
+                correlation_id = ""
+                if isinstance(raw, dict):
+                    correlation_id = str(raw.get("correlation_id") or raw.get("event_id") or "").strip()
+                if not cmd:
                     return
 
                 if cmd == "sleep":
@@ -2993,10 +3316,17 @@ def main(args=None):
                     with output_mode_lock:
                         output_mode_name = output_mode_state["name"]
                     reply = {
-                        "sleeping": sleeping,
-                        "mode": "sleeping" if sleeping else "working",
-                        "typing_at_cursor_enabled": typing_enabled,
-                        "output_mode": output_mode_name,
+                        "schema_version": "v1alpha1",
+                        "event_id": correlation_id or f"stt-status-{int(time.time() * 1000)}",
+                        "correlation_id": correlation_id,
+                        "source": "convocortex-stt",
+                        "published_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                        "payload": {
+                            "sleeping": sleeping,
+                            "mode": "sleeping" if sleeping else "working",
+                            "typing_at_cursor_enabled": typing_enabled,
+                            "output_mode": output_mode_name,
+                        },
                     }
                     if msg.reply:
                         await nc.publish(msg.reply, json.dumps(reply).encode())
@@ -3140,29 +3470,29 @@ def main(args=None):
     def cycle_input_device():
         """Hotkey handler — only signals the main loop, never touches the stream."""
         if _pending_device[0] is not None:
-            return
+            return "defer"
         devices = _enumerate_input_devices()
         if len(devices) <= 1:
             logger.info('[device] Only one input device available.')
-            return
+            return "defer"
         idxs = [d[0] for d in devices]
         try:
             pos = idxs.index(current_device_idx[0])
         except ValueError:
             pos = -1
         _pending_device[0] = devices[(pos + 1) % len(devices)]
+        return "defer"
 
     def cycle_output_device():
         """Hotkey handler — only signals the main loop, never touches PyAudio."""
         if not getattr(feedback, 'enabled', False):
-            logger.info('[feedback] Output device cycle ignored (feedback disabled).')
-            return
+            return "defer"
         if _pending_output_device[0] is not None:
-            return
+            return "defer"
         devices = _enumerate_output_devices()
         if len(devices) <= 1:
             logger.info('[feedback] Only one output device available.')
-            return
+            return "defer"
         current_name = str(current_output_device_state[0].get('name', '')).strip()
         current_host_api = current_output_device_state[0].get('host_api')
         pos = -1
@@ -3201,6 +3531,7 @@ def main(args=None):
             except Exception:
                 pass
         _pending_output_device[0] = devices[(pos + 1) % len(devices)]
+        return "defer"
 
     set_hotkey_target("input_device_cycle", cycle_input_device)
     set_hotkey_target("output_device_cycle", cycle_output_device)
@@ -3314,9 +3645,15 @@ def main(args=None):
                         current_device_idx[0] = next_idx
                         current_capture_rate[0] = int(input_session.capture_rate)
                         current_device_state[0] = {"name": next_name, "host_api": next_info.get("hostApi")}
+                        current_input_host_api = next_info.get("hostApi")
                         preferred_input_device_state[0] = dict(current_device_state[0])
                         wakeword_buffer = np.array([], dtype=np.int16)
                         ring_buffer.clear(); recording_buffer.clear(); is_recording = False
+                        reload_microphone_recognition_engine(
+                            device_name=next_name,
+                            host_api=current_input_host_api,
+                            reason="input_device_cycle",
+                        )
                         logger.info(
                             f"[device] Cycled to: {next_name} "
                             f"(probe_read_ms={probe_read_ms:.0f}, rms={rms}, capture_rate={input_session.capture_rate})"

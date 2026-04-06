@@ -1,0 +1,47 @@
+# Output mode preset: draft
+#
+# Speak into the working buffer first, then release it explicitly.
+
+[output]
+mode = "draft"
+
+[output.file_buffer]
+path = "buffer.txt"
+separator = ""
+clear_after_release = true
+reset_after_each_message = false
+rewind_history_limit = 10
+release_method = "paste_preserve_clipboard"
+clipboard_restore_delay_ms = 1000
+clipboard_open_retry_count = 8
+clipboard_open_retry_delay_ms = 25
+post_paste_enter_delay_ms = 400
+
+[output.type_at_cursor]
+release_method = "paste_preserve_clipboard"
+clipboard_restore_delay_ms = 1000
+clipboard_open_retry_count = 8
+clipboard_open_retry_delay_ms = 25
+post_paste_enter_delay_ms = 0
+revert_mode = "ctrl+z"
+revert_backspace_count = 24
+
+[output.trailing_char]
+enabled = true
+char = " "
+
+[voice_commands.typing]
+enabled = true
+words = ["typing"]
+
+[voice_commands.rewind]
+enabled = true
+words = ["rewind"]
+
+[voice_commands.buffer_release]
+enabled = true
+words = ["buffer"]
+
+[voice_commands.buffer_clear]
+enabled = true
+words = ["clear"]

@@ -10,6 +10,13 @@
     <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
   </PropertyGroup>
 
+  <Target Name="CopyLauncherExeToRepoRoot" AfterTargets="Build">
+    <Copy SourceFiles="$(TargetDir)$(AssemblyName).exe" DestinationFiles="$(MSBuildProjectDirectory)\$(AssemblyName).exe" OverwriteReadOnlyFiles="true" />
+    <Copy SourceFiles="$(TargetDir)$(AssemblyName).dll" DestinationFiles="$(MSBuildProjectDirectory)\$(AssemblyName).dll" OverwriteReadOnlyFiles="true" />
+    <Copy SourceFiles="$(TargetDir)$(AssemblyName).deps.json" DestinationFiles="$(MSBuildProjectDirectory)\$(AssemblyName).deps.json" OverwriteReadOnlyFiles="true" />
+    <Copy SourceFiles="$(TargetDir)$(AssemblyName).runtimeconfig.json" DestinationFiles="$(MSBuildProjectDirectory)\$(AssemblyName).runtimeconfig.json" OverwriteReadOnlyFiles="true" />
+  </Target>
+
   <ItemGroup>
     <Compile Include="convocortex-stt-launcher.cs" />
   </ItemGroup>

@@ -15,6 +15,47 @@ from pathlib import Path
 logger = logging.getLogger("STT")
 
 
+def _now_iso8601_utc() -> str:
+    from datetime import datetime, timezone
+
+    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _canonical_envelope(*, source: str, payload: dict, utterance_id: str = "", correlation_id: str = "") -> dict:
+    event_id = correlation_id or utterance_id or f"stt-{int(time.time() * 1000)}"
+    return {
+        "schema_version": "v1alpha1",
+        "event_id": event_id,
+        "correlation_id": correlation_id or utterance_id,
+        "workflow": "basic-companion",
+        "source": source,
+        "published_at": _now_iso8601_utc(),
+        "payload": payload,
+    }
+
+
+def _release_common_modifiers(keyboard):
+    for key_name in (
+        "shift",
+        "left shift",
+        "right shift",
+        "ctrl",
+        "left ctrl",
+        "right ctrl",
+        "alt",
+        "left alt",
+        "right alt",
+        "alt gr",
+        "windows",
+        "left windows",
+        "right windows",
+    ):
+        try:
+            keyboard.release(key_name)
+        except Exception:
+            continue
+
+
 def _load_keyboard():
     try:
         import keyboard
@@ -111,9 +152,13 @@ def _restore_clipboard_state(
 
 
 def _emit_text_via_typing(keyboard, content: str, press_enter_after: bool):
-    keyboard.write(content, delay=0)
-    if press_enter_after:
-        keyboard.press_and_release("enter")
+    _release_common_modifiers(keyboard)
+    try:
+        keyboard.write(content, delay=0)
+        if press_enter_after:
+            keyboard.press_and_release("enter")
+    finally:
+        _release_common_modifiers(keyboard)
 
 
 def _emit_text_via_clipboard(
@@ -129,6 +174,7 @@ def _emit_text_via_clipboard(
     post_paste_enter_delay_ms: int,
     logger_label: str,
 ):
+    _release_common_modifiers(keyboard)
     _open_clipboard_with_retry(win32clipboard, clipboard_open_retry_count, clipboard_open_retry_delay_ms)
     try:
         saved_text, saved_formats = _capture_clipboard_state(win32clipboard, win32con)
@@ -137,11 +183,14 @@ def _emit_text_via_clipboard(
     finally:
         win32clipboard.CloseClipboard()
 
-    keyboard.press_and_release("ctrl+v")
-    if press_enter_after:
-        if post_paste_enter_delay_ms > 0:
-            time.sleep(post_paste_enter_delay_ms / 1000.0)
-        keyboard.press_and_release("enter")
+    try:
+        keyboard.press_and_release("ctrl+v")
+        if press_enter_after:
+            if post_paste_enter_delay_ms > 0:
+                time.sleep(post_paste_enter_delay_ms / 1000.0)
+            keyboard.press_and_release("enter")
+    finally:
+        _release_common_modifiers(keyboard)
 
     restore_thread = threading.Thread(
         target=_restore_clipboard_state,
@@ -219,7 +268,7 @@ def make_file_buffer(cfg: dict):
     sep = bcfg["separator"]
     clear_after_release = bool(bcfg.get("clear_after_release", True))
     reset_after_each_message = bool(bcfg.get("reset_after_each_message", False))
-    undo_history_limit = max(0, int(bcfg.get("undo_history_limit", 10)))
+    rewind_history_limit = max(0, int(bcfg.get("rewind_history_limit", 10)))
     release_method = str(bcfg.get("release_method", "type_keys")).strip().lower()
     clipboard_restore_delay_ms = max(0, int(bcfg.get("clipboard_restore_delay_ms", 250)))
     clipboard_open_retry_count = max(1, int(bcfg.get("clipboard_open_retry_count", 8)))
@@ -228,7 +277,7 @@ def make_file_buffer(cfg: dict):
     lock = threading.Lock()
     enabled_lock = threading.Lock()
     enabled_state = [False]
-    undo_history = deque(maxlen=undo_history_limit) if undo_history_limit > 0 else None
+    rewind_history = deque(maxlen=rewind_history_limit) if rewind_history_limit > 0 else None
     release_lock = threading.Lock()
     last_released_content = [""]
 
@@ -254,22 +303,22 @@ def make_file_buffer(cfg: dict):
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(content, encoding="utf-8")
 
-    def _remember_undo(previous: str, next_content: str):
-        if undo_history is None or previous == next_content:
+    def _remember_rewind(previous: str, next_content: str):
+        if rewind_history is None or previous == next_content:
             return
-        undo_history.append(previous)
+        rewind_history.append(previous)
 
     def _set_buffer(content: str):
         with lock:
             previous = _read_buffer()
-            _remember_undo(previous, content)
+            _remember_rewind(previous, content)
             _write_buffer(content)
 
     def _append_buffer(text: str):
         with lock:
             existing = "" if reset_after_each_message else _read_buffer()
             combined = (existing + sep + text) if existing else text
-            _remember_undo(existing, combined)
+            _remember_rewind(existing, combined)
             _write_buffer(combined)
 
     def _append_external_text(text: str):
@@ -292,17 +341,15 @@ def make_file_buffer(cfg: dict):
         _set_buffer("")
         logger.info("[file_buffer] cleared")
 
-    def _undo_buffer():
-        if undo_history is None:
-            logger.info("[file_buffer] Undo ignored (undo_history_limit=0).")
+    def _rewind_buffer():
+        if rewind_history is None:
             return
         with lock:
-            if not undo_history:
-                logger.info("[file_buffer] Undo ignored (history empty).")
+            if not rewind_history:
                 return
-            restored = undo_history.pop()
+            restored = rewind_history.pop()
             _write_buffer(restored)
-        logger.info(f"[file_buffer] undo restored {len(restored)} chars")
+        logger.info(f"[file_buffer] rewind restored {len(restored)} chars")
 
     def _release_via_clipboard(content: str, press_enter_after: bool):
         assert keyboard is not None
@@ -322,29 +369,44 @@ def make_file_buffer(cfg: dict):
                 logger_label="file_buffer",
             )
 
+    def _compose_release_content(inline_text: str = "") -> str:
+        with lock:
+            existing = "" if reset_after_each_message else _read_buffer()
+        text = str(inline_text or "")
+        if text:
+            return (existing + sep + text) if existing else text
+        return existing
+
+    def _commit_released_content(content: str, *, clear_buffer: bool | None = None):
+        final_content = str(content or "")
+        should_clear = clear_after_release if clear_buffer is None else bool(clear_buffer)
+        with lock:
+            current = _read_buffer()
+            if current != final_content:
+                _remember_rewind(current, final_content)
+                if not should_clear:
+                    _write_buffer(final_content)
+            if should_clear:
+                persisted = final_content if current != final_content else current
+                _remember_rewind(persisted, "")
+                _write_buffer("")
+        last_released_content[0] = final_content
+
     def _release_buffer(press_enter_after: bool = False):
         if keyboard is None:
             logger.warning("[file_buffer] Release ignored: keyboard not installed.")
             return
-        with lock:
-            content = _read_buffer()
+        content = _compose_release_content()
         if not content:
             if press_enter_after:
                 keyboard.press_and_release("enter")
                 logger.info("[file_buffer] buffer empty; sent enter only")
-            else:
-                logger.info("[file_buffer] Release ignored: buffer is empty.")
             return
         if release_method == "paste_preserve_clipboard":
             _release_via_clipboard(content, press_enter_after)
         else:
             _emit_text_via_typing(keyboard, content, press_enter_after)
-        last_released_content[0] = content
-        if clear_after_release:
-            with lock:
-                current = _read_buffer()
-                _remember_undo(current, "")
-                _write_buffer("")
+        _commit_released_content(content)
         logger.info(
             f"[file_buffer] released {len(content)} chars via {release_method}"
             + (" + enter" if press_enter_after else "")
@@ -353,7 +415,6 @@ def make_file_buffer(cfg: dict):
     def _repeat_last_released_buffer(press_enter_after: bool = False):
         content = last_released_content[0]
         if not content:
-            logger.info("[file_buffer] Repeat ignored: no released buffer in memory.")
             return
         if release_method == "paste_preserve_clipboard":
             _release_via_clipboard(content, press_enter_after)
@@ -367,41 +428,25 @@ def make_file_buffer(cfg: dict):
     def _restore_last_released_buffer():
         content = last_released_content[0]
         if not content:
-            logger.info("[file_buffer] Revert ignored: no released buffer in memory.")
             return
         _set_buffer(content)
         logger.info(f"[file_buffer] restored last released buffer ({len(content)} chars)")
 
     def file_buffer(event: dict):
         actions = event.get("actions", {}) or {}
-        if actions.get("undo_file_buffer"):
-            if not is_enabled():
-                logger.info("[file_buffer] Undo ignored (disabled).")
-                return
-            _undo_buffer()
+        if actions.get("rewind_file_buffer"):
+            _rewind_buffer()
             return
         if actions.get("restore_last_released_buffer"):
-            if not is_enabled():
-                logger.info("[file_buffer] Revert ignored (disabled).")
-                return
             _restore_last_released_buffer()
             return
         if actions.get("repeat_last_released_buffer"):
-            if not is_enabled():
-                logger.info("[file_buffer] Repeat ignored (disabled).")
-                return
             _repeat_last_released_buffer(bool(actions.get("press_enter_after")))
             return
         if actions.get("clear_file_buffer"):
-            if not is_enabled():
-                logger.info("[file_buffer] Clear ignored (disabled).")
-                return
             _clear_buffer()
             return
         if actions.get("release_file_buffer"):
-            if not is_enabled():
-                logger.info("[file_buffer] Release ignored (disabled).")
-                return
             text = _final_text(event, cfg)
             if text:
                 _append_buffer(text)
@@ -419,7 +464,16 @@ def make_file_buffer(cfg: dict):
             return _read_buffer()
 
     file_buffer.__name__ = "file_buffer"
-    return file_buffer, _clear_buffer, set_enabled, is_enabled, _get_buffer_content, _append_external_text
+    return (
+        file_buffer,
+        _clear_buffer,
+        set_enabled,
+        is_enabled,
+        _get_buffer_content,
+        _append_external_text,
+        _compose_release_content,
+        _commit_released_content,
+    )
 
 
 # ── Type at cursor ────────────────────────────────────────────────────────────
@@ -438,11 +492,11 @@ def make_type_at_cursor(cfg: dict):
     clipboard_open_retry_count = max(1, int(tcfg.get("clipboard_open_retry_count", 8)))
     clipboard_open_retry_delay_ms = max(1, int(tcfg.get("clipboard_open_retry_delay_ms", 25)))
     post_paste_enter_delay_ms = max(0, int(tcfg.get("post_paste_enter_delay_ms", 0)))
-    revert_mode = str(tcfg.get("revert_mode", tcfg.get("undo_mode", "off"))).strip().lower()
+    revert_mode = str(tcfg.get("revert_mode", "off")).strip().lower()
     if revert_mode not in {"off", "ctrl+z", "backspace"}:
         logger.warning(f"[type_at_cursor] Invalid revert_mode={revert_mode!r}; using 'off'.")
         revert_mode = "off"
-    revert_backspace_count = max(1, int(tcfg.get("revert_backspace_count", tcfg.get("undo_backspace_count", 24))))
+    revert_backspace_count = max(1, int(tcfg.get("revert_backspace_count", 24)))
     win32clipboard, win32con = None, None
     if release_method == "paste_preserve_clipboard":
         win32clipboard, win32con = _load_win32_clipboard()
@@ -465,7 +519,8 @@ def make_type_at_cursor(cfg: dict):
 
     def revert_last():
         if revert_mode == "off":
-            logger.info("[type_at_cursor] Revert ignored (revert_mode=off).")
+            keyboard.press_and_release("ctrl+z")
+            logger.info("[type_at_cursor] Revert sent via ctrl+z fallback")
             return
         if revert_mode == "ctrl+z":
             keyboard.press_and_release("ctrl+z")
@@ -477,7 +532,7 @@ def make_type_at_cursor(cfg: dict):
 
     def type_at_cursor(event: dict):
         actions = event.get("actions", {}) or {}
-        if actions.get("undo_type_at_cursor"):
+        if actions.get("rewind_type_at_cursor"):
             revert_last()
             return
         if not is_enabled():
@@ -547,36 +602,53 @@ def make_nats_publisher(cfg: dict):
     t.start()
 
     def _normalize_event_for_nats(event: dict) -> tuple[str, dict] | None:
+        if event.get("suppress_nats"):
+            return None
         etype = str(event.get("type", "system") or "system").strip()
-        if etype in {"partial", "final"}:
+        if etype in {"partial", "final", "buffer_released"}:
             text = str(event.get("text") or "")
             if not text.strip():
                 return None
+            normalized_type = "final" if etype == "buffer_released" else etype
+            utterance_id = ""
+            if event.get("epoch") is not None:
+                utterance_id = str(int(event["epoch"]))
             payload = {
-                "type": etype,
+                "utterance_id": utterance_id,
                 "text": text,
             }
-            if event.get("epoch") is not None:
-                payload["utterance_id"] = int(event["epoch"])
-            if event.get("t") is not None:
-                payload["utterance_s"] = float(event["t"])
-            if event.get("inference_ms") is not None:
-                payload["inference_ms"] = int(event["inference_ms"])
             speaker = str(event.get("speaker") or "").strip()
             if speaker:
                 payload["speaker"] = speaker
-            return etype, payload
+            if event.get("replayed"):
+                payload["replayed"] = True
+            if event.get("released_by_recognize"):
+                payload["released_by_recognize"] = True
+            return normalized_type, _canonical_envelope(
+                source="convocortex-stt",
+                utterance_id=utterance_id,
+                correlation_id=utterance_id,
+                payload=payload,
+            )
         if etype == "status":
             value = str(event.get("value") or "").strip()
             if not value:
                 return None
-            return etype, {"type": "status", "value": value}
+            return etype, _canonical_envelope(
+                source="convocortex-stt",
+                payload={"status": value},
+            )
         if etype == "system":
-            normalized = {"type": "system"}
+            normalized = {}
             for key in ("event", "device", "mode", "models", "output_mode"):
                 if key in event:
                     normalized[key] = event[key]
-            return etype, normalized
+            if not normalized:
+                return None
+            return etype, _canonical_envelope(
+                source="convocortex-stt",
+                payload=normalized,
+            )
         return None
 
     def nats_publisher(event: dict):
@@ -586,6 +658,7 @@ def make_nats_publisher(cfg: dict):
         etype, payload = normalized
         subj  = f"{subject}.{etype}"
         data  = json.dumps(payload).encode()
+        logger.info(f"[nats] publish {subj} {json.dumps(payload, ensure_ascii=False)}")
         asyncio.run_coroutine_threadsafe(_publish(subj, data), loop)
 
     nats_publisher.__name__ = "nats_publisher"
@@ -609,22 +682,33 @@ def register_all(cfg: dict, register) -> dict:
 
     result = make_file_buffer(cfg)
     if result:
-        fn, reset, set_enabled, is_enabled, get_content, append_external_text = result
+        (
+            fn,
+            reset,
+            set_enabled,
+            is_enabled,
+            get_content,
+            append_external_text,
+            compose_release_content,
+            commit_released_content,
+        ) = result
         register(fn)
         extras["file_buffer_clear"] = reset
         extras["file_buffer_set_enabled"] = set_enabled
         extras["file_buffer_is_enabled"] = is_enabled
         extras["file_buffer_get_content"] = get_content
         extras["file_buffer_append_text"] = append_external_text
+        extras["file_buffer_compose_release_content"] = compose_release_content
+        extras["file_buffer_commit_released_content"] = commit_released_content
         logger.info(f"[handler] file_buffer -> {out['file_buffer']['path']}")
 
     result = make_type_at_cursor(cfg)
     if result:
         fn, set_enabled, toggle_enabled, is_enabled = result
         register(fn)
-        extras["type_at_cursor_set_enabled"] = set_enabled
-        extras["type_at_cursor_toggle"] = toggle_enabled
-        extras["type_at_cursor_is_enabled"] = is_enabled
+        extras["cursor_output_set_enabled"] = set_enabled
+        extras["cursor_output_toggle"] = toggle_enabled
+        extras["cursor_output_is_enabled"] = is_enabled
         logger.info("[handler] type_at_cursor")
 
     if cfg["nats"]["enabled"]:
